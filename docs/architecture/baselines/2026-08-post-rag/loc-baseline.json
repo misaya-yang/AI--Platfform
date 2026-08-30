@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
+  "base_git_sha": "4e3805409a5bb2a3d0231a8576a58cd9ced537dc",
   "baseline_id": "2026-08-post-rag",
   "generator": "scripts/inventory/generate_baselines.py",
   "methodology": [
@@ -33,7 +33,7 @@
       {
         "file": "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
         "is_test": false,
-        "lines": 4739,
+        "lines": 4735,
         "unit": "knowledge-service"
       },
       {
@@ -81,7 +81,7 @@
       {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/worker.py",
         "is_test": false,
-        "lines": 2990,
+        "lines": 2989,
         "unit": "knowledge-service"
       },
       {
@@ -189,7 +189,7 @@
       {
         "file": "tests/scripts/test_validate_env_quickstart.py",
         "is_test": true,
-        "lines": 1841,
+        "lines": 1833,
         "unit": "tests"
       },
       {
@@ -315,7 +315,7 @@
       {
         "file": "tests/services/knowledge/test_retrieve_batch.py",
         "is_test": true,
-        "lines": 1308,
+        "lines": 1298,
         "unit": "tests"
       },
       {
@@ -369,7 +369,7 @@
       {
         "file": "tests/services/agent_runtime/test_model_plane.py",
         "is_test": true,
-        "lines": 1212,
+        "lines": 1204,
         "unit": "tests"
       },
       {
@@ -457,12 +457,6 @@
         "unit": "tests"
       },
       {
-        "file": "src/api/v1/responses.py",
-        "is_test": false,
-        "lines": 1047,
-        "unit": "gateway"
-      },
-      {
         "file": "tests/services/knowledge/test_ingestion_identity_fence.py",
         "is_test": true,
         "lines": 1043,
@@ -479,6 +473,12 @@
         "is_test": true,
         "lines": 1030,
         "unit": "tests"
+      },
+      {
+        "file": "src/api/v1/responses.py",
+        "is_test": false,
+        "lines": 1028,
+        "unit": "gateway"
       },
       {
         "file": "tests/database/test_agent_runtime_thread_store_migration.py",
@@ -547,16 +547,16 @@
         "unit": "tests"
       },
       {
-        "file": "apps/knowledge-service/src/knowledge_service/main.py",
-        "is_test": false,
-        "lines": 956,
-        "unit": "knowledge-service"
-      },
-      {
         "file": "apps/local-node/scripts/local_live_acceptance.py",
         "is_test": false,
         "lines": 956,
         "unit": "local-node"
+      },
+      {
+        "file": "apps/knowledge-service/src/knowledge_service/main.py",
+        "is_test": false,
+        "lines": 955,
+        "unit": "knowledge-service"
       },
       {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/chunking_manager.py",
@@ -607,12 +607,6 @@
         "unit": "gateway"
       },
       {
-        "file": "tests/database/test_migration_authority_runner_recovery.py",
-        "is_test": true,
-        "lines": 890,
-        "unit": "tests"
-      },
-      {
         "file": "src/api/v1/quota.py",
         "is_test": false,
         "lines": 883,
@@ -628,6 +622,12 @@
         "file": "tests/services/eval/test_agent_observation_adapter.py",
         "is_test": true,
         "lines": 879,
+        "unit": "tests"
+      },
+      {
+        "file": "tests/database/test_migration_authority_runner_recovery.py",
+        "is_test": true,
+        "lines": 878,
         "unit": "tests"
       },
       {
@@ -711,7 +711,7 @@
       {
         "file": "tests/api/test_kb_proxy_body_limits.py",
         "is_test": true,
-        "lines": 833,
+        "lines": 832,
         "unit": "tests"
       },
       {
@@ -757,7 +757,7 @@
       {
         "file": "web/src/pages/assistant/hooks/useChatSession.ts",
         "is_test": false,
-        "lines": 3773,
+        "lines": 3765,
         "unit": "other"
       },
       {
@@ -787,7 +787,7 @@
       {
         "file": "web/src/pages/knowledge/detail/DocumentsTab.tsx",
         "is_test": false,
-        "lines": 1694,
+        "lines": 1691,
         "unit": "other"
       },
       {
@@ -799,7 +799,7 @@
       {
         "file": "web/src/pages/assistant/index.tsx",
         "is_test": false,
-        "lines": 1486,
+        "lines": 1485,
         "unit": "other"
       },
       {
@@ -947,15 +947,15 @@
         "unit": "other"
       },
       {
-        "file": "web/src/pages/assistant/components/buildTimeline.ts",
-        "is_test": false,
-        "lines": 712,
-        "unit": "other"
-      },
-      {
         "file": "web/src/components/agent/AgentTimeline.tsx",
         "is_test": false,
         "lines": 710,
+        "unit": "other"
+      },
+      {
+        "file": "web/src/pages/assistant/components/buildTimeline.ts",
+        "is_test": false,
+        "lines": 703,
         "unit": "other"
       },
       {
@@ -1133,24 +1133,24 @@
   },
   "totals": {
     "python": {
-      "files": 1260,
-      "lines": 437961
+      "files": 1277,
+      "lines": 442706
     },
     "python_production": {
-      "files": 709,
-      "lines": 276073
+      "files": 716,
+      "lines": 278527
     },
     "rust_overlay": {
       "files": 88,
-      "lines": 55305
+      "lines": 55577
     },
     "typescript": {
-      "files": 369,
-      "lines": 104478
+      "files": 384,
+      "lines": 106082
     },
     "typescript_production": {
-      "files": 310,
-      "lines": 88907
+      "files": 318,
+      "lines": 89716
     }
   }
 }

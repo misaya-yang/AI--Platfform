@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
+  "base_git_sha": "4e3805409a5bb2a3d0231a8576a58cd9ced537dc",
   "baseline_id": "2026-08-post-rag",
   "compose_files": {
     "docker-compose.build.yml": {
@@ -14,6 +14,7 @@
     "docker-compose.compact.yml": {
       "exists": true,
       "services": [
+        "agent-runtime",
         "gateway",
         "knowledge-service",
         "knowledge-worker"
@@ -31,6 +32,7 @@
       "exists": true,
       "services": [
         "agent-capability-worker",
+        "agent-runtime",
         "gateway",
         "knowledge-service",
         "knowledge-worker"
@@ -40,6 +42,7 @@
       "exists": true,
       "services": [
         "agent-capability-worker",
+        "agent-runtime",
         "gateway",
         "knowledge-service",
         "knowledge-worker"
@@ -114,7 +117,7 @@
     "route_decorator_count": 90,
     "route_file_count": 6
   },
-  "manifest_sha256": "507747fa5912eb09519025b3b388d75e97aaf23bc898592dd05e8b3f6ce70584",
+  "manifest_sha256": "81ccfd3a9a2304a16dab280776c8e494fc89c69df4db34db8a20c2f82b2829cd",
   "schema": "ai-gateway/baseline/service-topology/v1",
   "services": [
     {
@@ -295,7 +298,7 @@
       "exposure": "private",
       "health_contract": {
         "kind": "gateway-dependency",
-        "source_key": "agent_capability_worker"
+        "source_key": "capability_worker"
       },
       "image_artifact": {
         "default_version": "candidate",

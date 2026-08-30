@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
+  "base_git_sha": "4e3805409a5bb2a3d0231a8576a58cd9ced537dc",
   "baseline_id": "2026-08-post-rag",
   "generator": "scripts/inventory/generate_baselines.py",
   "known_gap_context": "The frontend type-check gate historically checked zero files (kb-rag-ui-t5 loop-state notes); its green results were no-ops. That is an ARC-00B fix target, recorded here so the skip baseline and the false-green gate list stay in one place.",
@@ -57,7 +57,7 @@
       {
         "file": "tests/database/test_migration_authority_roles_grants.py",
         "kind": "pytest.skip (runtime)",
-        "line": 550,
+        "line": 633,
         "reason": "ARC03_SCRATCH_DATABASE_URL is not configured",
         "target": "<runtime>"
       },

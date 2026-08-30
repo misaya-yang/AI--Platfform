@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
+  "base_git_sha": "4e3805409a5bb2a3d0231a8576a58cd9ced537dc",
   "baseline_id": "2026-08-post-rag",
   "declared_dependencies": {
     "ai-gateway-contracts": {
@@ -272,6 +272,7 @@
           "ai_gateway_core.persistence.repositories.mcp_repository",
           "ai_gateway_core.proxy",
           "ai_gateway_core.proxy.drain",
+          "ai_gateway_core.proxy.request_id_middleware",
           "ai_gateway_core.proxy.sse_heartbeat",
           "ai_gateway_core.proxy.version_middleware",
           "ai_gateway_core.quiz",
@@ -292,7 +293,7 @@
           "ai_gateway_core.tasks",
           "ai_gateway_core.tracing"
         ],
-        "importing_file_count": 150,
+        "importing_file_count": 152,
         "importing_files": [
           "src/adapters/base.py",
           "src/adapters/comfyui.py",
@@ -373,6 +374,7 @@
           "src/core/gateway/validator.py",
           "src/core/middleware/_streaming/auth.py",
           "src/core/middleware/_streaming/logging.py",
+          "src/core/middleware/_streaming/request_context.py",
           "src/core/middleware/_streaming/tracing.py",
           "src/core/middleware/rate_limit_http.py",
           "src/core/middleware/streaming.py",
@@ -418,6 +420,7 @@
           "src/services/eval/kb_ragas_service.py",
           "src/services/eval/trace_capture.py",
           "src/services/eval/trace_retention_scheduler.py",
+          "src/services/health_contract.py",
           "src/services/images/repository.py",
           "src/services/images/service.py",
           "src/services/knowledge_authz.py",
@@ -512,7 +515,7 @@
         "to_unit": "ai-gateway-core"
       }
     ],
-    "rule": "AGENTS.md: src/ and apps/* are siblings that may depend on packages/ai-gateway-core; they must not import each other, and one app must not import another. Static enforcement is an ARC-00B gate.",
+    "rule": "docs/harness/architecture.md: src/ and apps/* are siblings that may depend on packages/ai-gateway-core; they must not import each other, and one app must not import another. Static enforcement is an ARC-00B gate.",
     "violations": [
       {
         "allowed_by_agents_md": false,

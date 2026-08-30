@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
+  "base_git_sha": "4e3805409a5bb2a3d0231a8576a58cd9ced537dc",
   "baseline_id": "2026-08-post-rag",
   "frozen": {
     "capability_v2": {
@@ -242,7 +242,7 @@
         "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
         "file_count": 103,
         "schema_version": "ai-platform/agent-runtime-overlay/v1",
-        "sha256": "566aa9e17b93730f6d8aeed243dd3d8c49b3f70379b60b7b3948dceac631dd61",
+        "sha256": "c489b7e4d1479ec3d761bcfbcaf3c32e1eed0ca444e1be8edb2346ce000651ef",
         "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
         "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
       }
@@ -288,12 +288,12 @@
         "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
         "file_count": 103,
         "schema_version": "ai-platform/agent-runtime-overlay/v1",
-        "sha256": "566aa9e17b93730f6d8aeed243dd3d8c49b3f70379b60b7b3948dceac631dd61",
+        "sha256": "c489b7e4d1479ec3d761bcfbcaf3c32e1eed0ca444e1be8edb2346ce000651ef",
         "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
         "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
       },
       "path": "rust/agent-runtime-overlay/manifest.json",
-      "sha256": "33ecf954162954cceb5696a57d5843abb2e043b08568c698087406a1ce33c98c"
+      "sha256": "4b80eb137dbcceb36cbfef2fc287a51f464c810cb578d8fabff2da3eb6d3d7a5"
     },
     "sse_fixture": {
       "bytes": 1868,
