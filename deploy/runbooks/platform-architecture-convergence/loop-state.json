@@ -1,253 +1,64 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
   "lifecycle": "active",
-  "goal": "Converge the platform onto the ADR-008 accepted shape — three bounded contexts, polyglot coexistence, no new resident services, same-database role separation — with trustworthy gates, truthful ledgers, frozen facts/contracts, and zero public-contract drift.",
+  "goal": "Converge the platform onto ADR-008 with trustworthy gates, one Agent kernel, one database authority, explicit service ownership and evidence-backed release behavior.",
   "prd": "docs/plans/platform-architecture-convergence-prd-2026-08.md",
   "adr": "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
-  "cycle": [
-    "observe",
-    "freeze",
-    "act",
-    "verify_direct",
-    "review",
-    "repair",
-    "integrate_direct",
-    "decide"
-  ],
-  "active_phase": "ARC-00B",
-  "active_feature": "ARC-F00B",
-  "iteration": 2,
+  "cycle": ["observe", "freeze", "act", "verify_direct", "review", "repair", "integrate_direct", "decide"],
+  "active_phase": "ARC-08",
+  "active_feature": "ARC-F08",
+  "iteration": 10,
   "max_iterations": 10,
-  "base_sha": "336851c1",
-  "execution_model": "PRD §8 plans sequential single-owner waves. The user-directed same-directory parallel writer window on 2026-08-29 ended at the a518dd0a handoff. Codex is now the single writer; up to four parallel agents are read-only explorers/reviewers, and heavy Docker/DB/Rust/E2E/provider work remains serialized.",
-  "last_result": "2026-08-30: Codex verified clean single-worktree HEAD a518dd0a, 0 behind/17 ahead of main, with all four WIP checkpoints preserved. ARC-00B make harness-check reproduces seven missing-CI-job failures; boundary/OpenAPI/hygiene and negative self-tests pass, while LOC no-growth has two real violations. Compose ownership is still the deleted kb-rag-upgrade checkout, so no current runtime claim is valid yet.",
-  "next_action": "Finish ARC-00B CI jobs and required-result enforcement, semantically review the Web type fixes, repair both LOC violations without weakening the gate, and rerun the complete ARC-00B direct gate set.",
-  "blockers": [],
+  "base_sha": "336851c107c659342ec79aa3aa298de77b1edc68",
+  "tested_candidate_sha": "9aaa9cabcd9284b001b13f1a0b5b2a90f6de0768",
+  "tested_candidate_ahead_main": 127,
+  "execution_model": "Single writer in the current checkout. No new worktree. Docker, database, E2E and provider work were serialized; host Cargo is prohibited. No further subagents are planned for closeout.",
+  "last_result": "2026-08-30: core implementation, unit/integration gates and current-stack UI/Qwen/Knowledge/admin journeys passed. All services are healthy under the current checkout. Database baseline 2026_08_post_kb_v1 matches four fingerprints and 251 verification checks. Rollback stopped before mutation because the frozen image bundle is absent; hosted Rust CI/multi-arch and fresh-machine evidence remain unexecuted.",
+  "next_action": "Restore a digest-pinned frozen image bundle and provide hosted Rust CI/multi-arch plus fresh-machine execution, then run ARC-08 rollback/fresh/candidate-manifest gates. Do not mark these PASS until their receipts exist.",
+  "blockers": [
+    "BLOCKED_EXTERNAL_RUST_CI: no hosted fmt/check/changed-crate or multi-arch receipt for the tested SHA",
+    "BLOCKED_EXTERNAL_ARTIFACT: rollback bundle references three frozen image IDs that are absent and have no registry reference",
+    "NOT_RUN_FRESH_MACHINE: no separate fresh-machine registry pull/quickstart receipt was authorized or executed"
+  ],
   "confirmation": null,
   "phases": [
-    {
-      "id": "ARC-00A",
-      "result": "Fact + contract freeze, successor ADR, single authoritative program, terminal/superseded ledgers.",
-      "status": "review",
-      "owner": "arc-00a-agent",
-      "evidence": [
-        "docs/architecture/baselines/2026-08-post-rag/*.json",
-        "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
-        "deploy/runbooks/agent-runtime-full-rust-cutover/loop-state.json",
-        "deploy/runbooks/platform-plane-restructure/loop-state.json"
-      ],
-      "checkpoint": "8f42d655..eb4dc048"
-    },
-    {
-      "id": "ARC-00B",
-      "result": "Trustworthy gates: real type-check, offline+live OpenAPI split, static import boundary, gate schema/selector/CI, hygiene + LOC no-growth.",
-      "status": "in_progress",
-      "owner": "codex-primary",
-      "evidence": [
-        "make harness-check -> exit 2 (seven missing CI jobs)",
-        "make architecture-boundary-gate -> pass including negative self-test",
-        "make verify-openapi-contract -> pass including negative self-test",
-        "make hygiene-check -> pass including negative self-test",
-        "make loc-no-growth-gate -> exit 2 (two violations)"
-      ],
-      "checkpoint": "f327e0f0 (WIP)"
-    },
-    {
-      "id": "ARC-00C",
-      "result": "Rust build/distribution economics: per-crate artifact identity, build/update scripts, shared locks, baseline registration; absorbs PPR-01.",
-      "status": "queued",
-      "owner": null,
-      "evidence": [],
-      "checkpoint": "023b06a2 (WIP, with ARC-02B)"
-    },
-    {
-      "id": "ARC-01",
-      "result": "Assistant Gateway API modularization (src/api/v1/assistant.py split) with OpenAPI/SSE/import/error-contract parity.",
-      "status": "review",
-      "owner": "arc-01-agent",
-      "evidence": [],
-      "checkpoint": "b0cac34d"
-    },
-    {
-      "id": "ARC-01B",
-      "result": "src/services/agent_runtime/agent_runtime.py split by use case.",
-      "status": "review",
-      "owner": "arc-01-agent",
-      "evidence": [],
-      "checkpoint": "ab087b7f"
-    },
-    {
-      "id": "ARC-02",
-      "result": "Runtime control/model plane modularization, self-HTTP removal, ResolvedAgentLaunchV1, Capability V2 convergence, Rust HTTP boundary.",
-      "status": "queued",
-      "owner": null,
-      "evidence": [],
-      "checkpoint": "9fc5095f (WIP)"
-    },
-    {
-      "id": "ARC-02B",
-      "result": "Runtime/Worker HTTP boundary module split with zero wire-protocol drift.",
-      "status": "queued",
-      "owner": null,
-      "evidence": [],
-      "checkpoint": "023b06a2 (WIP)"
-    },
-    {
-      "id": "ARC-03",
-      "result": "Single migration authority and per-service PostgreSQL roles (runner/ledger/schema convergence, then roles/grants/adoption).",
-      "status": "queued",
-      "owner": null,
-      "evidence": [],
-      "checkpoint": "ec487d80 (WIP)"
-    },
-    {
-      "id": "ARC-04",
-      "result": "Shrink ai-gateway-core, establish the I/O-free contracts layer, allowlist gate, inventory report.",
-      "status": "review",
-      "owner": "arc-04-agent",
-      "evidence": [],
-      "checkpoint": "11acba6d..e1af4a35"
-    },
-    {
-      "id": "ARC-05",
-      "result": "Durable long jobs, dependency health, service identity, end-to-end trace.",
-      "status": "queued",
-      "owner": null,
-      "evidence": []
-    },
-    {
-      "id": "ARC-06",
-      "result": "Compact/Scale deployment modes, admin architecture-status page, topology ownership.",
-      "status": "queued",
-      "owner": null,
-      "evidence": []
-    },
-    {
-      "id": "ARC-07",
-      "result": "Repository quality and evidence governance (historical backlog cleanup, rule re-verification).",
-      "status": "queued",
-      "owner": null,
-      "evidence": []
-    },
-    {
-      "id": "ARC-08",
-      "result": "Unified release compatibility matrix, final regression, rollback, fresh-environment proof; retires superseded docs.",
-      "status": "queued",
-      "owner": null,
-      "evidence": []
-    }
+    {"id": "ARC-00A", "result": "Fact and contract freeze, ADR and one program truth.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-00A.yml"], "checkpoint": "30f426ad..fa8dd66a"},
+    {"id": "ARC-00B", "result": "Trustworthy changed-path, CI, OpenAPI, boundary, hygiene and LOC gates.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-00B.yml"], "checkpoint": "f327e0f0..9aaa9cab"},
+    {"id": "ARC-00C", "result": "Resource-safe Rust artifact identity/build/update/lock tooling.", "status": "blocked", "owner": "codex-primary", "evidence": ["receipts/ARC-00C.yml"], "checkpoint": "023b06a2..9aaa9cab"},
+    {"id": "ARC-01", "result": "Assistant Gateway API modularization with public contract parity.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-01.yml"], "checkpoint": "b0cac34d..9aaa9cab"},
+    {"id": "ARC-01B", "result": "Agent Runtime Gateway API split with stable seams and behavior.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-01B.yml"], "checkpoint": "ab087b7f..9aaa9cab"},
+    {"id": "ARC-02", "result": "Unified control/model launch, Capability V2 and no Gateway self-HTTP.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-02.yml"], "checkpoint": "9fc5095f..9aaa9cab"},
+    {"id": "ARC-02B", "result": "Rust Runtime/Worker HTTP boundaries with preserved live wire behavior.", "status": "blocked", "owner": "codex-primary", "evidence": ["receipts/ARC-02B.yml"], "checkpoint": "023b06a2..9aaa9cab"},
+    {"id": "ARC-03", "result": "Single migration authority, adopted baseline and per-service roles.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-03.yml"], "checkpoint": "ec487d80..4d579096"},
+    {"id": "ARC-04", "result": "I/O-free contracts layer and bounded core compatibility shims.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-04.yml"], "checkpoint": "11acba6d..750b25db"},
+    {"id": "ARC-05", "result": "Durable jobs, health/degradation, identity and trace closure.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-05.yml"], "checkpoint": "160a24d3..d1732363"},
+    {"id": "ARC-06", "result": "Topology modes, singleton guards and admin architecture status.", "status": "awaiting_final_live", "owner": "codex-primary", "evidence": ["receipts/ARC-06.yml"], "checkpoint": "fa46c80d..525d2e81"},
+    {"id": "ARC-07", "result": "Repository quality and evidence governance.", "status": "verified", "owner": "codex-primary", "evidence": ["receipts/ARC-07.yml"], "checkpoint": "951468c7..9aaa9cab"},
+    {"id": "ARC-08", "result": "Immutable release manifest, fresh environment and rollback closure.", "status": "blocked", "owner": "codex-primary", "evidence": ["receipts/ARC-08.yml"], "checkpoint": "89301d5c..9aaa9cab"}
   ],
   "features": [
-    {
-      "id": "ARC-F00A",
-      "phase_id": "ARC-00A",
-      "description": "Post-RAG facts, contracts, ADR and program authority are reproducible and independently reviewed.",
-      "steps": ["Regenerate every baseline at the settled tree.", "Review authority and evidence independence, then record a receipt."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F00B",
-      "phase_id": "ARC-00B",
-      "description": "Changed paths select real non-zero gates and CI proves every required result exists.",
-      "steps": ["Run positive and negative gate tests.", "Run Web app/node checks and CI selector enforcement without unexpected skips."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F00C",
-      "phase_id": "ARC-00C",
-      "description": "Runtime and Worker artifacts have correct source identity and resource-safe build/update/lock tooling.",
-      "steps": ["Verify identity and lock self-tests.", "Build or pull same-revision candidates under the declared resource policy."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F01",
-      "phase_id": "ARC-01",
-      "description": "Assistant facade is modular while public OpenAPI, SSE, errors and import seams remain compatible.",
-      "steps": ["Run scoped route and contract tests.", "Complete independent review and repair blocker/high findings."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F01B",
-      "phase_id": "ARC-01B",
-      "description": "Agent Runtime API surface is modular with unchanged routes, permissions, streams and monkeypatch seams.",
-      "steps": ["Run scoped route/seam tests.", "Complete independent review and repair blocker/high findings."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F02",
-      "phase_id": "ARC-02",
-      "description": "All entrypoints resolve one launch contract, Capability V2 projects once, and Gateway self-HTTP is absent.",
-      "steps": ["Wire control/model facades and launch/catalog services.", "Prove cross-entrypoint, lease/proof, ledger and failure-path parity."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F02B",
-      "phase_id": "ARC-02B",
-      "description": "Rust Runtime and Worker HTTP boundaries are split without wire or recovery drift.",
-      "steps": ["Run fmt/check and changed-crate tests with one build job.", "Replay fixtures and restart/cancel/recovery contracts."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F03",
-      "phase_id": "ARC-03",
-      "description": "One migration authority and least-privilege service roles converge every supported database source.",
-      "steps": ["Run the complete scratch PostgreSQL source/fingerprint/adoption matrix.", "Run checksum/crash/concurrency/role/rollback positive and negative tests."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F04",
-      "phase_id": "ARC-04",
-      "description": "Cross-service contracts are I/O-free and compatibility shims remain identity-preserving and bounded.",
-      "steps": ["Run package/boundary/import tests.", "Review consumers, shim lifetime and generated-authority claims."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F05",
-      "phase_id": "ARC-05",
-      "description": "Long jobs are durable and health, identity and trace semantics explain every failure path.",
-      "steps": ["Implement durable job and health/trace contracts.", "Prove disconnect, restart and dependency-failure terminal states."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F06",
-      "phase_id": "ARC-06",
-      "description": "Compact and scale modes are evidence-gated, single-instance limits are honest, and admins see architecture health.",
-      "steps": ["Verify mode resolution and topology ownership.", "Run resource, worker-scale and admin UI journeys."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F07",
-      "phase_id": "ARC-07",
-      "description": "Dead assets and stale guidance are evidence-governed while durable browser evidence remains portable.",
-      "steps": ["Re-audit and disposition the frozen quality backlog.", "Run hygiene, link, LOC, shim and evidence-manifest checks."],
-      "passes": false
-    },
-    {
-      "id": "ARC-F08",
-      "phase_id": "ARC-08",
-      "description": "The candidate manifest matches tested code, images, protocols and data revisions through fresh and rollback journeys.",
-      "steps": ["Run every required offline/integration/live gate with zero unexpected skips.", "Verify fresh install, paid provider and current-to-frozen-to-current rollback."],
-      "passes": false
-    }
+    {"id": "ARC-F00A", "phase_id": "ARC-00A", "description": "Post-RAG facts/contracts are reproducible and reviewed.", "steps": ["Regenerate baselines.", "Validate authority and receipt."], "passes": true},
+    {"id": "ARC-F00B", "phase_id": "ARC-00B", "description": "Changed paths select real gates and required CI results fail closed.", "steps": ["Positive/negative gate tests.", "Web and selector enforcement."], "passes": true},
+    {"id": "ARC-F00C", "phase_id": "ARC-00C", "description": "Runtime artifacts have complete local and hosted identities.", "steps": ["Local Docker identity passed.", "Hosted CI/multi-arch not run."], "passes": false},
+    {"id": "ARC-F01", "phase_id": "ARC-01", "description": "Assistant facade preserves OpenAPI/SSE/errors and live behavior.", "steps": ["Contract tests.", "Live UI/API."], "passes": true},
+    {"id": "ARC-F01B", "phase_id": "ARC-01B", "description": "Runtime API surface is modular with stable seams.", "steps": ["Isolation tests.", "Single-kernel tests."], "passes": true},
+    {"id": "ARC-F02", "phase_id": "ARC-02", "description": "All entrypoints use one launch contract with no self-HTTP.", "steps": ["Control/model/catalog tests.", "Live Assistant/Studio."], "passes": true},
+    {"id": "ARC-F02B", "phase_id": "ARC-02B", "description": "Rust HTTP split has local live proof but requires hosted crate verification.", "steps": ["Docker/wire proof passed.", "Hosted Rust checks not run."], "passes": false},
+    {"id": "ARC-F03", "phase_id": "ARC-03", "description": "One migration authority converges supported database sources and roles.", "steps": ["Scratch/live matrix.", "Role/fingerprint/recovery tests."], "passes": true},
+    {"id": "ARC-F04", "phase_id": "ARC-04", "description": "Contracts are I/O-free and shims bounded.", "steps": ["Boundary/import tests.", "Consumer review."], "passes": true},
+    {"id": "ARC-F05", "phase_id": "ARC-05", "description": "Jobs, dependency health and traces explain terminal states.", "steps": ["Direct tests.", "Live failure/recovery/UI trace."], "passes": true},
+    {"id": "ARC-F06", "phase_id": "ARC-06", "description": "Topology is guarded and visible to admins.", "steps": ["Singleton/admin current mode passed.", "Both compact/scale live modes deferred."], "passes": false},
+    {"id": "ARC-F07", "phase_id": "ARC-07", "description": "Hygiene/evidence/LOC policies fail closed.", "steps": ["Negative selftests.", "Final changed-tree gates."], "passes": true},
+    {"id": "ARC-F08", "phase_id": "ARC-08", "description": "Release manifest binds fresh and rollback receipts.", "steps": ["Current UI/provider paths passed.", "Fresh/rollback/hosted artifacts blocked."], "passes": false}
   ],
   "handoff": {
-    "to": "codex",
+    "to": "user-or-next-authorized-release-session",
     "date": "2026-08-30",
     "branch": "platform-arch-convergence-2026-08",
-    "head_sha": "a518dd0a",
+    "tested_candidate_sha": "9aaa9cabcd9284b001b13f1a0b5b2a90f6de0768",
     "document": "deploy/runbooks/platform-architecture-convergence/HANDOFF.md",
-    "implementation_present_review_pending": [
-      "ARC-00A",
-      "ARC-01",
-      "ARC-01B",
-      "ARC-04"
-    ],
-    "wip_checkpoints": {
-      "ARC-00B": "f327e0f0",
-      "ARC-03": "ec487d80",
-      "ARC-02B+ARC-00C": "023b06a2",
-      "ARC-02": "9fc5095f"
-    },
-    "cross_review_performed": false
+    "cross_review_performed": true,
+    "blocker_high_code_findings_open": 0,
+    "release_evidence_blockers_open": 3
   }
 }

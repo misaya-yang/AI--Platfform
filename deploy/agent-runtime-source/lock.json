@@ -31,8 +31,8 @@
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:0a6459c31aaf281595b35b0d3fb2b4c87909daaa50a796e4ce6d4b886d8bf888",
-        "image_ref": "local-image://sha256:0a6459c31aaf281595b35b0d3fb2b4c87909daaa50a796e4ce6d4b886d8bf888",
+        "image_digest": "sha256:9d736eb9666166d54215e675525442540384af7c21b1ef81cc63dc613dde7ad6",
+        "image_ref": "local-image://sha256:9d736eb9666166d54215e675525442540384af7c21b1ef81cc63dc613dde7ad6",
         "platforms": [
           "linux/arm64"
         ],
@@ -51,8 +51,8 @@
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:9c9c5446f082559a6a424833ed5ae60911da25afe60d6796a472ba51ad24c7c3",
-        "image_ref": "local-image://sha256:9c9c5446f082559a6a424833ed5ae60911da25afe60d6796a472ba51ad24c7c3",
+        "image_digest": "sha256:ac33b36d39462cc2d9db13d8c8f2af0eea15ff6c50054ca31945c8b0d265c3c9",
+        "image_ref": "local-image://sha256:ac33b36d39462cc2d9db13d8c8f2af0eea15ff6c50054ca31945c8b0d265c3c9",
         "platforms": [
           "linux/arm64"
         ],

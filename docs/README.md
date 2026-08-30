@@ -82,7 +82,8 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 | [`plans/rust-expansion-and-service-topology-2026-08.md`](plans/rust-expansion-and-service-topology-2026-08.md) | **superseded by queued architecture convergence** — 仅保留调查与迁移判据。 |
 | [`plans/knowledge-bm25-v2-shadow-rollout.md`](plans/knowledge-bm25-v2-shadow-rollout.md) | **active design contract, pending move to `docs/design/`** — BM25 v2 safety/rollout，不是程序状态。 |
 | [`plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md`](plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md) | **archived evidence, pending move** — 已完成的 Rust 0828 验收计划，不得重新执行。 |
-| [`plans/platform-architecture-convergence-prd-2026-08.md`](plans/platform-architecture-convergence-prd-2026-08.md) | **queued** — KB 合入后的单一主 Session：可信门禁/低内存 Rust 构建、统一 launch、模块/数据 owner、durable jobs、健康/trace、部署与仓库质量/证据治理。 |
+| [`plans/platform-architecture-convergence-prd-2026-08.md`](plans/platform-architecture-convergence-prd-2026-08.md) | **active closeout** — 核心候选 `9aaa9cab` 当前栈实机已通过；托管 Rust CI、多架构、fresh-machine 与冻结镜像回切证据仍未完成。 |
+| [`plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md`](plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md) | **queued behind architecture convergence** — 固定 upstream 快照整体同步；单一主 Session 顺序实现；以 Runtime/Worker 编译、真实 API、UI 点击、Qwen 与回切通过作为完成标准。 |
 
 ## Research
 
@@ -93,10 +94,11 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 All programs live in [`../deploy/runbooks/`](../deploy/runbooks/). Status comes from each program's
 `loop-state.json`, never from prose. The table below is a dated navigation snapshot, not a second
 state authority; lifecycle conflicts in older ledgers are a named ARC-00 cleanup. Verified
-2026-08-29 against pre-RAG `main`:
+2026-08-30 against the active program ledgers:
 
 | Program | Terminal phase | Status |
 | --- | --- | --- |
+| **`platform-architecture-convergence`** | ARC-08 | **active closeout** — ARC-00A/B、01/01B、02、03、04、05、07 verified；ARC-06 awaiting final live；ARC-00C/02B/08 blocked on hosted Rust CI/multi-arch, fresh-machine and missing frozen rollback images. |
 | **`platform-plane-restructure`** | PPR-00 → PPR-09 | **PPR-00 evidence complete; future phases paused for convergence** — PPR-01 构建经济性与 PPR-08 provider 实验将被提取，PPR-02～07/09 由 queued architecture successor ADR裁决；当前不要按旧 next_action 开工。 |
 | **`agent-runtime-full-rust-cutover`** | FRC-00 → FRC-06 | **closeout-only** — Rust 切换、验收与回滚演练已有报告；只允许核对 ledger/receipt/SHA 后终结，不得继续实现。Python AgentLoop 已删除 |
 | **`agent-runtime-single-kernel`** | CHR-00 → CHR-06 | **superseded** — CHR-05 source-lock checkpoint 后由 `agent-runtime-full-rust-cutover`（Rust kernel 迁移）接替；无新 PRD 不得重启。运行流量从未移动。 |

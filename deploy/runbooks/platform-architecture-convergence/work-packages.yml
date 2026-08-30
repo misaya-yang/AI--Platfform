@@ -7,17 +7,13 @@ program: platform-architecture-convergence
 prd: docs/plans/platform-architecture-convergence-prd-2026-08.md
 adr: docs/architecture/ADR-008-bounded-contexts-no-new-services.md
 base_sha: 336851c1            # post-RAG base (branch platform-arch-convergence-2026-08)
-head_sha_observed: a518dd0a   # Codex takeover observation; 17 commits ahead of main
+head_sha_observed: 9aaa9cab   # tested code candidate; 127 commits ahead of main
 
 execution_note: >
-  PRD §8 plans sequential single-owner waves. On 2026-08-29 the user
-  explicitly directed same-directory parallel execution of the packages
-  marked in_progress below, under mutually exclusive owned paths, with all
-  commits performed by the primary session. This deviates from
-  docs/harness/work-packages.md §1/§6 ("only one package in_progress").
-  That parallel writer window ended at the a518dd0a handoff. Preserved WIP
-  checkpoints are queued until the Codex primary session resumes them; ARC-00B
-  is the only active package now.
+  The same-directory writer window ended during closeout. The primary session
+  integrated all implementation on the current branch and serialized Docker,
+  database, E2E and provider work. No further subagents are planned. Package
+  states below distinguish verified code from unavailable release evidence.
 
 packages:
   - id: ARC-00A
@@ -25,7 +21,7 @@ packages:
       Machine-readable fact and contract freeze (service topology, data-access
       inventory, LOC/dependency/skip baselines, contract-freeze), successor
       ADR-008, single authoritative program, and terminal/superseded ledgers.
-    state: review                 # implementation present; independent review not yet complete
+    state: verified
     base_sha: 336851c1
     depends_on: []
     owned_paths:
@@ -62,7 +58,7 @@ packages:
 
   - id: ARC-00B
     result: Trustworthy gates before any module moves (real type-check, offline+live OpenAPI split, static import boundary, gate schema/selector/CI, hygiene + LOC no-growth).
-    state: in_progress            # owner codex-primary
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-00A]
     owned_paths: [web/tsconfig*.json, web/package.json, tests/harness/**, scripts/harness/**, harness.yml (integration commit only), .github/workflows/** (integration commit only)]
@@ -80,13 +76,13 @@ packages:
 
   - id: ARC-00C
     result: Rust build/distribution economics (per-source-closure artifact identity, build/update scripts, shared integration/rust-build locks, versioned multi-arch candidate images); absorbs PPR-01.
-    state: queued                 # WIP content preserved in 023b06a2; not yet resumed or verified
+    state: blocked                # local Docker candidate passed; hosted Rust CI/multi-arch not run
     base_sha: 336851c1
     depends_on: [ARC-00A]
     owned_paths: [rust/agent-runtime-overlay/manifest.json, scripts/** (build/lock scripts), Makefile (integration commit only), docs/harness/integration-and-rollback.md]
     forbidden_paths: [Runtime/Worker protocol or execution semantics, Compose business topology]
     integration_paths: [Makefile]
-    must_preserve: [Runtime image <=150 MB numeric gate, warm edit->healthy <=15 min, jobs=1 resource discipline]
+    must_preserve: [Runtime image <=150 MB numeric gate, warm edit->healthy <=15 min, no host Cargo, jobs=1 inside Docker/CI]
     direct_gates: [artifact identity recomputation, lock acquire/release/heartbeat tests]
     integration_gates: [make validate-config]
     live_gates: [builder-produced multi-arch candidate pull/identity/smoke]
@@ -98,7 +94,7 @@ packages:
 
   - id: ARC-01
     result: Assistant Gateway API modularization (src/api/v1/assistant.py split) with OpenAPI/SSE/import/error-contract parity.
-    state: review                 # scoped tests were reported green; independent review pending
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-00B]
     owned_paths: [src/api/v1/assistant.py, src/api/v1/assistant/**, tests/api/** (assistant scope)]
@@ -116,7 +112,7 @@ packages:
 
   - id: ARC-01B
     result: src/services/agent_runtime/agent_runtime.py split by use case.
-    state: review                 # implementation present at ab087b7f; independent review pending
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-01]
     owned_paths: [src/services/agent_runtime/agent_runtime.py, src/services/agent_runtime/** (split targets), tests/services/knowledge** (seam stubs only)]
@@ -134,7 +130,7 @@ packages:
 
   - id: ARC-02
     result: Runtime control/model plane modularization, Gateway self-HTTP removal, ResolvedAgentLaunchV1 contract, Capability V2 convergence.
-    state: queued                 # WIP content preserved in 9fc5095f; facade not yet rewired
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-01]
     owned_paths: [src/services/agent_runtime/**, src/services/assistant/** (launch resolution), packages/ai-gateway-core/src/ai_gateway_core/leases/** ]
@@ -152,14 +148,14 @@ packages:
 
   - id: ARC-02B
     result: Runtime/Worker HTTP boundary module split with zero wire-protocol drift.
-    state: queued                 # WIP content preserved in 023b06a2; not compiled/reviewed
+    state: blocked                # Docker/wire/live passed; hosted Rust fmt/check/tests not run
     base_sha: 336851c1
     depends_on: [ARC-00B]
     owned_paths: [rust/agent-runtime-overlay/kernel-rs/ai-platform-runtime-http/**, rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/http/**]
     forbidden_paths: [wire protocol changes, fixture rewrites]
     integration_paths: []
     must_preserve: [byte-level protocol equality against frozen fixtures (contract-freeze.json)]
-    direct_gates: [cargo test (workspace scope), fixture replay]
+    direct_gates: [hosted-CI changed-crate tests, fixture replay]
     integration_gates: [Gateway adapter tests]
     live_gates: [runtime regression gate]
     skip_policy: none
@@ -170,7 +166,7 @@ packages:
 
   - id: ARC-03
     result: Single migration authority then per-service PostgreSQL roles/grants/adoption; baseline freeze of schema fingerprints.
-    state: queued                 # WIP content preserved in ec487d80; no live PG matrix yet
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-00A]
     owned_paths: [database/**, scripts/database/**, tests/database/**]
@@ -188,7 +184,7 @@ packages:
 
   - id: ARC-04
     result: Shrink ai-gateway-core behind an I/O-free contracts layer; allowlist gate; consumption inventory report.
-    state: review                 # implementation present; independent review not yet complete
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-00A]
     owned_paths: [packages/ai-gateway-core/**, packages/ai-gateway-contracts/**, tests/packages/**]
@@ -206,7 +202,7 @@ packages:
 
   - id: ARC-05
     result: Durable long jobs, dependency health classification, service identity, end-to-end trace.
-    state: queued
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-02, ARC-03]
     owned_paths: [src/services/health/**, src/services/jobs/** (to be confirmed at observe), trace plumbing per context]
@@ -224,7 +220,7 @@ packages:
 
   - id: ARC-06
     result: Compact/Scale deployment modes, admin architecture-status page, topology ownership and single-instance guards.
-    state: queued
+    state: awaiting_final_live    # current mode/admin passed; compact+scale live pair not run
     base_sha: 336851c1
     depends_on: [ARC-05]
     owned_paths: [docker-compose*.yml (integration commits), src/api/v1/admin/** (status page), scripts/deploy/**]
@@ -242,7 +238,7 @@ packages:
 
   - id: ARC-07
     result: Repository quality and evidence governance — historical backlog cleanup, rule re-verification, evidence portability.
-    state: queued
+    state: verified
     base_sha: 336851c1
     depends_on: [ARC-00B]
     owned_paths: [docs/** (non-PRD), reports/**, tests/** (stale test cleanup), scripts/** (hygiene)]
@@ -260,7 +256,7 @@ packages:
 
   - id: ARC-08
     result: Unified release compatibility matrix, final full regression, current->frozen->current rollback, fresh-environment proof; retires superseded docs.
-    state: queued
+    state: blocked                # missing hosted Rust/fresh/frozen rollback receipts
     base_sha: 336851c1
     depends_on: [ARC-00C, ARC-01, ARC-01B, ARC-02, ARC-02B, ARC-03, ARC-04, ARC-05, ARC-06, ARC-07]
     owned_paths: [release manifest files, docs retirement list, final closeout report]

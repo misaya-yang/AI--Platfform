@@ -1,13 +1,15 @@
 # 平台架构收敛与运行边界优化 PRD
 
-**状态：** queued — `kb-rag-upgrade` 完成、验收并合入 `main` 后启动
-**版本：** 1.1（经 2026-08-29 八路只读架构审计修订）
-**日期：** 2026-08-29
+**状态：** active closeout — 核心候选 `9aaa9cab` 已通过当前栈实机；托管 Rust CI、多架构、
+fresh-machine 与冻结镜像回切证据仍 blocked/not-run，见程序 `loop-state.json`
+**版本：** 1.2（2026-08-30 事实状态更新；完成定义不降低）
+**日期：** 2026-08-30
 **产品目标：** 在不改变现有用户能力的前提下，把 Gateway、Rust Agent 执行面、Knowledge
 的数据与部署边界做实，并降低 coding agent 后续修改、评审、测试和发布的认知成本。
 **执行者：** 一个主 coding session、一个 writer worktree，顺序完成全部工作包；并行 Agent 只读探索或
 独立 review，不并行写这一大功能。
-**文档定位：** 这是下一轮实现的产品与工程合同，不是已经完成的证据，也不替代运行时测试报告。
+**文档定位：** 这是产品与工程合同；实际完成状态和运行证据以
+`deploy/runbooks/platform-architecture-convergence/` 为准。
 
 **实施启动输入：** Ultra 主 Session 启动前必须在 program baseline 中冻结：
 
