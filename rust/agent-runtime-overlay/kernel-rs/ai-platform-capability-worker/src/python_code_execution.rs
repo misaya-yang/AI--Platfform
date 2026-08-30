@@ -784,7 +784,7 @@ fn python_command(config: &LocalPythonSandboxConfig) -> Command {
             .arg("--")
             .arg("/bin/sh")
             .arg("-c")
-            .arg("mount --bind \"$PWD\" /workspace && exec \"$@\"")
+            .arg("mount --bind \"$PWD\" /workspace && cd /workspace && exec \"$@\"")
             .arg("python-sandbox")
             .arg(&config.python_binary);
         return command;
@@ -858,7 +858,7 @@ mod tests {
                     "--",
                     "/bin/sh",
                     "-c",
-                    "mount --bind \"$PWD\" /workspace && exec \"$@\"",
+                    "mount --bind \"$PWD\" /workspace && cd /workspace && exec \"$@\"",
                     "python-sandbox",
                     "/usr/local/bin/python3",
                 ]
