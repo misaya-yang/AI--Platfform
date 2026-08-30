@@ -50,9 +50,9 @@
       },
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
-        "candidate_start_allowed": false,
-        "image_digest": null,
-        "image_ref": null,
+        "candidate_start_allowed": true,
+        "image_digest": "sha256:7f45fad747dfb88cce264030655e604bc018fc2738d71662514056ce56ca8268",
+        "image_ref": "local-image://sha256:7f45fad747dfb88cce264030655e604bc018fc2738d71662514056ce56ca8268",
         "platforms": [
           "linux/arm64"
         ],
