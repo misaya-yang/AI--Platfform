@@ -1,40 +1,33 @@
-"""Event-bus exception hierarchy.
+"""Compatibility shim — implementation moved to ``ai_gateway_contracts``.
 
-A small, deliberately flat tree:
+ARC-04 first batch (2026-08-29): the event-bus error taxonomy now lives in
+``ai_gateway_contracts.event_errors`` because the envelope parser
+(``parse_envelope``) raises ``EventDeserializationError`` as part of the
+wire contract.  This module only re-exports it so existing import paths keep
+working.
 
-- ``EventBusError`` is the root — catch this if you want to swallow any
-  bus-related error without distinguishing the cause.
-- ``EventDeserializationError`` — the raw stream entry could not be
-  parsed back into a typed ``EventEnvelope`` (bad JSON, missing fields,
-  schema mismatch). Surfaced by the consumer before the handler runs.
-- ``EventHandlerError`` — the handler itself raised. The consumer
-  re-wraps user exceptions in this type so the retry/DLQ logic can
-  distinguish "we tried to deliver" from "we couldn't even deserialize".
+Consumers still importing through this path
+(reports/inventory/core-import-inventory.json, ``shim_consumers``):
+
+- core-internal: ``ai_gateway_core.events.{__init__,bus,consumer,envelope}``
+- tests: ``tests/events/test_bus_publish.py`` (direct
+  ``ai_gateway_core.events.errors`` import)
+
+Removal conditions (PRD §ARC-04 goal 5): delete this shim once every
+consumer imports ``ai_gateway_contracts.event_errors`` directly and
+``scripts/core_boundary/check_core_boundary.py`` reports zero shim consumers
+for it.  The shim identity test
+``packages/ai-gateway-contracts/tests/test_shim_identity.py`` must be removed
+together with it.
 """
 
 from __future__ import annotations
 
-
-class EventBusError(Exception):
-    """Base class for every error raised by the events subsystem."""
-
-
-class EventDeserializationError(EventBusError):
-    """Raised when a stream entry cannot be decoded into an envelope.
-
-    The consumer treats this as poison: the message is shipped straight
-    to the DLQ and ack'd, because retrying will not change the bytes.
-    """
-
-
-class EventHandlerError(EventBusError):
-    """Raised by the consumer when the registered handler raises.
-
-    Wraps the original exception in ``__cause__`` so the consumer's
-    retry/DLQ machinery can count attempts without leaking the user's
-    exception type into the bus's contract.
-    """
-
+from ai_gateway_contracts.event_errors import (  # noqa: F401
+    EventBusError,
+    EventDeserializationError,
+    EventHandlerError,
+)
 
 __all__ = [
     "EventBusError",

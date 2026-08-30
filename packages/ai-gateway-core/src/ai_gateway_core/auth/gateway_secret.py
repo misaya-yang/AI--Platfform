@@ -33,13 +33,12 @@ import hmac
 import logging
 import os
 import secrets
-import threading
 import time
-from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Protocol
+
+from ai_gateway_contracts.replay import InMemoryReplayStore, ReplayStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,50 +68,16 @@ class InvalidGatewaySecret(Exception):
     """
 
 
-class ReplayStore(Protocol):
-    """Contract for a seen-request-id store with TTL."""
-
-    def seen_or_record(self, request_id: str, ttl_ms: int) -> bool:
-        """Record ``request_id``. Return True if it was already present."""
-        ...
-
-
-class InMemoryReplayStore:
-    """LRU-bounded seen-ids store.
-
-    Safe for concurrent access within a single process. Entries expire
-    after their TTL; capacity is bounded to prevent unbounded growth.
-    """
-
-    __slots__ = ("_seen", "_lock", "_capacity")
-
-    def __init__(self, capacity: int = 10_000) -> None:
-        self._seen: OrderedDict[str, int] = OrderedDict()
-        self._lock = threading.Lock()
-        self._capacity = capacity
-
-    def seen_or_record(self, request_id: str, ttl_ms: int) -> bool:
-        now_ms = _epoch_ms()
-        with self._lock:
-            self._evict_expired(now_ms)
-            existing = self._seen.get(request_id)
-            if existing is not None and existing > now_ms:
-                return True
-            self._seen[request_id] = now_ms + ttl_ms
-            self._seen.move_to_end(request_id)
-            while len(self._seen) > self._capacity:
-                self._seen.popitem(last=False)
-            return False
-
-    def _evict_expired(self, now_ms: int) -> None:
-        stale: list[str] = []
-        for rid, expires in self._seen.items():
-            if expires <= now_ms:
-                stale.append(rid)
-            else:
-                break
-        for rid in stale:
-            self._seen.pop(rid, None)
+# ``ReplayStore`` and ``InMemoryReplayStore`` moved to
+# ``ai_gateway_contracts.replay`` (ARC-04 first batch, 2026-08-29) and are
+# re-imported above; the public names stay available from this module.
+# Removal conditions match the other ARC-04 shims: delete the re-export once
+# every consumer imports ``ai_gateway_contracts.replay`` directly and
+# ``scripts/core_boundary/check_core_boundary.py`` reports zero shim
+# consumers.  Consumers today: ``ai_gateway_core.agents`` re-export,
+# ``apps/knowledge-service/src/knowledge_service/main.py``,
+# ``tests/contract/test_gateway_secret.py``, ``tests/api/
+# test_agent_runtime_envelope.py``.
 
 
 class RedisReplayStore:
