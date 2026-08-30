@@ -855,9 +855,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- Health ---
     from .api.version import register_version_route
 
-    # The API has a real HTTP release surface.  The worker exposes probes only;
-    # its release identity is verified from the running container image and OCI
-    # labels instead of inventing a worker `/version` contract.
+    # Workers expose probes only; their release identity comes from OCI labels.
     if resolved.runtime_role != "worker":
         register_version_route(app, "knowledge-service")
 

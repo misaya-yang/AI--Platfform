@@ -20,36 +20,40 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+try:
+    from . import rust_gate_identity as _identity
+except ImportError:  # direct script execution
+    import rust_gate_identity as _identity  # type: ignore[no-redef]
+
+HEX_40 = _identity.HEX_40
+CANONICAL_UPSTREAM_URL = _identity.CANONICAL_UPSTREAM_URL
+LOCK_SCHEMA = _identity.LOCK_SCHEMA
+GateError = _identity.GateError
+LockAuthority = _identity.LockAuthority
+_load_json_object = _identity.load_json_object
+load_lock_authority = _identity.load_lock_authority
+_sha256_file = _identity.sha256_file
+_toolchain_version = _identity.toolchain_version
+validate_public_upstream_url = _identity.validate_public_upstream_url
 
 ROOT = Path(__file__).resolve().parents[2]
 RUST_ROOT = "rust"
 OVERLAY_ROOT_REL = Path("rust/agent-runtime-overlay")
 OVERLAY_WORKSPACE_REL = OVERLAY_ROOT_REL / "kernel-rs"
-OVERLAY_MANIFEST_REL = OVERLAY_ROOT_REL / "manifest.json"
+OVERLAY_MANIFEST_REL = Path("rust/agent-runtime-overlay/manifest.json")
 LOCK_REL = Path("deploy/agent-runtime-source/lock.json")
-LOCK_SCHEMA = "ai-platform/agent-runtime-source-lock/v2"
-CANONICAL_UPSTREAM_URL = "https://github.com/openai/codex.git"
 DEFAULT_EVIDENCE = ROOT / "tmp/gate-evidence/rust-changed-crate-gate.json"
 PER_CRATE_TIMEOUT_S = 55 * 60
 GATE_CONTROL_PATHS = {
     "scripts/harness/rust_changed_crate_gate.py",
+    "scripts/harness/rust_gate_identity.py",
     "tests/harness/test_rust_changed_crate_gate.py",
     "tests/scripts/test_rust_build_tooling.py",
 }
 HOSTED_CI_OVERRIDE = "AI_PLATFORM_RUST_GATE_HOSTED_CI"
-HEX_40 = re.compile(r"^[0-9a-f]{40}$")
-HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-TOOL_VERSION = re.compile(
-    r"^(?P<tool>cargo|rustc) (?P<version>[0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)"
-)
-
-class GateError(RuntimeError):
-    """The Rust gate cannot prove or execute its declared contract."""
-
-
 def require_hosted_ci(environment: dict[str, str] | None = None) -> None:
     """Refuse host Rust execution unless a hosted CI runner is explicit."""
 
@@ -62,128 +66,6 @@ def require_hosted_ci(environment: dict[str, str] | None = None) -> None:
             "host Rust execution is prohibited; rust-changed-crate-gate requires "
             "CI=true plus GITHUB_ACTIONS=true or AI_PLATFORM_RUST_GATE_HOSTED_CI=1"
         )
-
-@dataclass(frozen=True)
-class LockAuthority:
-    upstream_sha: str
-    upstream_url: str
-    cargo_version: str
-    rustc_version: str
-    toolchain_version: str
-    overlay_manifest: str
-    overlay_sha256: str
-    overlay_file_count: int
-    overlay_cargo_lock_sha256: str
-    lock_sha256: str
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as exc:
-        raise GateError(f"cannot hash {path}: {exc}") from exc
-    return digest.hexdigest()
-
-def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
-    def no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise GateError(f"{label} has duplicate key {key!r}")
-            result[key] = value
-        return result
-
-    try:
-        value = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys
-        )
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise GateError(f"{label} is unreadable: {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise GateError(f"{label} must be a JSON object: {path}")
-    return value
-
-def _required_hex(value: Any, *, length: int, label: str) -> str:
-    pattern = HEX_40 if length == 40 else HEX_64
-    if not isinstance(value, str) or pattern.fullmatch(value) is None:
-        raise GateError(f"{label} must be a lowercase {length}-character hash")
-    return value
-
-def _toolchain_version(value: Any, *, tool: str) -> str:
-    if not isinstance(value, str):
-        raise GateError(f"build.{tool} must be the exact {tool} --version output")
-    match = TOOL_VERSION.match(value)
-    if match is None or match.group("tool") != tool:
-        raise GateError(f"build.{tool} is not a valid {tool} --version output")
-    return match.group("version")
-
-def validate_public_upstream_url(url: str) -> str:
-    """Allow only the canonical credential-free HTTPS public upstream."""
-    if url != CANONICAL_UPSTREAM_URL:
-        raise GateError("source.upstream_url must be the canonical public HTTPS upstream")
-    return url
-
-def load_lock_authority(lock_path: Path) -> LockAuthority:
-    lock = _load_json_object(lock_path, label="Agent Runtime source lock")
-    if lock.get("schema_version") != LOCK_SCHEMA:
-        raise GateError(f"unsupported source lock schema: {lock.get('schema_version')!r}")
-    source = lock.get("source")
-    build = lock.get("build")
-    if not isinstance(source, dict) or not isinstance(build, dict):
-        raise GateError("source lock requires object-valued source and build sections")
-
-    upstream_sha = _required_hex(
-        source.get("upstream_sha"), length=40, label="source.upstream_sha"
-    )
-    upstream_url = source.get("upstream_url")
-    if not isinstance(upstream_url, str):
-        raise GateError("source.upstream_url is required")
-    validate_public_upstream_url(upstream_url)
-
-    cargo_version = build.get("cargo")
-    rustc_version = build.get("rustc")
-    cargo_toolchain = _toolchain_version(cargo_version, tool="cargo")
-    rustc_toolchain = _toolchain_version(rustc_version, tool="rustc")
-    if cargo_toolchain != rustc_toolchain:
-        raise GateError(
-            f"lock cargo/rustc versions disagree: {cargo_toolchain} != {rustc_toolchain}"
-        )
-    assert isinstance(cargo_version, str)
-    assert isinstance(rustc_version, str)
-
-    overlay_manifest = build.get("overlay_manifest")
-    if overlay_manifest != OVERLAY_MANIFEST_REL.as_posix():
-        raise GateError(
-            f"build.overlay_manifest must be {OVERLAY_MANIFEST_REL.as_posix()!r}"
-        )
-    overlay_file_count = build.get("overlay_file_count")
-    if (
-        isinstance(overlay_file_count, bool)
-        or not isinstance(overlay_file_count, int)
-        or overlay_file_count <= 0
-    ):
-        raise GateError("build.overlay_file_count must be a positive integer")
-
-    return LockAuthority(
-        upstream_sha=upstream_sha,
-        upstream_url=upstream_url,
-        cargo_version=cargo_version,
-        rustc_version=rustc_version,
-        toolchain_version=cargo_toolchain,
-        overlay_manifest=overlay_manifest,
-        overlay_sha256=_required_hex(
-            build.get("overlay_sha256"), length=64, label="build.overlay_sha256"
-        ),
-        overlay_file_count=overlay_file_count,
-        overlay_cargo_lock_sha256=_required_hex(
-            build.get("overlay_cargo_lock_sha256"),
-            length=64,
-            label="build.overlay_cargo_lock_sha256",
-        ),
-        lock_sha256=_sha256_file(lock_path),
-    )
 
 def overlay_identity(root: Path) -> dict[str, Any]:
     """Hash only real files in the current overlay; symlinks fail closed."""
