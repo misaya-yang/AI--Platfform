@@ -1079,18 +1079,14 @@ def _unpinned_resolution(capability_ids: list[str]) -> dict[str, Any]:
 async def test_unpinned_high_risk_warning_map_stays_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ARC-01 deliverable 7: the one-shot-warning map must not grow unbounded.
+    """The one-shot warning map stays bounded without changing authorization.
 
-    Capability ids arrive via publication bindings, so the process-local
-    de-duplication map is bounded FIFO; eviction may repeat a warning but
-    never changes authorization behaviour.
+    Eviction may repeat a warning, but capability projection remains intact.
     """
     from src.api.v1 import agent_runtime as runtime_module
     from src.api.v1._agent_runtime_routes import snapshot as snapshot_module
 
-    # ARC-01B: the map's real home is the snapshot use-case module; the facade
-    # re-export is only a copy of the reference and is not what _build_snapshot
-    # reads.
+    # Patch the real snapshot use-case map, not the facade's copied reference.
     monkeypatch.setattr(snapshot_module, "_unpinned_high_risk_platform", {})
 
     class ModelResolver:
@@ -1117,8 +1113,7 @@ async def test_unpinned_high_risk_warning_map_stays_bounded(
     assert len(tracked) == runtime_module._UNPINNED_WARNING_CAP
     assert f"cap-{overflow - 1}" in tracked  # newest id kept
     assert "cap-0" not in tracked  # oldest id evicted first
-    # Authorization surface is unaffected: every bound capability is still
-    # projected into the snapshot.
+    # Authorization is unaffected: every bound capability remains projected.
     assert len(snapshot["capabilities"]) == overflow
 
 
