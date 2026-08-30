@@ -14,15 +14,14 @@ This test asserts:
 from __future__ import annotations
 
 import pytest
-
-from ai_gateway_core.events import (
-    STREAM_NAMES,
-    EventBus,
+from ai_gateway_contracts.event_envelope import (
     EventEnvelope,
     UsageRecordedV1,
     parse_envelope,
 )
-from ai_gateway_core.events.errors import EventBusError
+from ai_gateway_contracts.event_errors import EventBusError
+from ai_gateway_core.events.bus import EventBus
+from ai_gateway_core.events.registry import STREAM_NAMES
 
 
 @pytest.mark.asyncio

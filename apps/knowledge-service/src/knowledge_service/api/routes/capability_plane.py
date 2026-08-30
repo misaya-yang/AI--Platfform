@@ -10,7 +10,7 @@ import hmac
 import logging
 from typing import Any
 
-from ai_gateway_core.auth.capability_proof import CapabilityProofError, verify_capability_proof
+from ai_gateway_contracts.capability_proof import CapabilityProofError, verify_capability_proof
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from ai_gateway_core.auth.capability_proof import sign_capability_proof
+from ai_gateway_contracts.capability_proof import sign_capability_proof
 from fastapi import HTTPException
 from knowledge_service.api.routes.capability_plane import (
     CapabilityRetrieveRequest,

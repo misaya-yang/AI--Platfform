@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.agents.spec import render_agent_outcome_contract
 from ai_gateway_core.logging import get_logger
 from fastapi import Request

@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.agents import (
+from ai_gateway_contracts.agent_runtime import canonical_runtime_json
+from ai_gateway_contracts.agent_runtime_lease import (
     RUNTIME_MODEL_LEASE_SCHEMA_VERSION,
     RuntimeModelLeaseClaims,
-    canonical_runtime_json,
 )
 from ai_gateway_core.models import resolve_reasoning_option
 

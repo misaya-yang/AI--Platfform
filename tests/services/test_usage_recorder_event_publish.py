@@ -8,14 +8,11 @@ Verifies the new ``_maybe_publish_usage_event`` path:
 
 from __future__ import annotations
 
-import asyncio
-import os
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ai_gateway_core.events import EventEnvelope, UsageRecordedV1
+from ai_gateway_contracts.event_envelope import EventEnvelope, UsageRecordedV1
 from ai_gateway_core.metrics.usage_recorder import UsageRecord, UsageRecorder
 
 

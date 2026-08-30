@@ -1972,7 +1972,7 @@ async def rollback_agent_publication(
             is_tenant_admin=_is_tenant_admin(user),
         )
         resolution["publication"] = publication
-        from ai_gateway_core.agents import runtime_sha256
+        from ai_gateway_contracts.agent_runtime import runtime_sha256
 
         from .agent_runtime import _build_snapshot
 

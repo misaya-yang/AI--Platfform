@@ -45,9 +45,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import redis.asyncio as aioredis
+from ai_gateway_contracts.event_envelope import EventEnvelope, parse_envelope
+from ai_gateway_contracts.event_errors import EventDeserializationError, EventHandlerError
 
-from .envelope import EventEnvelope, parse_envelope
-from .errors import EventDeserializationError, EventHandlerError
 from .idempotency import IdempotencyStore
 from .registry import dlq_for
 

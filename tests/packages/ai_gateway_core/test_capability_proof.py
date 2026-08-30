@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ai_gateway_core.auth.capability_proof import sign_capability_proof
+from ai_gateway_contracts.capability_proof import sign_capability_proof
 
 
 def test_python_proof_matches_rust_fixture() -> None:

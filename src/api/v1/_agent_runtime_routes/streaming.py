@@ -11,7 +11,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.exceptions import PermissionDeniedError
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from fastapi import HTTPException
 
 from src.api.v1.agent_runtime import _start_runtime_stream

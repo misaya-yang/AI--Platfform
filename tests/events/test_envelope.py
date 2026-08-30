@@ -17,12 +17,13 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
-
-from ai_gateway_core.events import (
-    EventDeserializationError,
+from ai_gateway_contracts.event_envelope import (
     EventEnvelope,
     UsageRecordedV1,
     parse_envelope,
+)
+from ai_gateway_contracts.event_errors import (
+    EventDeserializationError,
 )
 
 

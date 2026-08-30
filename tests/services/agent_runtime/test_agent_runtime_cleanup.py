@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ai_gateway_core.agents import agent_memory_principal, build_runtime_cleanup_plan
+from ai_gateway_contracts.agent_runtime import agent_memory_principal
+from ai_gateway_core.agents.deletion import build_runtime_cleanup_plan
 
 from src.services.agent_runtime_cleanup import (
     AgentRuntimeCleanupClient,

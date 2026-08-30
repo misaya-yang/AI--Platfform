@@ -18,14 +18,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
-from ai_gateway_core.events import (
-    STREAM_NAMES,
-    EventBus,
-    EventConsumer,
-    EventEnvelope,
-    UsageRecordedV1,
-)
+from ai_gateway_contracts.event_envelope import EventEnvelope, UsageRecordedV1
+from ai_gateway_core.events.bus import EventBus
+from ai_gateway_core.events.consumer import EventConsumer
+from ai_gateway_core.events.registry import STREAM_NAMES
 
 
 @pytest.mark.asyncio

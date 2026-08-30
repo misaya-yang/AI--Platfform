@@ -509,11 +509,11 @@ class UsageRecorder:
 
         try:
             if self._event_bus is None:
-                from ai_gateway_core.events import EventBus
+                from ai_gateway_core.events.bus import EventBus
 
                 self._event_bus = EventBus(redis_url=self._event_bus_url)
 
-            from ai_gateway_core.events import EventEnvelope, UsageRecordedV1
+            from ai_gateway_contracts.event_envelope import EventEnvelope, UsageRecordedV1
 
             envelope = EventEnvelope[UsageRecordedV1](
                 event_type=UsageRecordedV1.EVENT_TYPE,

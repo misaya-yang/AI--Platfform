@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentRepositoryError,
 )

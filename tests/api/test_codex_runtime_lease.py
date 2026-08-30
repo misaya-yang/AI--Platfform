@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from ai_gateway_core.agents import (
+from ai_gateway_contracts.agent_runtime_lease import (
     RUNTIME_MODEL_LEASE_SCHEMA_VERSION,
     RuntimeModelLeaseClaims,
     RuntimeModelLeaseError,

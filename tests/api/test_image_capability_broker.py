@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from ai_gateway_core.auth.capability_proof import canonical_body_hash
+from ai_gateway_contracts.capability_proof import canonical_body_hash
 
 from src.api.internal.image_capabilities import (
     ImageGenerationEnvelope,

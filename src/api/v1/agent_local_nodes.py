@@ -17,7 +17,7 @@ import os
 from dataclasses import replace
 from typing import Any, Protocol
 
-from ai_gateway_core.auth.capability_proof import CapabilityProofError, verify_capability_proof
+from ai_gateway_contracts.capability_proof import CapabilityProofError, verify_capability_proof
 from ai_gateway_core.local_node import (
     LocalNodeAction,
     LocalNodeDeviceScope,

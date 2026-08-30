@@ -5,7 +5,7 @@ import hashlib
 import json
 
 import pytest
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.eval.agent_version_candidate import (
     AgentReleaseProfileUnavailableError,
     build_agent_version_candidate,

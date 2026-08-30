@@ -15,7 +15,7 @@ from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentNotFoundError,
     AgentRepositoryError,

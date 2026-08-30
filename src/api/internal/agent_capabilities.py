@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
-from ai_gateway_core.auth.capability_proof import CapabilityProofError, verify_capability_proof
+from ai_gateway_contracts.capability_proof import CapabilityProofError, verify_capability_proof
 from ai_gateway_core.storage import get_artifact_storage
 from fastapi import APIRouter, Body, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field

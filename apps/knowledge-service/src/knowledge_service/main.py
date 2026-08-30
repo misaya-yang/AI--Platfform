@@ -797,9 +797,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         environment=_internal_env.environment,
     )
     if _gateway_secret_env:
+        from ai_gateway_contracts.replay import InMemoryReplayStore
         from ai_gateway_core.auth.gateway_secret import (
             GatewaySecret,
-            InMemoryReplayStore,
             RedisReplayStore,
         )
 

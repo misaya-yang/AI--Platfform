@@ -23,7 +23,7 @@ import uuid
 from html.parser import HTMLParser
 from typing import Any, Literal
 
-from ai_gateway_core.auth.capability_proof import (
+from ai_gateway_contracts.capability_proof import (
     CapabilityProofError,
     canonical_body_hash,
     verify_capability_proof,

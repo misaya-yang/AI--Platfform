@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import get_args, get_origin
 
-from ai_gateway_core.events.envelope import _PAYLOAD_MODELS, EventEnvelope
+from ai_gateway_contracts.event_envelope import _PAYLOAD_MODELS, EventEnvelope
 from ai_gateway_core.events.registry import STREAM_NAMES
 from pydantic.fields import FieldInfo
 

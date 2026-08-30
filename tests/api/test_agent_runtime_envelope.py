@@ -5,13 +5,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from ai_gateway_core.agents import (
+from ai_gateway_contracts.agent_runtime import (
     AgentRuntimeEnvelopeError,
     AgentRuntimeSigner,
-    InMemoryReplayStore,
     canonical_runtime_json,
     runtime_sha256,
 )
+from ai_gateway_contracts.replay import InMemoryReplayStore
 from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request

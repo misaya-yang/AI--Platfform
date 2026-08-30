@@ -20,15 +20,16 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Final
 
-from ai_gateway_core.agents import (
-    agent_memory_principal,
+from ai_gateway_contracts.agent_runtime import agent_memory_principal
+
+from ai_gateway_core.agents import spec as _agent_spec
+from ai_gateway_core.agents.deletion import (
     build_runtime_cleanup_plan,
     cleanup_receipt_completed,
     validate_runtime_cleanup_inventory,
     validate_runtime_cleanup_plan,
     validate_runtime_cleanup_receipt,
 )
-from ai_gateway_core.agents import spec as _agent_spec
 from ai_gateway_core.eval.agent_version_candidate import (
     build_model_authorization_evidence,
     structured_agent_release_diff,

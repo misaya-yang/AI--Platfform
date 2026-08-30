@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.eval.agent_version_candidate import build_model_authorization_evidence
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentNotFoundError,

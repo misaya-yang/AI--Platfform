@@ -21,7 +21,7 @@ import os
 import uuid
 from typing import Any
 
-from ai_gateway_core.auth.capability_proof import (
+from ai_gateway_contracts.capability_proof import (
     CapabilityProofError,
     canonical_body_hash,
     verify_capability_proof,

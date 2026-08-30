@@ -6,7 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from ai_gateway_core.auth.capability_proof import sign_capability_proof
+from ai_gateway_contracts.capability_proof import sign_capability_proof
 from fastapi import HTTPException
 
 from src.api.internal import agent_capabilities

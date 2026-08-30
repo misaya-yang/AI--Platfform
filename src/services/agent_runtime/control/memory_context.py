@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_gateway_core.agents import canonical_runtime_json
+from ai_gateway_contracts.agent_runtime import canonical_runtime_json
 
 from .types import AgentRuntimeControlError
 

@@ -4,7 +4,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from ai_gateway_core.auth.capability_proof import canonical_body_hash, sign_capability_proof
+from ai_gateway_contracts.capability_proof import canonical_body_hash, sign_capability_proof
 from fastapi import HTTPException
 
 from src.api.internal_mcp_broker import broker_mcp_read

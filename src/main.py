@@ -783,10 +783,8 @@ def create_app() -> FastAPI:
         bus_url = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
         if bus_url:
             try:
-                from ai_gateway_core.events import (
-                    EventConsumer,
-                    UsageRecordedV1,
-                )
+                from ai_gateway_contracts.event_envelope import UsageRecordedV1
+                from ai_gateway_core.events.consumer import EventConsumer
                 from ai_gateway_core.events.registry import get_stream
 
                 async def _log_usage_event(envelope) -> None:
@@ -1122,7 +1120,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.provider_service = ProviderService(container.database, encryption_key)
     app.state.model_service = ModelService(container.database)
 
-    from ai_gateway_core.agents import RuntimeModelLeaseSigner
+    from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 
     from .services.agent_runtime import AgentModelPlane, AgentRuntimeControlPlane
 

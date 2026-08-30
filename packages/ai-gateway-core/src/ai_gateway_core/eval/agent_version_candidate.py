@@ -15,7 +15,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Final
 
-from ai_gateway_core.agents import runtime_sha256
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 
 AGENT_RELEASE_CANDIDATE_SCHEMA_VERSION: Final = "agent-release-candidate/v1"
 AGENT_RELEASE_GATE_SCHEMA_VERSION: Final = "agent-release-gate/v1"

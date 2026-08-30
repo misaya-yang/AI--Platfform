@@ -17,9 +17,9 @@ import time
 from unittest.mock import patch
 
 import pytest
+from ai_gateway_contracts.replay import InMemoryReplayStore
 from ai_gateway_core.auth.gateway_secret import (
     GatewaySecret,
-    InMemoryReplayStore,
     InvalidGatewaySecret,
     RedisReplayStore,
 )

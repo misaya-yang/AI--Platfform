@@ -12,7 +12,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from ai_gateway_core.agents import canonical_runtime_json
+from ai_gateway_contracts.agent_runtime import canonical_runtime_json
 
 PLATFORM_CONFIG_SCHEMA_VERSION = "agent-runtime-platform-config/v1"
 _HASH_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")

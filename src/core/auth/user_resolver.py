@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import jwt
-from ai_gateway_core.auth import UserContext  # noqa: F401 — re-export
+from ai_gateway_core.auth._core import UserContext  # noqa: F401 — re-export
 from fastapi import Request
 
 from ..client_ip import get_client_ip_from_request

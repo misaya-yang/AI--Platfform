@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from ai_gateway_core.auth import UserContext
+from ai_gateway_core.auth._core import UserContext
 
 
 class FileProcessorProtocol(Protocol):

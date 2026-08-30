@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any
 
-from ai_gateway_core.agents import canonical_runtime_json
+from ai_gateway_contracts.agent_runtime import canonical_runtime_json
 
 from .types import (
     KERNEL_OWNED_AGENT_TOOL_ALIASES,

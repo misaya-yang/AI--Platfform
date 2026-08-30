@@ -23,17 +23,12 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-
-from ai_gateway_core.events import (
-    DLQ_SUFFIX,
-    STREAM_NAMES,
-    EventBus,
-    EventConsumer,
-    EventEnvelope,
-    IdempotencyStore,
-    UsageRecordedV1,
-)
+from ai_gateway_contracts.event_envelope import EventEnvelope, UsageRecordedV1
 from ai_gateway_core.events import consumer as consumer_module
+from ai_gateway_core.events.bus import EventBus
+from ai_gateway_core.events.consumer import EventConsumer
+from ai_gateway_core.events.idempotency import IdempotencyStore
+from ai_gateway_core.events.registry import DLQ_SUFFIX, STREAM_NAMES
 
 
 class _BoomError(RuntimeError):
@@ -64,7 +59,7 @@ async def test_handler_failures_route_to_dlq(
         # Reuse the same consumer identity to reproduce a normal worker
         # restart. The failed handler must release the idempotency claim so
         # the reclaimed message is actually retried.
-        for attempt in range(3):
+        for _attempt in range(3):
             consumer = EventConsumer(
                 "redis://unused",
                 stream=stream,

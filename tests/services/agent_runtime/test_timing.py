@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 import pytest
-from ai_gateway_core.agents import RuntimeModelLeaseSigner
+from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
 from src.services.agent_runtime.model_plane import AgentModelPlane, _AuthorizedCall

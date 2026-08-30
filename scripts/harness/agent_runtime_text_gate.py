@@ -27,7 +27,7 @@ from typing import Any
 import asyncpg
 import httpx
 import uvicorn
-from ai_gateway_core.agents import RuntimeModelLeaseSigner
+from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 from ai_gateway_core.config.endpoints import (
     DASHSCOPE_DEFAULT_CHAT_BASE_URL,
     normalize_dashscope_base,

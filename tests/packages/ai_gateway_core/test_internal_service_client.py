@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from ai_gateway_core.auth.gateway_secret import GatewaySecret, InMemoryReplayStore
+from ai_gateway_contracts.replay import InMemoryReplayStore
+from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.comm.client import (
     InternalServiceClient,
     InternalServiceClientConfig,

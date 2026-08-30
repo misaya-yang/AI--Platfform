@@ -25,11 +25,11 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from ai_gateway_core.agents import (
+from ai_gateway_contracts.agent_runtime import canonical_runtime_json
+from ai_gateway_contracts.agent_runtime_lease import (
     RuntimeModelLeaseClaims,
     RuntimeModelLeaseError,
     RuntimeModelLeaseSigner,
-    canonical_runtime_json,
 )
 from ai_gateway_core.models import ReasoningWireError, apply_reasoning_wire
 

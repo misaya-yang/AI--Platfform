@@ -8,7 +8,10 @@ from typing import Any
 
 import httpx
 import pytest
-from ai_gateway_core.agents import RuntimeModelLeaseClaims, RuntimeModelLeaseSigner
+from ai_gateway_contracts.agent_runtime_lease import (
+    RuntimeModelLeaseClaims,
+    RuntimeModelLeaseSigner,
+)
 from ai_gateway_core.models import get_builtin_model_capabilities, safe_model_capability_profile
 
 from src.services.agent_runtime.model_plane import (

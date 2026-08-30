@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from ai_gateway_core.agents import (
+from ai_gateway_core.agents.deletion import (
     RUNTIME_CLEANUP_INVENTORY_SCHEMA,
     RUNTIME_CLEANUP_RECEIPT_SCHEMA,
     canonical_cleanup_digest,

@@ -34,10 +34,10 @@ import logging
 from typing import Any
 
 import redis.asyncio as aioredis
+from ai_gateway_contracts.event_envelope import EventEnvelope
+from ai_gateway_contracts.event_errors import EventBusError
 
 from ..logging import record_internal_exception
-from .envelope import EventEnvelope
-from .errors import EventBusError
 from .registry import get_stream
 
 logger = logging.getLogger(__name__)
