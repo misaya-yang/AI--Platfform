@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -242,6 +243,8 @@ def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
     assert "response.content_part.done" in stream.text
     assert "response.completed" in stream.text
     assert len(control.calls) == 2
+    assert isinstance(control.calls[0]["resolved_agent_launch"], ResolvedAgentLaunchV1)
+    assert control.calls[0]["resolved_agent_launch"].identity["entrypoint"] == "responses"
     assert control.calls[0]["developer_instructions"] == "Use the signed runtime contract."
     assert control.calls[0]["enable_dynamic_tools"] is True
     assert control.calls[0]["readonly_capabilities"] == {
@@ -294,6 +297,7 @@ def test_public_responses_projects_function_tools_to_runtime_capability_selector
 
     assert response.status_code == 200
     assert control.calls[0]["enable_dynamic_tools"] is True
+    assert isinstance(control.calls[0]["resolved_agent_launch"], ResolvedAgentLaunchV1)
     assert control.calls[0]["readonly_capabilities"] == {
         "responses_tool_names": ["search_knowledge_base"],
         "responses_tool_choice": {"type": "function", "name": "search_knowledge_base"},

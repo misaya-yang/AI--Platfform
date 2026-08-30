@@ -174,6 +174,7 @@ async def preview_chat_stream(
         user,
         body=body,
         snapshot=snapshot,
+        draft_revision=payload.draft_revision,
     )
 
 

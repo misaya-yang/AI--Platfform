@@ -8,6 +8,7 @@ import pytest
 from src.services.agent_runtime import control_plane
 from src.services.agent_runtime.control import event_stream, thread_lifecycle, turn_start
 from src.services.agent_runtime.control import types as control_types
+from src.services.assistant_entry.launch_resolution import resolve_agent_launch
 
 
 def test_facade_preserves_type_identity_and_descriptors() -> None:
@@ -141,3 +142,52 @@ async def test_thread_creation_lock_serializes_waiters_and_cleans_up() -> None:
     assert order == ["holder", "waiter", "third"]
     assert instance._thread_locks == {}
     assert instance._thread_lock_users == {}
+
+
+@pytest.mark.asyncio
+async def test_control_plane_rejects_launch_scope_before_io() -> None:
+    launch = await resolve_agent_launch(
+        entrypoint="assistant",
+        tenant_id="other-tenant",
+        user_id="user",
+        session_id="session",
+        model_id="model",
+        model_service=None,
+    )
+    instance = object.__new__(control_plane.AgentRuntimeControlPlane)
+
+    with pytest.raises(
+        control_plane.AgentRuntimeControlError,
+        match="AI_PLATFORM_AGENT_RUNTIME_LAUNCH_SCOPE_MISMATCH",
+    ):
+        await instance.start_turn(
+            tenant_id="tenant",
+            user_id="user",
+            session_id="session",
+            message="hello",
+            model_id="model",
+            reasoning_option=None,
+            legacy_thinking_level=None,
+            max_tokens=None,
+            resolved_agent_launch=launch,
+        )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_never_invents_default_agent_spec() -> None:
+    instance = object.__new__(control_plane.AgentRuntimeControlPlane)
+
+    with pytest.raises(
+        control_plane.AgentRuntimeControlError,
+        match="AI_PLATFORM_AGENT_RUNTIME_LAUNCH_REQUIRED",
+    ):
+        await instance.start_turn(
+            tenant_id="tenant",
+            user_id="user",
+            session_id="session",
+            message="hello",
+            model_id="model",
+            reasoning_option=None,
+            legacy_thinking_level=None,
+            max_tokens=None,
+        )

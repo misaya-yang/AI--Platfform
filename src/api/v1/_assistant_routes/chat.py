@@ -22,7 +22,12 @@ from pydantic import ValidationError
 
 from ....core.auth.user_resolver import UserContext
 from ....services.agent_runtime import AgentRuntimeControlError
+from ....services.assistant_entry.launch_resolution import (
+    AgentLaunchResolutionError,
+    resolve_agent_launch,
+)
 from ....services.assistant_entry.model_access import (
+    assistant_model_service,
     check_model_permission,
     effective_chat_model_id,
 )
@@ -94,6 +99,27 @@ async def _start_agent_runtime_turn(
     control = agent_runtime_control(request)
     try:
         style_guidance = str(body.system_prompt or "").strip() or None
+        readonly = _agent_runtime_readonly_capabilities(body)
+        launch = await resolve_agent_launch(
+            entrypoint="assistant",
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            model_id=model_id,
+            model_service=(
+                assistant_model_service(request)
+                or getattr(control, "model_service", None)
+            ),
+            readonly_capabilities=readonly,
+            reasoning_option=body.reasoning_option,
+            legacy_thinking_level=body.thinking_level,
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            style_guidance=style_guidance,
+            memory_mode=body.memory_mode,
+            memory_profile=body.memory_profile,
+            enable_dynamic_tools=True,
+        )
         return await control.start_turn(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
@@ -106,9 +132,15 @@ async def _start_agent_runtime_turn(
             temperature=body.temperature,
             memory_mode=body.memory_mode,
             memory_profile=body.memory_profile,
-            readonly_capabilities=_agent_runtime_readonly_capabilities(body),
+            readonly_capabilities=readonly,
+            resolved_agent_launch=launch,
             style_guidance=style_guidance,
         )
+    except AgentLaunchResolutionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": "Agent Runtime rejected the turn"},
+        ) from None
     except AgentRuntimeControlError as exc:
         raise HTTPException(
             status_code=exc.status_code,

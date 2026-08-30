@@ -10,6 +10,10 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_contracts.agent_launch import (
+    ResolvedAgentLaunchError,
+    ResolvedAgentLaunchV1,
+)
 from ai_gateway_contracts.agent_runtime import canonical_runtime_json
 from ai_gateway_contracts.agent_runtime_lease import (
     RUNTIME_MODEL_LEASE_SCHEMA_VERSION,
@@ -49,6 +53,7 @@ async def start_turn(
     temperature: float | None = None,
     readonly_capabilities: dict[str, Any] | None = None,
     resolved_agent_snapshot: dict[str, Any] | None = None,
+    resolved_agent_launch: ResolvedAgentLaunchV1 | None = None,
     developer_instructions: str | None = None,
     style_guidance: str | None = None,
     memory_mode: str = "auto",
@@ -57,6 +62,47 @@ async def start_turn(
     _logger: logging.Logger = logger,
     _provider_revision_func: Callable[[Any], str] = _provider_revision,
 ) -> AgentTurn:
+    if resolved_agent_launch is not None:
+        try:
+            launch = (
+                resolved_agent_launch
+                if isinstance(resolved_agent_launch, ResolvedAgentLaunchV1)
+                else ResolvedAgentLaunchV1.parse(resolved_agent_launch)
+            )
+        except (ResolvedAgentLaunchError, TypeError, ValueError) as exc:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_LAUNCH_INVALID", status_code=409
+            ) from exc
+        identity = launch.identity
+        if (
+            identity["tenant_id"] != tenant_id
+            or identity["user_id"] != user_id
+            or identity["session_id"] != session_id
+            or launch.model["id"] != model_id
+            or resolved_agent_snapshot is not None
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_LAUNCH_SCOPE_MISMATCH", status_code=403
+            )
+        resolved_agent_snapshot = launch.to_control_snapshot()
+        launch_policy = launch.turn_policy
+        readonly_capabilities = launch.runtime_inputs["readonly_capabilities"]
+        reasoning_option = launch_policy["reasoning_option"]
+        legacy_thinking_level = launch_policy["legacy_thinking_level"]
+        max_tokens = launch_policy["max_tokens"]
+        temperature = launch_policy["temperature"]
+        developer_instructions = resolved_agent_snapshot["agent_spec"][
+            "developerInstructions"
+        ]
+        style_guidance = None
+        memory_mode = launch_policy["memory_mode"]
+        memory_profile = launch_policy["memory_profile"]
+        enable_dynamic_tools = launch_policy["enable_dynamic_tools"]
+    elif resolved_agent_snapshot is None:
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_LAUNCH_REQUIRED", status_code=409
+        )
+
     assignment_row = await plane._assignment(tenant_id, user_id, session_id)
     model = await plane.model_service.get_model(tenant_id, model_id)
     if not model or not bool(model.get("is_enabled", True)):
@@ -72,6 +118,55 @@ async def start_turn(
         raise AgentRuntimeControlError(
             "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_PROFILE_INVALID", status_code=503
         )
+    if resolved_agent_launch is not None:
+        launch_profile = launch.model_profile
+        if launch_profile and launch_profile != profile:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_LAUNCH_MODEL_PROFILE_MISMATCH",
+                status_code=409,
+            )
+        if launch_profile:
+            profile = launch_profile
+    else:
+        publication = (
+            resolved_agent_snapshot.get("publication")
+            if isinstance(resolved_agent_snapshot, dict)
+            and isinstance(resolved_agent_snapshot.get("publication"), dict)
+            else {}
+        )
+        channel = str(publication.get("channel") or "")
+        entrypoint = (
+            "assistant"
+            if channel == "builtin"
+            else "studio_preview"
+            if channel == "preview"
+            else "published_agent"
+        )
+        try:
+            launch = ResolvedAgentLaunchV1.from_legacy_snapshot(
+                resolved_agent_snapshot,
+                user_id=user_id,
+                session_id=session_id,
+                entrypoint=entrypoint,
+                model_profile=profile,
+                readonly_capabilities=readonly_capabilities or {},
+                turn_policy={
+                    "reasoning_option": reasoning_option,
+                    "legacy_thinking_level": legacy_thinking_level,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "style_guidance": style_guidance,
+                    "memory_mode": memory_mode,
+                    "memory_profile": memory_profile or "basic",
+                    "enable_dynamic_tools": enable_dynamic_tools,
+                    "draft_revision": resolved_agent_snapshot.get("draft_revision"),
+                },
+            )
+        except (ResolvedAgentLaunchError, TypeError, ValueError) as exc:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_LEGACY_LAUNCH_INVALID", status_code=409
+            ) from exc
+        resolved_agent_snapshot = launch.to_control_snapshot()
     signed_model: dict[str, Any] = {}
     signed_agent_spec: dict[str, Any] | None = None
     if resolved_agent_snapshot is not None:
@@ -186,10 +281,14 @@ async def start_turn(
         if isinstance(signed_memory, dict)
         else "session"
     )
+    builtin_launch = (
+        resolved_agent_launch is not None
+        and launch.identity["entrypoint"] in {"assistant", "responses"}
+    )
     selected_memory_mode = (
-        signed_memory_mode
-        if signed_agent_spec is not None
-        else str(memory_mode or "auto").strip().lower()
+        str(memory_mode or "auto").strip().lower()
+        if builtin_launch or signed_agent_spec is None
+        else signed_memory_mode
     )
     if selected_memory_mode not in {"off", "session", "auto", "strict", "user"}:
         raise AgentRuntimeControlError(
@@ -214,7 +313,7 @@ async def start_turn(
         )
     memory_write_allowed = (
         selected_memory_mode != "off"
-        if signed_agent_spec is None
+        if builtin_launch or signed_agent_spec is None
         else selected_memory_mode == "user"
     )
     memory_policy = (

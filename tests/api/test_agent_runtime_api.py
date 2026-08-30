@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentRuntimeUnavailableError,
@@ -441,14 +442,19 @@ def runtime_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _Reposi
 
     class _RuntimeControl:
         async def start_turn(self, **kwargs: Any) -> Any:
-            snapshot = kwargs["resolved_agent_snapshot"]
+            launch = kwargs["resolved_agent_launch"]
+            assert isinstance(launch, ResolvedAgentLaunchV1)
+            snapshot = launch.to_control_snapshot()
             captured.append(
                 {
                     "runtime_envelope": {"resolved_snapshot": snapshot},
                     "attachments": [
                         {"file_path": ref}
-                        for ref in kwargs["readonly_capabilities"]["attachments"]["refs"]
+                        for ref in launch.runtime_inputs["readonly_capabilities"][
+                            "attachments"
+                        ]["refs"]
                     ],
+                    "launch_entrypoint": launch.identity["entrypoint"],
                 }
             )
             return SimpleNamespace(run_id="run-runtime")
@@ -573,6 +579,7 @@ def test_version_preview_binds_single_kernel_assignment_before_turn(
     assert response.status_code == 200, response.text
     assert "approved response" in response.text
     assert captured
+    assert captured[-1]["launch_entrypoint"] == "studio_preview"
     assignments = client.app.state.assistant_runtime_assignments
     assert len(assignments.bound) == 1
     tenant_id, user_id, session_id = assignments.bound[0]
@@ -656,6 +663,7 @@ def test_runtime_stream_attachment_scope_idempotency_and_sse(
     )
     assert response.status_code == 200
     assert "approved response" in response.text
+    assert captured[-1]["launch_entrypoint"] == "published_agent"
     assert captured[-1]["runtime_envelope"]["resolved_snapshot"]["publication"]["channel"] == "api"
     assert captured[-1]["attachments"][0]["file_path"] == "/uploads/runtime/policy.pdf"
 

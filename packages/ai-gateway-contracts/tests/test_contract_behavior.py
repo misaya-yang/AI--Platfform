@@ -12,6 +12,7 @@ import json
 import time
 from dataclasses import replace
 
+from ai_gateway_contracts.agent_launch import RESOLVED_AGENT_LAUNCH_SCHEMA_VERSION
 from ai_gateway_contracts.agent_runtime import (
     AGENT_RUNTIME_ENVELOPE_SCHEMA_VERSION,
     AGENT_RUNTIME_SCHEMA_VERSION,
@@ -43,6 +44,7 @@ SECRET = "contract-self-test-secret-0123456789"
 
 
 def test_schema_version_constants_unchanged() -> None:
+    assert RESOLVED_AGENT_LAUNCH_SCHEMA_VERSION == "resolved-agent-launch/v1"
     assert CAPABILITY_PROOF_SCHEMA_VERSION == "ai-platform-capability-proof/v1"
     assert AGENT_RUNTIME_SCHEMA_VERSION == "agent-runtime/v1"
     assert AGENT_RUNTIME_ENVELOPE_SCHEMA_VERSION == "agent-runtime-envelope/v1"

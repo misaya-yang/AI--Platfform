@@ -42,6 +42,7 @@ from src.services.agent_runtime import (
     AgentModelPlaneError,
     AgentRuntimeControlPlane,
 )
+from src.services.assistant_entry.launch_resolution import resolve_agent_launch
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL_REVISION = "agent-runtime-text-gate"
@@ -599,6 +600,16 @@ class LiveTextGate:
         assert self.control is not None
         assert self.pool is not None
         started_at = time.perf_counter()
+        launch = await resolve_agent_launch(
+            entrypoint="assistant",
+            tenant_id=self.tenant_id,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            model_id="qwen3.7-plus",
+            model_service=self.control.model_service,
+            reasoning_option="auto",
+            max_tokens=max_tokens,
+        )
         turn = await self.control.start_turn(
             tenant_id=self.tenant_id,
             user_id=self.user_id,
@@ -608,6 +619,7 @@ class LiveTextGate:
             reasoning_option="auto",
             legacy_thinking_level=None,
             max_tokens=max_tokens,
+            resolved_agent_launch=launch,
         )
         self.thread_id = turn.runtime_thread_id
         first_visible: float | None = None

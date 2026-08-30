@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from starlette.requests import Request
 
 from src.api.v2.agent import (
@@ -228,6 +229,7 @@ async def test_v2_turn_uses_gateway_default_when_model_is_omitted() -> None:
         async def start_turn(self, **kwargs):
             assert kwargs["model_id"] == "qwen-default"
             assert kwargs["temperature"] is None
+            assert isinstance(kwargs["resolved_agent_launch"], ResolvedAgentLaunchV1)
             return SimpleNamespace(
                 run_id=str(uuid4()), runtime_thread_id=runtime_thread_id,
                 requested_reasoning_option="auto", effective_reasoning_option="minimal",

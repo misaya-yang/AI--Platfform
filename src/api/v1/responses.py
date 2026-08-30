@@ -24,7 +24,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
-from ...services.assistant_entry.model_access import check_model_permission
+from ...services.assistant_entry.launch_resolution import (
+    AgentLaunchResolutionError,
+    resolve_agent_launch,
+)
+from ...services.assistant_entry.model_access import (
+    assistant_model_service,
+    check_model_permission,
+)
 from ...services.assistant_entry.session_binding import ensure_agent_runtime_session
 from ..deps import enforce_rate_limit, get_user_context
 from ._agent_runtime_headers import reject_client_agent_forgery
@@ -689,6 +696,25 @@ async def create_response(
         }
         if requested_tools is not None:
             readonly_capabilities["responses_tool_names"] = requested_tools
+        launch = await resolve_agent_launch(
+            entrypoint="responses",
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            model_id=model_id,
+            model_service=(
+                assistant_model_service(request)
+                or getattr(control, "model_service", None)
+            ),
+            readonly_capabilities=readonly_capabilities,
+            reasoning_option=reasoning_option,
+            max_tokens=max_output_tokens,
+            temperature=temperature,
+            developer_instructions=instructions,
+            memory_mode="off",
+            memory_profile="off",
+            enable_dynamic_tools=tool_config["tool_choice"] != "none",
+        )
         turn = await control.start_turn(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
@@ -700,6 +726,7 @@ async def create_response(
             max_tokens=max_output_tokens,
             temperature=temperature,
             readonly_capabilities=readonly_capabilities,
+            resolved_agent_launch=launch,
             developer_instructions=instructions,
             memory_mode="off",
             # The Rust Runtime owns discovery and execution.  A Responses
@@ -717,6 +744,15 @@ async def create_response(
         await _abort_idempotent_response(idempotency)
         from ...services.agent_runtime import AgentRuntimeControlError
 
+        if isinstance(exc, AgentLaunchResolutionError):
+            return _error(
+                status_code=exc.status_code,
+                code=exc.code.lower(),
+                message="Agent Runtime rejected the request.",
+                error_type=(
+                    "server_error" if exc.status_code >= 500 else "invalid_request_error"
+                ),
+            )
         if isinstance(exc, AgentRuntimeControlError):
             return _error(
                 status_code=exc.status_code,

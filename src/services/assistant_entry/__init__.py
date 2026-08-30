@@ -7,6 +7,11 @@ route modules stay thin and never import each other as libraries.
 Extraction target: ARC-01 (platform-architecture-convergence-prd-2026-08).
 """
 
+from .launch_resolution import (
+    AgentLaunchResolutionError,
+    ResolvedAgentLaunchV1,
+    resolve_agent_launch,
+)
 from .model_access import (
     assistant_model_service,
     chat_body_with_model,
@@ -32,6 +37,8 @@ from .session_binding import (
 
 __all__ = [
     "ASSISTANT_SERVICE_IDS",
+    "AgentLaunchResolutionError",
+    "ResolvedAgentLaunchV1",
     "agent_runtime_control",
     "assistant_model_service",
     "chat_body_with_model",
@@ -43,6 +50,7 @@ __all__ = [
     "fetch_cancellable_run",
     "get_session_manager",
     "load_visible_assistant_models",
+    "resolve_agent_launch",
     "session_runtime_assignment",
     "user_can_access_model",
     "validate_chat_session_access",

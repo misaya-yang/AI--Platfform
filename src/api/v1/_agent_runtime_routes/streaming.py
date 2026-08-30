@@ -17,6 +17,11 @@ from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ....core.auth.user_resolver import UserContext
+from ....services.assistant_entry.launch_resolution import (
+    AgentLaunchResolutionError,
+    resolve_agent_launch,
+)
+from ....services.assistant_entry.model_access import assistant_model_service
 from .core import (
     _raise_runtime_error,
     _session_manager,
@@ -213,6 +218,7 @@ async def _start_runtime_stream(
     *,
     body: dict[str, Any],
     snapshot: dict[str, Any],
+    draft_revision: int | None = None,
 ) -> Any:
     if body.get("resume_run_id") or body.get("resume_approval_id"):
         _raise_runtime_error(
@@ -250,6 +256,42 @@ async def _start_runtime_stream(
         },
     }
     try:
+        publication = (
+            snapshot.get("publication")
+            if isinstance(snapshot.get("publication"), dict)
+            else {}
+        )
+        launch = await resolve_agent_launch(
+            entrypoint=(
+                "studio_preview"
+                if publication.get("channel") == "preview"
+                else "published_agent"
+            ),
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=str(body["session_id"]),
+            model_id=str(model.get("id") or ""),
+            model_service=(
+                assistant_model_service(request)
+                or getattr(control, "model_service", None)
+            ),
+            readonly_capabilities=readonly,
+            legacy_thinking_level=str(parameters.get("thinking_mode") or "") or None,
+            max_tokens=(
+                int(parameters["max_tokens"])
+                if isinstance(parameters.get("max_tokens"), int)
+                and not isinstance(parameters.get("max_tokens"), bool)
+                else None
+            ),
+            temperature=(
+                float(parameters["temperature"])
+                if isinstance(parameters.get("temperature"), int | float)
+                and not isinstance(parameters.get("temperature"), bool)
+                else None
+            ),
+            legacy_snapshot=snapshot,
+            draft_revision=draft_revision,
+        )
         turn = await control.start_turn(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
@@ -270,12 +312,16 @@ async def _start_runtime_stream(
                 and not isinstance(parameters.get("temperature"), bool)
                 else None
             ),
-            readonly_capabilities=readonly,
-            resolved_agent_snapshot=snapshot,
+            resolved_agent_launch=launch,
         )
     except Exception as exc:
         from ....services.agent_runtime import AgentRuntimeControlError
 
+        if isinstance(exc, AgentLaunchResolutionError):
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": "Agent Runtime rejected the turn"},
+            ) from None
         if isinstance(exc, AgentRuntimeControlError):
             raise HTTPException(
                 status_code=exc.status_code,

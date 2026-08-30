@@ -18,6 +18,7 @@ from src.services.agent_runtime.control_plane import (
     AgentTurn,
     _project_child_runtime_event,
 )
+from src.services.assistant_entry.launch_resolution import resolve_agent_launch
 
 
 def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
@@ -589,6 +590,24 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         http_client=client,
     )
     try:
+        readonly_capabilities = {
+            "knowledge": {"dataset_ids": ["dataset-a"]},
+            "attachments": {"refs": ["attachment-a"]},
+            "web_search": {"enabled": True, "max_results": 3},
+        }
+        launch = await resolve_agent_launch(
+            entrypoint="assistant",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            model_service=plane.model_service,
+            readonly_capabilities=readonly_capabilities,
+            reasoning_option="auto",
+            max_tokens=1024,
+            temperature=0.2,
+            memory_mode="auto",
+        )
         turn = await plane.start_turn(
             tenant_id="tenant-a",
             user_id="user-a",
@@ -599,11 +618,8 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
             legacy_thinking_level=None,
             max_tokens=1024,
             temperature=0.2,
-            readonly_capabilities={
-                "knowledge": {"dataset_ids": ["dataset-a"]},
-                "attachments": {"refs": ["attachment-a"]},
-                "web_search": {"enabled": True, "max_results": 3},
-            },
+            readonly_capabilities=readonly_capabilities,
+            resolved_agent_launch=launch,
         )
     finally:
         await client.aclose()
@@ -1085,6 +1101,16 @@ async def test_control_plane_fails_before_lease_issue_when_runtime_resume_reject
         http_client=client,
     )
     try:
+        launch = await resolve_agent_launch(
+            entrypoint="assistant",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            model_service=plane.model_service,
+            reasoning_option="auto",
+            max_tokens=1024,
+        )
         with pytest.raises(
             AgentRuntimeControlError,
             match="AI_PLATFORM_AGENT_RUNTIME_THREAD_RESUME_FAILED",
@@ -1098,6 +1124,7 @@ async def test_control_plane_fails_before_lease_issue_when_runtime_resume_reject
                 reasoning_option="auto",
                 legacy_thinking_level=None,
                 max_tokens=1024,
+                resolved_agent_launch=launch,
             )
     finally:
         await client.aclose()

@@ -25,6 +25,11 @@ from ...services.agent_runtime.thread_store import (
     AgentThreadStore,
     RuntimeThread,
 )
+from ...services.assistant_entry.launch_resolution import (
+    AgentLaunchResolutionError,
+    resolve_agent_launch,
+)
+from ...services.assistant_entry.model_access import assistant_model_service
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/agent", tags=["Agent Runtime V2"])
@@ -325,6 +330,38 @@ async def create_turn(
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     try:
         style_guidance = str(body.system_prompt or "").strip() or None
+        readonly = {
+            "knowledge": {
+                "dataset_ids": body.kb_dataset_ids,
+                "mode": body.kb_mode,
+                "top_k": body.kb_top_k,
+                "score_threshold": body.kb_score_threshold,
+            },
+            "attachments": {"refs": body.file_paths},
+            "web_search": {
+                "enabled": body.web_search_enabled,
+                "max_results": body.web_search_max_results,
+            },
+        }
+        launch = await resolve_agent_launch(
+            entrypoint="assistant",
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=thread.session_id,
+            model_id=model_id,
+            model_service=(
+                assistant_model_service(request)
+                or getattr(control, "model_service", None)
+            ),
+            readonly_capabilities=readonly,
+            reasoning_option=body.reasoning_option,
+            legacy_thinking_level=body.thinking_level,
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            style_guidance=style_guidance,
+            memory_mode=body.memory_mode,
+            memory_profile="basic",
+        )
         turn = await control.start_turn(
             tenant_id=user.tenant_id, user_id=user.user_id, session_id=thread.session_id,
             message=body.message, model_id=model_id,
@@ -334,21 +371,14 @@ async def create_turn(
             temperature=body.temperature,
             memory_mode=body.memory_mode,
             style_guidance=style_guidance,
-            readonly_capabilities={
-                "knowledge": {
-                    "dataset_ids": body.kb_dataset_ids,
-                    "mode": body.kb_mode,
-                    "top_k": body.kb_top_k,
-                    "score_threshold": body.kb_score_threshold,
-                },
-                "attachments": {"refs": body.file_paths},
-                "web_search": {
-                    "enabled": body.web_search_enabled,
-                    "max_results": body.web_search_max_results,
-                },
-            },
+            resolved_agent_launch=launch,
         )
     except Exception as exc:
+        if isinstance(exc, AgentLaunchResolutionError):
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code},
+            ) from exc
         if hasattr(exc, "code"):
             logger.warning(
                 "Agent Runtime turn rejected code=%s status=%s",

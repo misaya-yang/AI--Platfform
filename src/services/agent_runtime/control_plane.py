@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 
 from .control import (
@@ -391,6 +392,7 @@ class AgentRuntimeControlPlane:
         temperature: float | None = None,
         readonly_capabilities: dict[str, Any] | None = None,
         resolved_agent_snapshot: dict[str, Any] | None = None,
+        resolved_agent_launch: ResolvedAgentLaunchV1 | None = None,
         developer_instructions: str | None = None,
         style_guidance: str | None = None,
         memory_mode: str = "auto",
@@ -410,6 +412,7 @@ class AgentRuntimeControlPlane:
             temperature=temperature,
             readonly_capabilities=readonly_capabilities,
             resolved_agent_snapshot=resolved_agent_snapshot,
+            resolved_agent_launch=resolved_agent_launch,
             developer_instructions=developer_instructions,
             style_guidance=style_guidance,
             memory_mode=memory_mode,

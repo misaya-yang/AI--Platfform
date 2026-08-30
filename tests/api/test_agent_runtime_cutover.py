@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from ai_gateway_contracts.agent_runtime import runtime_sha256
 from fastapi import HTTPException
 
@@ -25,24 +26,55 @@ class _Control:
 
 def _snapshot() -> dict[str, Any]:
     return {
+        "schema_version": "agent-runtime/v1",
         "tenant_id": "tenant-a",
         "agent_id": "agent-a",
         "agent_version_id": "version-a",
-        "publication": {"id": "publication-a", "channel": "preview"},
+        "publication": {
+            "id": None,
+            "channel": "preview",
+            "auth_mode": "private",
+        },
         "model": {
             "id": "qwen3.7-plus",
             "provider": "dashscope",
             "parameters": {"temperature": 0.2, "max_tokens": 1024, "thinking_mode": "fast"},
         },
         "agent_spec": {
+            "agentId": "agent-a",
+            "agentVersionId": "version-a",
+            "channel": "preview",
             "developerInstructions": "Answer with evidence.",
-            "model": {"id": "qwen3.7-plus", "provider": "dashscope", "parameters": {}},
-            "knowledge": {"datasets": ["dataset-a"], "retrieval": {}},
+            "model": {
+                "id": "qwen3.7-plus",
+                "provider": "dashscope",
+                "parameters": {
+                    "temperature": 0.2,
+                    "max_tokens": 1024,
+                    "thinking_mode": "fast",
+                },
+            },
+            "knowledge": {
+                "datasets": ["dataset-a"],
+                "retrieval": {"mode": "tool", "top_k": 3, "threshold": 0.5},
+            },
             "capabilities": [],
             "memory": {"mode": "session"},
         },
+        "capabilities": [],
         "knowledge": {"datasets": ["dataset-a"], "retrieval": {"mode": "tool", "top_k": 3, "threshold": 0.5}},
-        "fingerprints": {"spec": runtime_sha256("spec")},
+        "memory": {"mode": "session"},
+        "channel_policy": {
+            "attachments": True,
+            "high_risk_tools": True,
+            "allowed_origins": [],
+        },
+        "fingerprints": {
+            "spec": runtime_sha256("spec"),
+            "tool_schema": runtime_sha256([]),
+            "skills": runtime_sha256([]),
+            "knowledge_revision": runtime_sha256("knowledge"),
+        },
     }
 
 
@@ -64,10 +96,15 @@ async def test_agent_studio_stream_uses_control_plane_and_signed_snapshot() -> N
     )
     assert response.headers["x-ai-agent-kernel"] == "agent_runtime"
     assert control.start is not None
-    assert control.start["resolved_agent_snapshot"]["agent_spec"]["developerInstructions"] == (
+    launch = control.start["resolved_agent_launch"]
+    assert isinstance(launch, ResolvedAgentLaunchV1)
+    assert launch.to_control_snapshot()["agent_spec"]["developerInstructions"] == (
         "Answer with evidence."
     )
-    assert control.start["readonly_capabilities"]["knowledge"]["dataset_ids"] == ["dataset-a"]
+    assert launch.runtime_inputs["readonly_capabilities"]["knowledge"][
+        "dataset_ids"
+    ] == ["dataset-a"]
+    assert "resolved_agent_snapshot" not in control.start
 
 
 @pytest.mark.asyncio

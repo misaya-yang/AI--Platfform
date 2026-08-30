@@ -23,6 +23,7 @@ the build on any forbidden import and on content outside the allowlist.
 
 | Module | Provenance | Wire contract |
 | --- | --- | --- |
+| `agent_launch` | ARC-02 Gateway launch convergence | `resolved-agent-launch/v1` |
 | `capability_proof` | `ai_gateway_core.auth.capability_proof` | `ai-platform-capability-proof/v1` (co-owned by Rust worker) |
 | `agent_runtime` | `ai_gateway_core.agents.runtime` | `agent-runtime/v1`, `agent-runtime-envelope/v1` |
 | `agent_runtime_lease` | `ai_gateway_core.agents.runtime_lease` | `agent-runtime-model-lease/v1` |
