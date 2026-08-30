@@ -90,6 +90,80 @@ def _request_required(spec: dict, operation: dict) -> set[str]:
     return fields
 
 
+def _parameters_by_key(spec: dict, *parameter_lists: object) -> dict[tuple[str, str], dict]:
+    result: dict[tuple[str, str], dict] = {}
+    for raw_list in parameter_lists:
+        if not isinstance(raw_list, list):
+            continue
+        for raw in raw_list:
+            parameter = raw
+            if isinstance(raw, dict) and isinstance(raw.get("$ref"), str):
+                parameter = _resolve_ref(spec, raw["$ref"])
+            if not isinstance(parameter, dict):
+                continue
+            name = parameter.get("name")
+            location = parameter.get("in")
+            if isinstance(name, str) and isinstance(location, str):
+                result[(name, location)] = parameter
+    return result
+
+
+def _schema_nodes(spec: dict, schema: object) -> list[dict]:
+    """Resolve a schema plus its allOf members without following cycles."""
+    nodes: list[dict] = []
+    queue = [schema]
+    seen_refs: set[str] = set()
+    while queue:
+        node = queue.pop()
+        if not isinstance(node, dict):
+            continue
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            queue.append(_resolve_ref(spec, ref))
+            continue
+        nodes.append(node)
+        queue.extend(node.get("allOf") or [])
+    return nodes
+
+
+def _schema_property_names(spec: dict, schema: object) -> set[str]:
+    names: set[str] = set()
+    for node in _schema_nodes(spec, schema):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            names.update(str(name) for name in properties)
+    return names
+
+
+def _response_schema_violations(
+    baseline: dict,
+    current: dict,
+    baseline_response: dict,
+    current_response: dict,
+    *,
+    label: str,
+) -> list[str]:
+    violations: list[str] = []
+    base_content = baseline_response.get("content") or {}
+    cur_content = current_response.get("content") or {}
+    for media_type, base_media in base_content.items():
+        if media_type not in cur_content:
+            violations.append(f"response media type lost: {label} media '{media_type}'")
+            continue
+        base_schema = (base_media or {}).get("schema")
+        cur_schema = (cur_content[media_type] or {}).get("schema")
+        base_properties = _schema_property_names(baseline, base_schema)
+        cur_properties = _schema_property_names(current, cur_schema)
+        for field in sorted(base_properties - cur_properties):
+            violations.append(
+                f"response field lost: {label} media '{media_type}' field '{field}'"
+            )
+    return violations
+
+
 def compare_specs(baseline: dict, current: dict) -> list[str]:
     """Return the list of contract violations between *baseline* and *current*.
 
@@ -100,13 +174,15 @@ def compare_specs(baseline: dict, current: dict) -> list[str]:
     base_paths = baseline.get("paths") or {}
     cur_paths = current.get("paths") or {}
 
-    for path, methods in base_paths.items():
-        cur_methods = cur_paths.get(path)
-        if cur_methods is None:
+    for path, path_item in base_paths.items():
+        cur_path_item = cur_paths.get(path)
+        if cur_path_item is None:
             violations.append(f"path removed: {path}")
             continue
-        for method, op in (methods or {}).items():
-            cur_op = (cur_methods or {}).get(method)
+        for method, op in (path_item or {}).items():
+            if method not in HTTP_METHODS:
+                continue
+            cur_op = (cur_path_item or {}).get(method)
             if cur_op is None:
                 violations.append(f"method removed: {method.upper()} {path}")
                 continue
@@ -118,16 +194,82 @@ def compare_specs(baseline: dict, current: dict) -> list[str]:
                     f"operationId changed: {method.upper()} {path} "
                     f"'{base_op_id}' -> '{cur_op.get('operationId')}'"
                 )
-            lost = _request_required(baseline, op) - _request_required(current, cur_op)
-            for field in sorted(lost):
+            newly_required = _request_required(current, cur_op) - _request_required(
+                baseline, op
+            )
+            for field in sorted(newly_required):
                 violations.append(
-                    f"required request field lost: {method.upper()} {path} field '{field}'"
+                    f"new required request field: {method.upper()} {path} field '{field}'"
                 )
+            base_body = op.get("requestBody") or {}
+            cur_body = cur_op.get("requestBody") or {}
+            if not base_body.get("required") and cur_body.get("required"):
+                violations.append(f"request body became required: {method.upper()} {path}")
+            base_media = set((base_body.get("content") or {}).keys())
+            cur_media = set((cur_body.get("content") or {}).keys())
+            for media_type in sorted(base_media - cur_media):
+                violations.append(
+                    f"request media type lost: {method.upper()} {path} media '{media_type}'"
+                )
+
+            base_params = _parameters_by_key(
+                baseline,
+                (path_item or {}).get("parameters"),
+                op.get("parameters"),
+            )
+            cur_params = _parameters_by_key(
+                current,
+                (cur_path_item or {}).get("parameters"),
+                cur_op.get("parameters"),
+            )
+            for key in sorted(set(base_params) - set(cur_params)):
+                violations.append(
+                    f"parameter removed: {method.upper()} {path} {key[1]} '{key[0]}'"
+                )
+            for key, cur_param in cur_params.items():
+                base_param = base_params.get(key)
+                if cur_param.get("required") and not (
+                    base_param and base_param.get("required")
+                ):
+                    violations.append(
+                        f"new required parameter: {method.upper()} {path} "
+                        f"{key[1]} '{key[0]}'"
+                    )
+                if base_param is None:
+                    continue
+                base_schema = base_param.get("schema") or {}
+                cur_schema = cur_param.get("schema") or {}
+                base_type = base_schema.get("type")
+                cur_type = cur_schema.get("type")
+                if base_type and cur_type != base_type:
+                    violations.append(
+                        f"parameter type changed: {method.upper()} {path} "
+                        f"{key[1]} '{key[0]}' '{base_type}' -> '{cur_type}'"
+                    )
+                base_enum = set(base_schema.get("enum") or [])
+                cur_enum = set(cur_schema.get("enum") or [])
+                for value in sorted(base_enum - cur_enum, key=repr):
+                    violations.append(
+                        f"parameter enum value lost: {method.upper()} {path} "
+                        f"{key[1]} '{key[0]}' value {value!r}"
+                    )
             base_codes = set((op.get("responses") or {}).keys())
             cur_codes = set((cur_op.get("responses") or {}).keys())
             for code in sorted(base_codes - cur_codes):
                 violations.append(
                     f"response status lost: {method.upper()} {path} status '{code}'"
+                )
+            for code in sorted(base_codes & cur_codes):
+                base_response = (op.get("responses") or {}).get(code) or {}
+                cur_response = (cur_op.get("responses") or {}).get(code) or {}
+                violations.extend(
+                    _response_schema_violations(
+                        baseline,
+                        current,
+                        base_response,
+                        cur_response,
+                        label=f"{method.upper()} {path} status '{code}'",
+                    )
                 )
 
     base_schemes = ((baseline.get("components") or {}).get("securitySchemes") or {})
@@ -280,7 +422,19 @@ def _selftest() -> int:
                 "CreateThing": {
                     "type": "object",
                     "required": ["name", "kind"],
-                    "properties": {"name": {"type": "string"}, "kind": {"type": "string"}},
+                    "properties": {
+                        "name": {"type": "string"},
+                        "kind": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                },
+                "ThingResponse": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
                 }
             },
         },
@@ -293,9 +447,29 @@ def _selftest() -> int:
                             "application/json": {"schema": {"$ref": "#/components/schemas/CreateThing"}}
                         }
                     },
-                    "responses": {"201": {}, "422": {}},
+                    "responses": {
+                        "201": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ThingResponse"}
+                                }
+                            }
+                        },
+                        "422": {},
+                    },
                 },
-                "get": {"operationId": "list_things", "responses": {"200": {}}},
+                "get": {
+                    "operationId": "list_things",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "enum": [10, 20]},
+                        }
+                    ],
+                    "responses": {"200": {}},
+                },
             },
             "/things/{id}": {"get": {"operationId": "get_thing", "responses": {"200": {}, "404": {}}}},
         },
@@ -325,7 +499,12 @@ def _selftest() -> int:
     def lose_required(cur: dict) -> None:
         cur["components"]["schemas"]["CreateThing"]["required"] = ["name"]
 
-    variant("lost required request field fails", True, lose_required)
+    variant("required request field becoming optional passes", False, lose_required)
+
+    def add_required(cur: dict) -> None:
+        cur["components"]["schemas"]["CreateThing"]["required"].append("note")
+
+    variant("new required request field fails", True, add_required)
 
     def rename_op(cur: dict) -> None:
         cur["paths"]["/things"]["post"]["operationId"] = "make_thing"
@@ -337,6 +516,26 @@ def _selftest() -> int:
 
     variant("removed response status fails", True, drop_status)
 
+    def drop_parameter(cur: dict) -> None:
+        cur["paths"]["/things"]["get"]["parameters"] = []
+
+    variant("removed parameter fails", True, drop_parameter)
+
+    def require_parameter(cur: dict) -> None:
+        cur["paths"]["/things"]["get"]["parameters"][0]["required"] = True
+
+    variant("optional parameter becoming required fails", True, require_parameter)
+
+    def narrow_parameter_enum(cur: dict) -> None:
+        cur["paths"]["/things"]["get"]["parameters"][0]["schema"]["enum"] = [10]
+
+    variant("parameter enum narrowing fails", True, narrow_parameter_enum)
+
+    def drop_response_field(cur: dict) -> None:
+        del cur["components"]["schemas"]["ThingResponse"]["properties"]["name"]
+
+    variant("removed response field fails", True, drop_response_field)
+
     def drop_scheme(cur: dict) -> None:
         cur["components"]["securitySchemes"] = {}
 
@@ -344,7 +543,7 @@ def _selftest() -> int:
 
     def compatible_growth(cur: dict) -> None:
         cur["paths"]["/things/new"] = {"get": {"operationId": "new_thing", "responses": {"200": {}}}}
-        cur["components"]["schemas"]["CreateThing"]["properties"]["note"] = {"type": "string"}
+        cur["components"]["schemas"]["CreateThing"]["properties"]["extra"] = {"type": "string"}
         cur["paths"]["/things"]["post"]["responses"]["202"] = {}
 
     variant("compatible growth passes", False, compatible_growth)
