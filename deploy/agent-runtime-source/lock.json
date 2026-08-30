@@ -30,9 +30,9 @@
     "artifacts": {
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
-        "candidate_start_allowed": false,
-        "image_digest": null,
-        "image_ref": null,
+        "candidate_start_allowed": true,
+        "image_digest": "sha256:0a6459c31aaf281595b35b0d3fb2b4c87909daaa50a796e4ce6d4b886d8bf888",
+        "image_ref": "local-image://sha256:0a6459c31aaf281595b35b0d3fb2b4c87909daaa50a796e4ce6d4b886d8bf888",
         "platforms": [
           "linux/arm64"
         ],
@@ -50,9 +50,9 @@
       },
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
-        "candidate_start_allowed": false,
-        "image_digest": null,
-        "image_ref": null,
+        "candidate_start_allowed": true,
+        "image_digest": "sha256:9c9c5446f082559a6a424833ed5ae60911da25afe60d6796a472ba51ad24c7c3",
+        "image_ref": "local-image://sha256:9c9c5446f082559a6a424833ed5ae60911da25afe60d6796a472ba51ad24c7c3",
         "platforms": [
           "linux/arm64"
         ],
@@ -60,7 +60,7 @@
       }
     }
   },
-  "release_state": "local_source_locked",
+  "release_state": "local_image_locked",
   "schema_version": "ai-platform/agent-runtime-source-lock/v2",
   "source": {
     "branch": "ai-platform/main",
