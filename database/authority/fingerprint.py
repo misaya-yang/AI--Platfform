@@ -685,7 +685,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         SELECT r.rolname AS name, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
                r.rolcanlogin, r.rolinherit, r.rolreplication, r.rolbypassrls,
                COALESCE((SELECT string_agg(option, ',' ORDER BY option)
-                         FROM pg_options_to_table(r.rolconfig)), '') AS config,
+                         FROM unnest(r.rolconfig) AS option), '') AS config,
                ARRAY(
                    SELECT granted.rolname || ':' ||
                           membership.admin_option::integer || ':' ||

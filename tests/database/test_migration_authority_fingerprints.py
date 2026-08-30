@@ -274,6 +274,7 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
     assert "ESCAPE E'\\\\'" in default_query
     assert default_args[1] == r"ai\_platform\_%"
     assert "ESCAPE E'\\\\'" in roles_query
+    assert "FROM unnest(r.rolconfig) AS option" in roles_query
     assert roles_args == (r"ai\_platform\_%",)
 
 
