@@ -17,6 +17,7 @@ const globalSetupPath = path.resolve(configDir, "e2e/global.setup.ts");
 
 export default defineConfig({
   testDir: "./e2e",
+  testIgnore: ["platform-convergence-live.spec.ts"],
   timeout: 120_000,
   globalSetup: globalSetupPath,
   expect: {

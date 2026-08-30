@@ -12,6 +12,11 @@ import { expect, test, type Page, type Response } from "@playwright/test";
 import { ensureAuthenticatedPage } from "./support/helpers";
 
 const liveEnabled = process.env.RUN_PLATFORM_CONVERGENCE_LIVE === "1";
+if (!liveEnabled) {
+  throw new Error(
+    "Set RUN_PLATFORM_CONVERGENCE_LIVE=1 before collecting or running paid-provider release tests.",
+  );
+}
 const requestedQwenModel = process.env.PLATFORM_CONVERGENCE_QWEN_MODEL?.trim();
 const composerSelector = "#assistant-chat-composer";
 
@@ -195,11 +200,6 @@ async function decideApproval(page: Page, approved: boolean): Promise<void> {
 }
 
 test.describe("Platform convergence live acceptance", () => {
-  test.skip(
-    !liveEnabled,
-    "Set RUN_PLATFORM_CONVERGENCE_LIVE=1 for an explicit paid-provider release run.",
-  );
-
   test("cancels an active Qwen Runtime V2 stream and restores its terminal state", async ({
     page,
   }) => {

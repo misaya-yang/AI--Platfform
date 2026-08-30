@@ -16,5 +16,6 @@ process.env.E2E_DOCKER_LIVE_STACK = "1";
  */
 export default {
   ...baseConfig,
+  testIgnore: [],
   webServer: undefined,
 };
