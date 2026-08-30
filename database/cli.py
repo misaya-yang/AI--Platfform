@@ -43,8 +43,8 @@ class MigrationChainError(RuntimeError):
 
 
 def get_dsn() -> str:
-    """Use the authority's fail-closed, non-printing DSN resolver."""
-    return authority_cli.get_dsn()
+    """Use the authority's explicit migrator credential only."""
+    return authority_cli.get_role_dsn("migrator")
 
 
 def mask_dsn(dsn: str) -> str:

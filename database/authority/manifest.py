@@ -14,13 +14,10 @@ Two machine carriers:
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import yaml
 
@@ -45,17 +42,9 @@ class RollbackClass(str, Enum):
 _CHANGE_FILE_RE = re.compile(r"^(\d{3})_[a-z0-9_]+\.sql$")
 _LEDGER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,62}$")
 _FULL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_BASELINE_PROVENANCE_INPUTS = (
-    "database/schema.sql",
-    "database/migrations/legacy-manifest.yml",
-    "database/authority/fingerprint.py",
-    "database/authority/fingerprint_catalog.py",
-    "database/authority/fingerprint_values.py",
-    "database/bootstrap/roles.sql",
-    "database/bootstrap/extensions.sql",
-    "scripts/inventory/generate_database_grants.py",
-    ":(glob)database/migrations/*.sql",
-)
+BASELINE_MANIFEST_SCHEMA = "migration-authority/baseline-manifest/v1"
+BASELINE_STATE_PENDING = "pending-live-freeze"
+BASELINE_STATE_FROZEN = "frozen"
 LEGACY_MANIFEST_SCHEMA = "migration-authority/legacy-manifest/v1"
 LEGACY_NON_TRANSACTIONAL_FILES = frozenset({"049_session_list_performance.sql"})
 _REQUIRED_CHANGE_FIELDS = (
@@ -170,7 +159,10 @@ class BaselineManifest:
     generator: str
     generated_at: str
     postgres_version: str
+    schema: str = BASELINE_MANIFEST_SCHEMA
+    state: str = BASELINE_STATE_FROZEN
     files_sha256: tuple[tuple[str, str], ...] = ()
+    policy_files_sha256: tuple[tuple[str, str], ...] = ()
     reference_data: tuple[ReferenceDataSet, ...] = ()
 
     @property
@@ -430,256 +422,6 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
     )
 
 
-def load_baseline_manifest(path: Path) -> BaselineManifest:
-    """Parse and validate one frozen baseline manifest.json, fail closed."""
-    if not path.exists():
-        raise AuthorityManifestError(f"baseline manifest not found: {path}")
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise AuthorityManifestError(f"invalid JSON in {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise AuthorityManifestError(f"baseline manifest {path} must be an object")
-
-    required = (
-        "baseline_id",
-        "schema_revision",
-        "source_git_sha",
-        "last_legacy_change",
-        "structural_sha256",
-        "acl_sha256",
-        "extensions_sha256",
-        "reference_data_sha256",
-        "generator",
-        "generated_at",
-        "postgres_version",
-        "files_sha256",
-    )
-    missing = [key for key in required if not raw.get(key)]
-    if missing:
-        raise AuthorityManifestError(f"baseline manifest {path} missing fields: {sorted(missing)}")
-
-    baseline_id = _validate_ledger_id(raw["baseline_id"], "baseline_id")
-    _validate_parent_id(path, baseline_id, "baseline")
-
-    if not re.fullmatch(r"[0-9a-f]{40}", str(raw["source_git_sha"])):
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: source_git_sha must be a full lowercase Git SHA"
-        )
-    if not _CHANGE_FILE_RE.fullmatch(str(raw["last_legacy_change"])):
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: last_legacy_change is not a forward migration filename"
-        )
-    try:
-        generated_at = datetime.fromisoformat(str(raw["generated_at"]).replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: generated_at must be an ISO-8601 timestamp"
-        ) from exc
-    if generated_at.tzinfo is None:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: generated_at must include a timezone"
-        )
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", str(raw["postgres_version"])):
-        raise AuthorityManifestError(f"baseline manifest {path}: postgres_version is invalid")
-    if not re.fullmatch(r"[0-9]+", str(raw["schema_revision"])):
-        raise AuthorityManifestError(f"baseline manifest {path}: schema_revision must be numeric")
-
-    digest_fields = (
-        "structural_sha256",
-        "acl_sha256",
-        "extensions_sha256",
-        "reference_data_sha256",
-    )
-    for digest_field in digest_fields:
-        _validate_full_sha256(raw[digest_field], digest_field)
-
-    required_baseline_files = {
-        "cutover_convergence.sql",
-        "grants.sql",
-        "init.sql",
-        "reference_data.sql",
-        "verify.sql",
-    }
-    raw_file_digests = raw["files_sha256"]
-    if not isinstance(raw_file_digests, dict):
-        raise AuthorityManifestError(f"baseline manifest {path}: files_sha256 must be an object")
-    declared_baseline_files = set(raw_file_digests)
-    actual_baseline_files = {
-        candidate.name for candidate in path.parent.glob("*.sql") if candidate.is_file()
-    }
-    if (
-        declared_baseline_files != required_baseline_files
-        or actual_baseline_files != required_baseline_files
-    ):
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: SQL coverage mismatch; "
-            f"required={sorted(required_baseline_files)}, "
-            f"declared={sorted(declared_baseline_files)}, "
-            f"actual={sorted(actual_baseline_files)}"
-        )
-    files_sha256: list[tuple[str, str]] = []
-    for filename in sorted(required_baseline_files):
-        declared_sha = _validate_full_sha256(raw_file_digests[filename], f"files_sha256.{filename}")
-        actual_sha = file_sha256(path.parent / filename)
-        if actual_sha != declared_sha:
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: checksum drift for {filename}: "
-                f"declared {declared_sha}, actual {actual_sha}"
-            )
-        files_sha256.append((filename, declared_sha))
-
-    raw_reference_data = raw.get("reference_data", [])
-    if not isinstance(raw_reference_data, list):
-        raise AuthorityManifestError(f"baseline manifest {path}: reference_data must be a list")
-    reference_sets: list[ReferenceDataSet] = []
-    seen_reference_tables: set[str] = set()
-    for entry in raw_reference_data:
-        if not isinstance(entry, dict):
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data entries must be objects"
-            )
-        if "table" not in entry:
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data entry needs table"
-            )
-        table = _validate_relation_name(entry["table"], "reference_data.table")
-        if table in seen_reference_tables:
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data duplicates table {table!r}"
-            )
-        seen_reference_tables.add(table)
-        natural_key = entry.get("natural_key")
-        immutable_columns = entry.get("immutable_columns")
-        if (
-            not isinstance(natural_key, list)
-            or not natural_key
-            or any(not isinstance(column, str) for column in natural_key)
-            or len(natural_key) != len(set(natural_key))
-            or not isinstance(immutable_columns, list)
-            or not immutable_columns
-            or any(not isinstance(column, str) for column in immutable_columns)
-            or len(immutable_columns) != len(set(immutable_columns))
-        ):
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data entry for "
-                f"{entry.get('table')!r} needs natural_key and immutable_columns"
-            )
-        raw_where = entry.get("where", "")
-        if not isinstance(raw_where, str):
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data.where must be a string"
-            )
-        where = raw_where
-        if any(marker in where for marker in (";", "--", "/*", "*/")) or any(
-            ord(character) < 32 for character in where
-        ):
-            raise AuthorityManifestError(
-                f"baseline manifest {path}: reference_data.where must be one SQL expression"
-            )
-        reference_sets.append(
-            ReferenceDataSet(
-                table=table,
-                natural_key=tuple(_validate_identifier(c, "natural_key") for c in natural_key),
-                immutable_columns=tuple(
-                    _validate_identifier(c, "immutable_columns") for c in immutable_columns
-                ),
-                where=where,
-            )
-        )
-
-    return BaselineManifest(
-        baseline_id=baseline_id,
-        schema_revision=str(raw["schema_revision"]),
-        source_git_sha=str(raw["source_git_sha"]),
-        last_legacy_change=str(raw["last_legacy_change"]),
-        structural_sha256=str(raw["structural_sha256"]),
-        acl_sha256=str(raw["acl_sha256"]),
-        extensions_sha256=str(raw["extensions_sha256"]),
-        reference_data_sha256=str(raw["reference_data_sha256"]),
-        generator=str(raw["generator"]),
-        generated_at=str(raw["generated_at"]),
-        postgres_version=str(raw["postgres_version"]),
-        files_sha256=tuple(files_sha256),
-        reference_data=tuple(reference_sets),
-    )
-
-
-def verify_baseline_git_provenance(
-    path: Path,
-    baseline: BaselineManifest,
-    *,
-    repo_root: Path,
-) -> None:
-    """Offline proof that a frozen baseline is not its own source authority.
-
-    Runtime images need not contain ``.git``; the checked-out CI/release gate
-    calls this through ``commands.load_baseline``. The source commit must be an
-    ancestor, predate this manifest, contain the named generator, and preserve
-    every fingerprint/migration input through the artifact commit.
-    """
-
-    generator = PurePosixPath(baseline.generator)
-    if (
-        generator.is_absolute()
-        or not baseline.generator
-        or generator.as_posix() != baseline.generator
-        or ".." in generator.parts
-    ):
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: generator must be a safe repository-relative path"
-        )
-    try:
-        manifest_rel = path.resolve().relative_to(repo_root.resolve()).as_posix()
-    except ValueError as exc:
-        raise AuthorityManifestError(
-            f"baseline manifest {path} is outside repository {repo_root}"
-        ) from exc
-
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    source = baseline.source_git_sha
-    resolved = git("rev-parse", "--verify", f"{source}^{{commit}}")
-    if resolved.returncode != 0 or resolved.stdout.strip() != source:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: source_git_sha is not a resolvable exact commit"
-        )
-    if git("merge-base", "--is-ancestor", source, "HEAD").returncode != 0:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: source_git_sha is not an ancestor of HEAD"
-        )
-    if git("cat-file", "-e", f"{source}:{manifest_rel}").returncode == 0:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: source_git_sha already contains this manifest"
-        )
-    if git("cat-file", "-e", f"{source}:{generator.as_posix()}").returncode != 0:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: generator is absent from source_git_sha"
-        )
-    cutover_rel = (path.parent / "cutover_convergence.sql").resolve().relative_to(
-        repo_root.resolve()
-    ).as_posix()
-    inputs = [*_BASELINE_PROVENANCE_INPUTS, generator.as_posix(), cutover_rel]
-    comparison = git("diff", "--quiet", source, "HEAD", "--", *inputs)
-    if comparison.returncode == 1:
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: fingerprint or migration inputs differ "
-            "from source_git_sha"
-        )
-    if comparison.returncode != 0:
-        detail = (comparison.stderr or comparison.stdout).strip()
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: cannot verify source provenance: {detail}"
-        )
-
-
 def _legacy_sql_files(migrations_root: Path) -> dict[str, Path]:
     """Return the flat/legacy SQL namespace, rejecting duplicate filenames."""
     candidates = [migrations_root]
@@ -850,3 +592,12 @@ def load_legacy_manifest(path: Path) -> LegacyManifest:
 
 def default_baseline_dir(database_dir: Path, baseline_id: str = DEFAULT_BASELINE_ID) -> Path:
     return database_dir / "baselines" / baseline_id
+
+
+# Keep the long-standing import seam while isolating baseline artifact parsing
+# and Git provenance from epoch/legacy manifest discovery.
+from .baseline_manifest import (  # noqa: E402, F401
+    baseline_artifact_state,
+    load_baseline_manifest,
+    verify_baseline_git_provenance,
+)

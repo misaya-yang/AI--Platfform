@@ -56,16 +56,20 @@ def test_per_service_runner_uses_authority_dsn_resolver(monkeypatch):
     assert migrate_per_service._dsn() == "postgresql://authority.example/gateway"
 
 
-def test_cli_get_dsn_prefers_database_url(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://primary.example/test")
-    monkeypatch.setenv("GATEWAY_DATABASE__DSN", "postgresql://legacy.example/test")
+def test_cli_get_dsn_requires_explicit_migrator_url(monkeypatch):
+    monkeypatch.setenv(
+        "AI_GATEWAY_DATABASE_MIGRATOR_DSN",
+        "postgresql://migrator.example/test",
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared.example/test")
 
-    assert cli.get_dsn() == "postgresql://primary.example/test"
+    assert cli.get_dsn() == "postgresql://migrator.example/test"
 
 
 def test_cli_get_dsn_fails_closed_without_hardcoded_password(monkeypatch, capsys):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("GATEWAY_DATABASE__DSN", raising=False)
+    monkeypatch.delenv("AI_GATEWAY_DATABASE_MIGRATOR_DSN", raising=False)
 
     fake_settings = ModuleType("src.config.settings")
 

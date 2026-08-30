@@ -69,7 +69,7 @@ PRIVILEGE_ORDER = {
 }
 IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 ROLE_PREFIX_RE = re.compile(r"[a-z][a-z0-9_]{0,20}_")
-IDENTITY_ARGUMENTS_RE = re.compile(r"[a-z0-9_ ,.\[\]]*")
+IDENTITY_ARGUMENTS_RE = re.compile(r"[a-z0-9_ ,.\[\]()+]*")
 WRITE_PRIVILEGES = frozenset({"INSERT", "UPDATE", "DELETE"})
 
 
@@ -339,9 +339,13 @@ def _load_policy_entries(
                 )
             )
             missing_functions = sorted(set(item.function_writers) - function_evidence)
-            if not function_only or missing_functions:
+            if missing_functions:
                 unresolved.append(
                     f"{context} function-mediated writes are unresolved: {missing_functions or list(item.function_writers)}"
+                )
+            if not item.writers and not function_only:
+                unresolved.append(
+                    f"{context} has only function-mediated writes and must set function_only"
                 )
             if function_only and any(
                 set(grant.privileges) & WRITE_PRIVILEGES

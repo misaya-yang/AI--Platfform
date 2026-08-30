@@ -24,6 +24,11 @@ BASELINE_FILES = (
     "reference_data.sql",
     "verify.sql",
 )
+POLICY_FILES = (
+    "data-access-inventory.json",
+    "ownership-policy.json",
+    "grants-policy.json",
+)
 
 
 def _sha(content: str) -> str:
@@ -49,7 +54,14 @@ def _write_baseline(root: Path, **overrides: object) -> tuple[AuthorityPaths, Pa
         content = f"-- {filename}\n"
         (baseline_dir / filename).write_text(content, encoding="utf-8")
         files_sha256[filename] = _sha(content)
+    policy_files_sha256: dict[str, str] = {}
+    for filename in POLICY_FILES:
+        content = "{}\n"
+        (baseline_dir / filename).write_text(content, encoding="utf-8")
+        policy_files_sha256[filename] = _sha(content)
     payload: dict[str, object] = {
+        "schema": "migration-authority/baseline-manifest/v1",
+        "state": "frozen",
         "baseline_id": BASELINE_ID,
         "schema_revision": "112",
         "source_git_sha": "a" * 40,
@@ -62,6 +74,7 @@ def _write_baseline(root: Path, **overrides: object) -> tuple[AuthorityPaths, Pa
         "generated_at": "2026-08-30T00:00:00Z",
         "postgres_version": "16",
         "files_sha256": files_sha256,
+        "policy_files_sha256": policy_files_sha256,
         "reference_data": [
             {
                 "table": "public.system_values",
@@ -118,6 +131,16 @@ def test_baseline_git_provenance_requires_a_prior_unchanged_source_commit(
     cutover = root / f"database/baselines/{BASELINE_ID}/cutover_convergence.sql"
     cutover.parent.mkdir(parents=True)
     cutover.write_text("-- cutover_convergence.sql\n", encoding="utf-8")
+    _write_baseline(
+        root,
+        state="pending-live-freeze",
+        source_git_sha=None,
+        structural_sha256=None,
+        acl_sha256=None,
+        extensions_sha256=None,
+        reference_data_sha256=None,
+        generator="scripts/freeze_arc03.py",
+    )
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "settled source")
     source_sha = _git(root, "rev-parse", "HEAD")
@@ -154,6 +177,16 @@ def test_baseline_git_provenance_rejects_fake_or_self_containing_source(
     cutover = root / f"database/baselines/{BASELINE_ID}/cutover_convergence.sql"
     cutover.parent.mkdir(parents=True)
     cutover.write_text("-- cutover_convergence.sql\n", encoding="utf-8")
+    _write_baseline(
+        root,
+        state="pending-live-freeze",
+        source_git_sha=None,
+        structural_sha256=None,
+        acl_sha256=None,
+        extensions_sha256=None,
+        reference_data_sha256=None,
+        generator="scripts/freeze_arc03.py",
+    )
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "settled source")
     source_sha = _git(root, "rev-parse", "HEAD")
@@ -172,7 +205,7 @@ def test_baseline_git_provenance_rejects_fake_or_self_containing_source(
 
     artifact_sha = _git(root, "rev-parse", "HEAD")
     object.__setattr__(fake, "source_git_sha", artifact_sha)
-    with pytest.raises(AuthorityManifestError, match="already contains this manifest"):
+    with pytest.raises(AuthorityManifestError, match="pending-live-freeze"):
         verify_baseline_git_provenance(manifest_path, fake, repo_root=root)
 
 
@@ -248,6 +281,12 @@ def test_load_baseline_rejects_freeze_point_mismatch(
 def test_baseline_ready_requires_cutover_contract(tmp_path: Path) -> None:
     paths, _manifest = _write_baseline(tmp_path)
     (paths.baseline_dir(BASELINE_ID) / "cutover_convergence.sql").unlink()
+
+    assert not commands.baseline_ready(paths)
+
+
+def test_baseline_ready_rejects_pending_live_freeze(tmp_path: Path) -> None:
+    paths, _manifest = _write_baseline(tmp_path, state="pending-live-freeze")
 
     assert not commands.baseline_ready(paths)
 

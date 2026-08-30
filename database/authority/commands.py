@@ -44,6 +44,7 @@ from .bootstrap import (
     bootstrap_roles,
     database_empty,
     fresh_install,
+    provision_roles_admin,
     run_baseline_sql_file,
     startup_schema_check,
     verify_baseline_sql_file,
@@ -51,7 +52,9 @@ from .bootstrap import (
 from .constants import DEFAULT_BASELINE_ID, EPOCH_MANIFEST_NAME, PLATFORM_SCHEMAS
 from .discovery import LEGACY_MANIFEST_NAME, discover_legacy_migrations
 from .manifest import (
+    BASELINE_STATE_FROZEN,
     BaselineManifest,
+    baseline_artifact_state,
     load_baseline_manifest,
     load_epoch_manifest,
     load_legacy_manifest,
@@ -137,7 +140,9 @@ def baseline_ready(paths: AuthorityPaths, baseline_id: str = DEFAULT_BASELINE_ID
         "verify.sql",
         "cutover_convergence.sql",
     )
-    return all((baseline_dir / name).exists() for name in required)
+    if not all((baseline_dir / name).exists() for name in required):
+        return False
+    return baseline_artifact_state(baseline_dir / "manifest.json") == BASELINE_STATE_FROZEN
 
 
 def _validate_adoption_marker(
@@ -189,6 +194,7 @@ async def command_migrate(
     *,
     baseline_id: str = DEFAULT_BASELINE_ID,
     allow_adoption: bool = True,
+    allow_fresh: bool = True,
     reconciliation_evidence_out: Path | None = None,
     log: Any = print,
 ) -> MigrationCommandResult:
@@ -230,6 +236,11 @@ async def command_migrate(
                     conn,
                     allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
                 ):
+                    if not allow_fresh:
+                        raise AuthorityBlockedError(
+                            "cutover requires an existing legacy database; empty databases "
+                            "must use init-fresh"
+                        )
                     await fresh_install(
                         conn,
                         paths,
@@ -336,6 +347,64 @@ async def _cutover_and_adopt(
     cutover_path = baseline_dir / "cutover_convergence.sql"
     grants_path = baseline_dir / "grants.sql"
 
+    reconciliation_receipt = await _verify_legacy_cutover_ready(
+        conn,
+        paths,
+        reconciliation_receipt=reconciliation_receipt,
+        log=log,
+    )
+
+    # Roles/extensions are idempotent; an adopted database must carry the
+    # same role set and search_path configuration as a fresh install.
+    await bootstrap_roles(conn, paths, authority.role_prefix)
+    await bootstrap_extensions(conn, paths, authority.role_prefix)
+
+    owner_role = f"{authority.role_prefix}owner"
+    async with conn.transaction():
+        await run_baseline_sql_file(
+            conn,
+            cutover_path,
+            role_prefix=authority.role_prefix,
+            execution_role=owner_role,
+        )
+        await run_baseline_sql_file(
+            conn,
+            grants_path,
+            role_prefix=authority.role_prefix,
+            execution_role=owner_role,
+        )
+        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
+
+        await conn.execute(ledger.LEDGER_DDL)
+        computed = await adopt_baseline(
+            conn,
+            baseline,
+            manifest_sha256=manifest_sha,
+            role_prefix=authority.role_prefix,
+        )
+    if "already_adopted" in computed:
+        adopted = await authority.adopted_baseline(conn)
+        if adopted is None:
+            raise AuthorityError(
+                "adoption reported an existing marker, but no marker row can be read"
+            )
+        _validate_adoption_marker(adopted, baseline, manifest_sha)
+        log(f"authority: baseline already adopted ({computed['already_adopted']})")
+    else:
+        log(
+            f"authority: baseline {baseline.baseline_id} adopted; "
+            "legacy ledgers frozen as historical evidence"
+        )
+
+
+async def _verify_legacy_cutover_ready(
+    conn: Any,
+    paths: AuthorityPaths,
+    *,
+    reconciliation_receipt: NumericReconciliationReceipt | None = None,
+    log: Any = print,
+) -> NumericReconciliationReceipt | None:
+    """Read-only proof required by both admin ownership prep and adoption."""
     state = await detect_legacy_state(conn)
     if not state.has_any:
         raise AuthorityBlockedError(
@@ -365,36 +434,66 @@ async def _cutover_and_adopt(
                 receipt,
             )
         log("authority: numeric-ledger reconciliation receipt proven")
+        return receipt
+    return reconciliation_receipt
 
-    # Roles/extensions are idempotent; an adopted database must carry the
-    # same role set and search_path configuration as a fresh install.
-    await bootstrap_roles(conn, paths, authority.role_prefix)
-    await bootstrap_extensions(conn, paths, authority.role_prefix)
 
-    await run_baseline_sql_file(conn, cutover_path, role_prefix=authority.role_prefix)
-    await run_baseline_sql_file(conn, grants_path, role_prefix=authority.role_prefix)
-    await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
+async def command_prepare_cutover_ownership(
+    authority: MigrationAuthority,
+    *,
+    expected_database: str,
+    baseline_id: str = DEFAULT_BASELINE_ID,
+    reconciliation_evidence_out: Path | None = None,
+    log: Any = print,
+) -> MigrationCommandResult:
+    """Admin-only one-time transfer of legacy-owned objects to the owner role.
 
-    await conn.execute(ledger.LEDGER_DDL)
-    computed = await adopt_baseline(
-        conn,
-        baseline,
-        manifest_sha256=manifest_sha,
-        role_prefix=authority.role_prefix,
-    )
-    if "already_adopted" in computed:
-        adopted = await authority.adopted_baseline(conn)
-        if adopted is None:
-            raise AuthorityError(
-                "adoption reported an existing marker, but no marker row can be read"
+    The schema migrator cannot alter objects owned by a historical superuser.
+    This explicit phase runs only after the legacy chain is proven complete;
+    it never grants application privileges and never writes an adoption marker.
+    The following migrator ``cutover`` reruns the idempotent convergence under
+    the owner role, applies grants, verifies fingerprints and writes the marker.
+    """
+    if not expected_database:
+        raise AuthorityBlockedError("admin ownership cutover requires --expected-database")
+    if not baseline_ready(authority.paths, baseline_id):
+        raise AuthorityBlockedError("admin ownership cutover requires a frozen baseline")
+    baseline, _manifest_sha = load_baseline(authority.paths, baseline_id)
+    lock_conn = await authority.connect()
+    await authority.acquire_lock(lock_conn)
+    receipt: NumericReconciliationReceipt | None = None
+    try:
+        conn = await authority.connect()
+        try:
+            actual_database = str(await conn.fetchval("SELECT current_database()"))
+            if actual_database != expected_database:
+                raise AuthorityBlockedError(
+                    "admin ownership cutover DSN does not target --expected-database"
+                )
+            if await database_empty(
+                conn,
+                allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
+            ):
+                raise AuthorityBlockedError(
+                    "admin ownership cutover is forbidden on an empty database"
+                )
+            await _guard_known_database(conn)
+            receipt = await _verify_legacy_cutover_ready(conn, authority.paths, log=log)
+            await provision_roles_admin(conn, authority.paths, authority.role_prefix)
+            await bootstrap_extensions(conn, authority.paths, authority.role_prefix)
+            await run_baseline_sql_file(
+                conn,
+                authority.paths.baseline_dir(baseline.baseline_id)
+                / "cutover_convergence.sql",
+                role_prefix=authority.role_prefix,
             )
-        _validate_adoption_marker(adopted, baseline, manifest_sha)
-        log(f"authority: baseline already adopted ({computed['already_adopted']})")
-    else:
-        log(
-            f"authority: baseline {baseline.baseline_id} adopted; "
-            "legacy ledgers frozen as historical evidence"
-        )
+        finally:
+            await conn.close()
+    finally:
+        await authority.release_lock(lock_conn)
+    result = MigrationCommandResult(0, receipt)
+    _write_migration_evidence(result, reconciliation_evidence_out)
+    return result
 
 
 # ----------------------------------------------------------------------

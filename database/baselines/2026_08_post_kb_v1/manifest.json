@@ -1,0 +1,74 @@
+{
+  "acl_sha256": null,
+  "baseline_id": "2026_08_post_kb_v1",
+  "files_sha256": {
+    "cutover_convergence.sql": "244ea24037d76bafe7d681f92d22937613543fb9c116d2a1f433e052babcc139",
+    "grants.sql": "2e92ac72d056f5e2d30624b4d32b94386c567ebeec7d98908f54e46035f577fd",
+    "init.sql": "894f0ec2b1da6079a71557a069ef14709dfb47082aa181d4d2d6d47e8b6570d5",
+    "reference_data.sql": "e9246aed3cab8f8f18884ead0dc274daf76048def89cc60ab36c710944683d6f",
+    "verify.sql": "a0605273763988608dd79606a1f2b25fd756266f62afdaf8f623933ec8e2f842"
+  },
+  "generated_at": null,
+  "generator": "scripts/database/freeze_baseline.py",
+  "last_legacy_change": "112_kb_document_progress_retention.sql",
+  "live_evidence": {
+    "fresh_reproduction": "NOT_RUN",
+    "role_connection_matrix": "NOT_RUN",
+    "source_fingerprints": "NOT_RUN"
+  },
+  "policy_files_sha256": {
+    "data-access-inventory.json": "8c38710ae655175e7cfcdae6d1964182e096e0da67f572babebbe09b8a38de07",
+    "grants-policy.json": "8c37d0a33b0ce6c055ca2b53c2b1a041d88823ce9a7ead58e56016fa20c49a5b",
+    "ownership-policy.json": "1146fc0f34f9e386b9cee240077803c08349c8db53e7bc5a376d8c01f110a778"
+  },
+  "postgres_version": null,
+  "reference_data": [
+    {
+      "immutable_columns": [
+        "name",
+        "description",
+        "category",
+        "resource",
+        "action",
+        "is_system"
+      ],
+      "natural_key": [
+        "permission_code"
+      ],
+      "table": "gateway.permissions",
+      "where": "is_system IS TRUE"
+    },
+    {
+      "immutable_columns": [
+        "description",
+        "permissions",
+        "is_system"
+      ],
+      "natural_key": [
+        "role_name"
+      ],
+      "table": "gateway.rbac_roles",
+      "where": "is_system IS TRUE"
+    },
+    {
+      "immutable_columns": [
+        "role_name",
+        "permission_code"
+      ],
+      "natural_key": [
+        "role_name",
+        "permission_code"
+      ],
+      "table": "gateway.role_permissions",
+      "where": "role_name IN (SELECT role_name FROM gateway.rbac_roles WHERE is_system IS TRUE)"
+    }
+  ],
+  "reference_data_sha256": null,
+  "required_live_command": "uv run --all-packages --extra test python scripts/database/freeze_baseline.py --source-database arc03_<source> --verify-database arc03_<empty_verify> --write",
+  "schema": "migration-authority/baseline-manifest/v1",
+  "schema_revision": "112",
+  "source_git_sha": null,
+  "state": "pending-live-freeze",
+  "structural_sha256": null,
+  "extensions_sha256": null
+}

@@ -303,7 +303,13 @@ async def bootstrap_extensions(
         await conn.execute("RESET ROLE")
 
 
-async def run_baseline_sql_file(conn: Any, path: Path, *, role_prefix: str | None = None) -> None:
+async def run_baseline_sql_file(
+    conn: Any,
+    path: Path,
+    *,
+    role_prefix: str | None = None,
+    execution_role: str | None = None,
+) -> None:
     """Execute one baseline SQL file in a runner-owned transaction.
 
     Files that name platform roles (cutover, grants) are rendered with the
@@ -316,7 +322,15 @@ async def run_baseline_sql_file(conn: Any, path: Path, *, role_prefix: str | Non
     if role_prefix is not None:
         sql = render_role_sql(sql, role_prefix)
     async with conn.transaction():
-        await conn.execute(sql)
+        if execution_role is not None:
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,62}", execution_role) is None:
+                raise AuthorityError(f"unsafe baseline execution role {execution_role!r}")
+            await conn.execute(f'SET LOCAL ROLE "{execution_role}"')
+        try:
+            await conn.execute(sql)
+        finally:
+            if execution_role is not None:
+                await conn.execute("RESET ROLE")
 
 
 async def verify_baseline_sql_file(conn: Any, path: Path) -> list[dict[str, Any]]:
@@ -505,7 +519,12 @@ async def fresh_install(
                 await run_baseline_sql_file(conn, baseline_dir / file_name)
         finally:
             await conn.execute("RESET ROLE")
-        await run_baseline_sql_file(conn, baseline_dir / "grants.sql", role_prefix=role_prefix)
+        await run_baseline_sql_file(
+            conn,
+            baseline_dir / "grants.sql",
+            role_prefix=role_prefix,
+            execution_role=owner_role,
+        )
         await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
 
         computed = await compute_fingerprints(
