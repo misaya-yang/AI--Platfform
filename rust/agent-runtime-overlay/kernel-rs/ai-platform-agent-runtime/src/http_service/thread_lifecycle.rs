@@ -23,7 +23,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::RuntimeHttpState;
-use super::apply_model_limits;
+use super::threads::apply_model_limits;
 use super::security::RuntimeError;
 use super::security::SESSION_HEADER;
 use super::security::TENANT_HEADER;

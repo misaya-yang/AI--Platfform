@@ -1,0 +1,764 @@
+//! Kernel event pump: projects server notifications into the durable event
+//! store and dispatches dynamic capability tool calls (read path inline,
+//! write path through approval + capability worker).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
+
+use codex_app_server::in_process::InProcessServerEvent;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_protocol::ThreadId;
+use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
+use sqlx::Row;
+use tokio::sync::Semaphore;
+use tokio::sync::broadcast;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
+use uuid::Uuid;
+
+use super::ReadonlyTurnBinding;
+use super::RuntimeBroadcastEvent;
+use super::TextProjectionState;
+use super::projection::persist_projected_events;
+use crate::AgentKernel;
+use crate::PlatformThreadIdentity;
+use crate::PostgresThreadStore;
+use crate::SequencedAssistantTurnEventV1;
+use crate::approval_control::ApprovalBroker;
+use crate::capability_execution::{
+    CapabilityExecutionOutcome, ReadonlyCapabilityBinding, execute_capability,
+};
+use crate::capability_worker::CapabilityWorkerClient;
+use crate::postgres_store::PlatformLifecycleEvent;
+use ai_platform_capability_contract::CapabilityEffect;
+use ai_platform_capability_contract::CapabilityExecutionStatus;
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn route_kernel_events(
+    mut kernel: AgentKernel,
+    store: Arc<PostgresThreadStore>,
+    approvals: ApprovalBroker,
+    events: broadcast::Sender<RuntimeBroadcastEvent>,
+    kernel_ready: Arc<AtomicBool>,
+    readonly_by_turn: Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
+    turn_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    capability_client: reqwest::Client,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    let request_handle = kernel.request_handle();
+    let dynamic_tool_slots = Arc::new(Semaphore::new(16));
+    let runtime_cancel = CancellationToken::new();
+    let mut text_projection = TextProjectionState::default();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                runtime_cancel.cancel();
+                break;
+            },
+            event = kernel.next_event() => {
+                let Some(event) = event else {
+                    runtime_cancel.cancel();
+                    break;
+                };
+                match event {
+                    InProcessServerEvent::ServerNotification(notification) => {
+                        if let codex_app_server_protocol::ServerNotification::TurnCompleted(
+                            completed,
+                        ) = notification.as_ref()
+                        {
+                            let token = turn_cancellations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&completed.turn.id);
+                            if let Some(token) = token {
+                                token.cancel();
+                            }
+                        }
+                        persist_projected_events(
+                            notification.as_ref(),
+                            &store,
+                            &events,
+                            &readonly_by_turn,
+                            &mut text_projection,
+                        )
+                        .await;
+                    }
+                    InProcessServerEvent::ServerRequest(request) => {
+                        if let codex_app_server_protocol::ServerRequest::DynamicToolCall {
+                            request_id,
+                            params,
+                        } = request.as_ref()
+                        {
+                            let Some(permit) = dynamic_tool_slots.clone().try_acquire_owned().ok()
+                            else {
+                                let _ = request_handle.reject_server_request(
+                                    request_id.clone(),
+                                    JSONRPCErrorError {
+                                        code: -32001,
+                                        message: "read-only capability concurrency limit reached".to_string(),
+                                        data: None,
+                                    },
+                                );
+                                continue;
+                            };
+                            let request_handle = request_handle.clone();
+                            let store = Arc::clone(&store);
+                            let readonly_by_turn = Arc::clone(&readonly_by_turn);
+                            let capability_client = capability_client.clone();
+                            let approvals = approvals.clone();
+                            let events = events.clone();
+                            let request_id = request_id.clone();
+                            let params = params.clone();
+                            let cancel = turn_cancellations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .entry(params.turn_id.clone())
+                                .or_insert_with(|| runtime_cancel.child_token())
+                                .clone();
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let result = handle_dynamic_tool_call(
+                                    &params,
+                                    &store,
+                                    &readonly_by_turn,
+                                    &capability_client,
+                                    &approvals,
+                                    &events,
+                                    &cancel,
+                                )
+                                .await;
+                                match result {
+                                    Ok(value) => {
+                                        let _ = request_handle
+                                            .resolve_server_request_async(request_id, value)
+                                            .await;
+                                    }
+                                    Err(_) => {
+                                        let _ = request_handle.reject_server_request_async(
+                                            request_id,
+                                            JSONRPCErrorError {
+                                                code: -32001,
+                                                message: "read-only capability invocation failed".to_string(),
+                                                data: None,
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                }
+                            });
+                            continue;
+                        }
+                        match approvals.capture_server_request(request.as_ref(), &store).await {
+                            Ok(Some(approval_id)) => {
+                                persist_approval_required(request.as_ref(), approval_id, &store, &events).await;
+                            }
+                            Ok(None) | Err(_) => {
+                                let _ = kernel
+                                    .reject_server_request(
+                                        request.id().clone(),
+                                        JSONRPCErrorError {
+                                            code: -32001,
+                                            message: "platform approval is unavailable or unsupported".to_string(),
+                                            data: None,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    InProcessServerEvent::Lagged { skipped } => {
+                        warn!(skipped, "Agent in-process event consumer lagged");
+                    }
+                }
+            }
+        }
+    }
+    kernel_ready.store(false, Ordering::Release);
+    let _ = kernel.shutdown().await;
+}
+
+async fn handle_dynamic_tool_call(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    store: &PostgresThreadStore,
+    readonly_by_turn: &Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
+    capability_client: &reqwest::Client,
+    approvals: &ApprovalBroker,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value, String> {
+    let thread_id = ThreadId::from_string(&params.thread_id)
+        .map_err(|_| "dynamic_tool_thread_invalid".to_string())?;
+    let identity = store
+        .identity_for_kernel_thread(thread_id)
+        .await
+        .map_err(|_| "dynamic_tool_scope_unavailable".to_string())?;
+    let cached_binding = readonly_by_turn
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&params.turn_id)
+        .cloned();
+    // Re-check the durable lease on every call. The in-memory entry is only a
+    // consistency witness; using it as authority would allow a revoked lease
+    // or completed run to invoke the capability plane.
+    let binding = load_readonly_turn_binding(store, &identity, &params.turn_id).await?;
+    if let Some(cached_binding) = cached_binding
+        && (cached_binding.snapshot_id != binding.snapshot_id
+            || cached_binding.capability_revision != binding.capability_revision)
+    {
+        return Err("dynamic_tool_binding_changed".to_string());
+    }
+    let (capability_allowlist, expected_tool, descriptor, effect) =
+        crate::readonly_capabilities::resolve_dynamic_capability_descriptor(
+            &binding.payload,
+            params.namespace.as_deref(),
+            &params.tool,
+        )
+        .map_err(|error| error.to_string())?;
+    let bound_dataset_ids = binding
+        .payload
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("kind").and_then(serde_json::Value::as_str) == Some("knowledge"))
+        .filter_map(|item| item.get("payload"))
+        .filter_map(|payload| payload.get("dataset_id"))
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let capability_plane_url = std::env::var("AI_PLATFORM_CAPABILITY_PLANE_URL")
+        .unwrap_or_else(|_| "http://gateway:8080/internal/v2/agent-capabilities".to_string());
+    let mut digest = Sha256::new();
+    digest.update(
+        serde_json::to_vec(&params.arguments).map_err(|_| "dynamic_tool_arguments_invalid")?,
+    );
+    let arguments_sha256 = format!("{:x}", digest.finalize());
+    store
+        .append_platform_lifecycle_event(PlatformLifecycleEvent {
+            kernel_thread_id: thread_id,
+            turn_id: params.turn_id.clone(),
+            item_id: Some(params.call_id.clone()),
+            event_key: format!("tool-use/{}/{}", params.turn_id, params.call_id),
+            item_type: "tool_use".to_string(),
+            status: if effect == CapabilityEffect::Read {
+                "dispatched".to_string()
+            } else {
+                "awaiting_approval".to_string()
+            },
+            payload: serde_json::json!({
+                "schema_version": "agent-runtime-tool-lifecycle/v1",
+                "turn_id": params.turn_id,
+                "tool_call_id": params.call_id,
+                "tool_name": params.tool,
+                "arguments_sha256": arguments_sha256,
+                "lifecycle": if effect == CapabilityEffect::Read {
+                    "dispatched"
+                } else {
+                    "awaiting_approval"
+                },
+                "effect": match effect {
+                    CapabilityEffect::Read => "read",
+                    CapabilityEffect::Write => "write",
+                    CapabilityEffect::Unknown => "unknown",
+                },
+                "dispatch_state": if effect == CapabilityEffect::Read {
+                    "dispatched"
+                } else {
+                    "awaiting_approval"
+                },
+            }),
+        })
+        .await
+        .map_err(|_| "dynamic_tool_dispatch_receipt_failed")?;
+    let worker_enabled = capability_worker_enabled(
+        std::env::var("AI_PLATFORM_CAPABILITY_WORKER_ENABLED")
+            .ok()
+            .as_deref(),
+    );
+    let worker_writes_enabled = capability_worker_enabled(
+        std::env::var("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED")
+            .ok()
+            .as_deref(),
+    );
+    let worker_url = std::env::var("AI_PLATFORM_CAPABILITY_WORKER_URL").ok();
+    let lease_secret = std::env::var("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET").ok();
+    if effect != CapabilityEffect::Read
+        && (!worker_enabled
+            || !worker_writes_enabled
+            || worker_url
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            || lease_secret
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty()))
+    {
+        persist_dynamic_terminal_receipt(
+            params,
+            thread_id,
+            store,
+            "failed",
+            "capability_worker_not_ready",
+        )
+        .await
+        .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+        return Ok(structured_capability_response(
+            false,
+            "capability worker is not ready for this capability",
+        ));
+    }
+    let mut approval_id = None;
+    if effect != CapabilityEffect::Read {
+        let (id, receiver) = approvals
+            .await_dynamic_tool(params, &expected_tool.id, &identity, store)
+            .await?;
+        approval_id = Some(id);
+        if let Err(error) =
+            persist_dynamic_approval_required(params, id, effect, &identity, store, events).await
+        {
+            approvals
+                .cancel_dynamic(
+                    id,
+                    &identity.tenant_id,
+                    &identity.user_id,
+                    &identity.session_id,
+                    "approval_receipt_failed",
+                    store,
+                )
+                .await;
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                "failed",
+                "approval_receipt_failed",
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(false, &error));
+        }
+        let decision = tokio::select! {
+            decision = tokio::time::timeout(Duration::from_secs(600), receiver) => {
+                decision.ok().and_then(Result::ok)
+            }
+            () = cancel.cancelled() => None,
+        };
+        let Some(decision) = decision else {
+            approvals
+                .cancel_dynamic(
+                    id,
+                    &identity.tenant_id,
+                    &identity.user_id,
+                    &identity.session_id,
+                    if cancel.is_cancelled() {
+                        "runtime_cancelled"
+                    } else {
+                        "approval_expired"
+                    },
+                    store,
+                )
+                .await;
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                if cancel.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                if cancel.is_cancelled() {
+                    "capability_execution_cancelled"
+                } else {
+                    "capability_execution_timeout"
+                },
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(
+                false,
+                if cancel.is_cancelled() {
+                    "capability execution cancelled"
+                } else {
+                    "capability approval expired"
+                },
+            ));
+        };
+        if !decision.approved {
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                "failed",
+                "capability_execution_rejected",
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(
+                false,
+                decision
+                    .reason
+                    .as_deref()
+                    .unwrap_or("capability approval rejected"),
+            ));
+        }
+        store
+            .append_platform_lifecycle_event(PlatformLifecycleEvent {
+                kernel_thread_id: thread_id,
+                turn_id: params.turn_id.clone(),
+                item_id: Some(params.call_id.clone()),
+                event_key: format!("tool-dispatch/{}/{}", params.turn_id, params.call_id),
+                item_type: "tool_use".to_string(),
+                status: "dispatched".to_string(),
+                payload: serde_json::json!({
+                    "schema_version": "agent-runtime-tool-lifecycle/v1",
+                    "turn_id": params.turn_id,
+                    "tool_call_id": params.call_id,
+                    "tool_name": params.tool,
+                    "approval_id": id,
+                    "lifecycle": "dispatched",
+                    "dispatch_state": "dispatched",
+                    "effect": "write",
+                }),
+            })
+            .await
+            .map_err(|_| "dynamic_tool_dispatch_receipt_failed")?;
+    }
+    let internal_token = std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default();
+    let approval_id_string = approval_id.map(|id| id.to_string());
+    let result: Result<CapabilityExecutionOutcome, String> = if worker_enabled {
+        let worker_url = worker_url
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "capability_worker_url_missing".to_string());
+        let lease_secret = lease_secret
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "capability_worker_lease_secret_missing".to_string());
+        match (worker_url, lease_secret) {
+            (Ok(worker_url), Ok(lease_secret)) => {
+                let worker = CapabilityWorkerClient::new(
+                    capability_client.clone(),
+                    &worker_url,
+                    internal_token.clone(),
+                )
+                .map_err(|error| error.code().to_string());
+                match worker {
+                    Ok(worker) => execute_capability(
+                        &worker,
+                        &identity,
+                        &ReadonlyCapabilityBinding {
+                            capability_revision: binding.capability_revision as u64,
+                            allowlist: capability_allowlist.clone(),
+                            expected_tool: expected_tool.clone(),
+                            descriptor: descriptor.clone(),
+                        },
+                        params,
+                        lease_secret.as_bytes(),
+                        effect,
+                        approval_id_string.as_deref(),
+                        cancel,
+                    )
+                    .await
+                    .map_err(|error| error.code().to_string()),
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    } else if effect == CapabilityEffect::Read {
+        crate::capability_plane::invoke_dynamic_tool(
+            capability_client,
+            params,
+            &identity,
+            &capability_plane_url,
+            &internal_token,
+            binding.capability_revision,
+            &binding.snapshot_id,
+            &bound_dataset_ids,
+            &capability_allowlist,
+            &expected_tool,
+        )
+        .await
+        .map(|response| CapabilityExecutionOutcome {
+            status: if response.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
+                CapabilityExecutionStatus::Succeeded
+            } else {
+                CapabilityExecutionStatus::Failed
+            },
+            response,
+        })
+    } else {
+        Err("capability_worker_required_for_write".to_string())
+    };
+    let (status, detail) = match &result {
+        Ok(outcome) => (
+            capability_status_name(outcome.status),
+            capability_result_detail(outcome),
+        ),
+        Err(error) => ("failed", error.as_str()),
+    };
+    let receipt = store
+        .append_platform_lifecycle_event(PlatformLifecycleEvent {
+            kernel_thread_id: thread_id,
+            turn_id: params.turn_id.clone(),
+            item_id: Some(params.call_id.clone()),
+            event_key: format!("tool-result/{}/{}", params.turn_id, params.call_id),
+            item_type: "tool_result".to_string(),
+            status: status.to_string(),
+            payload: serde_json::json!({
+                "schema_version": "agent-runtime-tool-lifecycle/v1",
+                "turn_id": params.turn_id,
+                "tool_call_id": params.call_id,
+                "lifecycle": "terminal",
+                "result_status": status,
+                "detail": detail,
+            }),
+        })
+        .await;
+    if receipt.is_err() {
+        return Err("dynamic_tool_result_receipt_failed".to_string());
+    }
+    result.map(|outcome| outcome.response)
+}
+
+pub(super) fn capability_worker_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+pub(super) fn capability_status_name(status: CapabilityExecutionStatus) -> &'static str {
+    match status {
+        CapabilityExecutionStatus::Succeeded => "succeeded",
+        CapabilityExecutionStatus::Failed => "failed",
+        CapabilityExecutionStatus::Cancelled => "cancelled",
+        CapabilityExecutionStatus::Timeout => "timeout",
+        CapabilityExecutionStatus::SideEffectUnknown => "side_effect_unknown",
+        _ => "failed",
+    }
+}
+
+pub(super) fn capability_result_detail(outcome: &CapabilityExecutionOutcome) -> &'static str {
+    match outcome.status {
+        CapabilityExecutionStatus::Succeeded => "completed",
+        CapabilityExecutionStatus::Failed => "capability_execution_failed",
+        CapabilityExecutionStatus::Cancelled => "capability_execution_cancelled",
+        CapabilityExecutionStatus::Timeout => "capability_execution_timeout",
+        CapabilityExecutionStatus::SideEffectUnknown => "capability_execution_side_effect_unknown",
+        _ => "capability_execution_failed",
+    }
+}
+
+async fn load_readonly_turn_binding(
+    store: &PostgresThreadStore,
+    identity: &PlatformThreadIdentity,
+    turn_id: &str,
+) -> Result<ReadonlyTurnBinding, String> {
+    let turn_uuid =
+        Uuid::parse_str(turn_id).map_err(|_| "dynamic_tool_turn_invalid".to_string())?;
+    let row = sqlx::query(
+        r#"
+        SELECT snapshot.snapshot_id,
+               snapshot.capability_revision,
+               snapshot.snapshot
+          FROM assistant_runtime_snapshots AS snapshot
+          JOIN assistant_runtime_model_leases AS lease
+            ON lease.snapshot_id = snapshot.snapshot_id
+           AND lease.run_id = snapshot.run_id
+           AND lease.tenant_id = snapshot.tenant_id
+           AND lease.user_id = snapshot.user_id
+           AND lease.session_id = snapshot.session_id
+         JOIN assistant_runs AS run ON run.run_id = snapshot.run_id
+         WHERE snapshot.run_id = $1
+           AND snapshot.runtime_thread_id = $2
+           AND snapshot.tenant_id = $3
+           AND snapshot.user_id = $4
+           AND snapshot.session_id = $5
+           AND lease.status = 'active'
+           AND lease.expires_at > NOW()
+           AND run.status = 'running'
+           AND run.engine = 'agent_runtime'
+           AND NOT EXISTS (
+               SELECT 1 FROM assistant_runtime_snapshot_revocations AS revoked
+                WHERE revoked.snapshot_id = snapshot.snapshot_id
+           )
+         ORDER BY snapshot.created_at DESC
+         LIMIT 1
+        "#,
+    )
+    .bind(turn_uuid)
+    .bind(
+        identity
+            .runtime_thread_id
+            .to_string()
+            .parse::<Uuid>()
+            .map_err(|_| "dynamic_tool_thread_invalid")?,
+    )
+    .bind(&identity.tenant_id)
+    .bind(&identity.user_id)
+    .bind(&identity.session_id)
+    .fetch_optional(&store.pool)
+    .await
+    .map_err(|_| "dynamic_tool_binding_unavailable".to_string())?
+    .ok_or_else(|| "dynamic_tool_binding_missing".to_string())?;
+    let snapshot: serde_json::Value = row
+        .try_get("snapshot")
+        .map_err(|_| "dynamic_tool_snapshot_invalid".to_string())?;
+    let payload = snapshot
+        .get("readonly_capabilities")
+        .cloned()
+        .ok_or_else(|| "dynamic_tool_binding_missing".to_string())?;
+    Ok(ReadonlyTurnBinding {
+        snapshot_id: row
+            .try_get::<Uuid, _>("snapshot_id")
+            .map_err(|_| "dynamic_tool_snapshot_invalid".to_string())?
+            .to_string(),
+        capability_revision: row
+            .try_get("capability_revision")
+            .map_err(|_| "dynamic_tool_snapshot_invalid".to_string())?,
+        payload,
+        created_at: Instant::now(),
+    })
+}
+
+async fn persist_approval_required(
+    request: &codex_app_server_protocol::ServerRequest,
+    approval_id: Uuid,
+    store: &PostgresThreadStore,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+) {
+    let Ok(raw) = serde_json::to_value(request) else {
+        return;
+    };
+    let Some(params) = raw.get("params") else {
+        return;
+    };
+    let Some(thread_id) = params
+        .get("threadId")
+        .or_else(|| params.get("conversationId"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| ThreadId::from_string(value).ok())
+    else {
+        return;
+    };
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| params.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let Ok(identity) = store.identity_for_kernel_thread(thread_id).await else {
+        return;
+    };
+    let event = crate::AssistantTurnEventV1::new(
+        "approval_required",
+        json!({
+            "run_id": turn_id,
+            "session_id": identity.session_id,
+            "thread_id": identity.runtime_thread_id.to_string(),
+            "approval_id": approval_id,
+            "tool_call_id": params.get("itemId").or_else(|| params.get("callId")),
+            "status": "approval_required",
+            "approval_required": true,
+        }),
+    );
+    let event_key = format!("compat/approval/{approval_id}/required");
+    match store
+        .append_v1_event(thread_id, approval_id, &event_key, &event)
+        .await
+    {
+        Ok(sequence) => {
+            let _ = events.send(RuntimeBroadcastEvent {
+                root_thread_id: identity.runtime_thread_id,
+                event: SequencedAssistantTurnEventV1 { sequence, event },
+            });
+        }
+        Err(error) => warn!(%error, "failed to project approval_required"),
+    }
+}
+
+async fn persist_dynamic_approval_required(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    approval_id: Uuid,
+    effect: CapabilityEffect,
+    identity: &PlatformThreadIdentity,
+    store: &PostgresThreadStore,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+) -> Result<(), String> {
+    let arguments_hash = ai_platform_capability_contract::canonical_json_hash(&params.arguments)
+        .unwrap_or_else(|_| "sha256:invalid".to_string());
+    let effect = match effect {
+        CapabilityEffect::Read => "read",
+        CapabilityEffect::Write => "write",
+        CapabilityEffect::Unknown => "unknown",
+    };
+    let event = crate::AssistantTurnEventV1::new(
+        "approval_required",
+        json!({
+            "run_id": params.turn_id,
+            "session_id": identity.session_id,
+            "thread_id": identity.runtime_thread_id.to_string(),
+            "approval_id": approval_id,
+            "tool_id": params.call_id,
+            "tool_call_id": params.call_id,
+            "tool_name": params.tool,
+            "arguments_hash": arguments_hash,
+            "effect": effect,
+            "status": "approval_required",
+            "approval_required": true,
+        }),
+    );
+    let event_key = format!("compat/approval/{approval_id}/required");
+    match store
+        .append_v1_event(identity.runtime_thread_id, approval_id, &event_key, &event)
+        .await
+    {
+        Ok(sequence) => {
+            let _ = events.send(RuntimeBroadcastEvent {
+                root_thread_id: identity.runtime_thread_id,
+                event: SequencedAssistantTurnEventV1 { sequence, event },
+            });
+            Ok(())
+        }
+        Err(error) => {
+            warn!(%error, "failed to project dynamic approval_required");
+            Err("approval_receipt_failed".to_string())
+        }
+    }
+}
+
+fn structured_capability_response(success: bool, message: &str) -> serde_json::Value {
+    crate::capability_execution::dynamic_tool_text_response(success, message)
+}
+
+async fn persist_dynamic_terminal_receipt(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    thread_id: ThreadId,
+    store: &PostgresThreadStore,
+    status: &str,
+    detail: &str,
+) -> Result<(), ()> {
+    store
+        .append_platform_lifecycle_event(PlatformLifecycleEvent {
+            kernel_thread_id: thread_id,
+            turn_id: params.turn_id.clone(),
+            item_id: Some(params.call_id.clone()),
+            event_key: format!("tool-result/{}/{}", params.turn_id, params.call_id),
+            item_type: "tool_result".to_string(),
+            status: status.to_string(),
+            payload: serde_json::json!({
+                "schema_version": "agent-runtime-tool-lifecycle/v1",
+                "turn_id": params.turn_id,
+                "tool_call_id": params.call_id,
+                "lifecycle": "terminal",
+                "result_status": status,
+                "detail": detail,
+            }),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
+}
