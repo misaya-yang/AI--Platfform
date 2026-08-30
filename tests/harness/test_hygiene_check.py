@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from scripts.harness.hygiene_check import apply_allowlist, run, scan_js, scan_python
 
@@ -14,6 +17,11 @@ def _write(root: Path, relative: str, content: str) -> None:
 
 def test_python_syntax_error_fails_closed(tmp_path: Path) -> None:
     _write(tmp_path, "tests/test_broken.py", "def test_broken(:\n    pass\n")
+    _write(
+        tmp_path,
+        "web/src/clean.test.ts",
+        'test("real", () => { expect(value).toBe(1); });\n',
+    )
 
     failures, warnings = scan_python(tmp_path)
 
@@ -155,6 +163,69 @@ def test_empty_scan_fails_closed(tmp_path: Path) -> None:
         run(tmp_path, tmp_path / "evidence.json", tmp_path / "missing-allowlist.json")
         == 2
     )
+
+
+@pytest.mark.parametrize(
+    ("present_file", "missing_scan"),
+    [
+        (
+            "tests/test_real.py",
+            "typescript_test_files",
+        ),
+        (
+            "web/src/real.test.ts",
+            "python_test_files",
+        ),
+    ],
+)
+def test_one_language_scan_falling_to_zero_fails_closed(
+    tmp_path: Path,
+    present_file: str,
+    missing_scan: str,
+) -> None:
+    content = (
+        "def test_real(value):\n    assert value\n"
+        if present_file.endswith(".py")
+        else 'test("real", () => { expect(value).toBe(1); });\n'
+    )
+    _write(tmp_path, present_file, content)
+    evidence = tmp_path / "evidence.json"
+    scan_counts: dict[str, int] = {}
+    scan_python(tmp_path, scan_counts=scan_counts)
+    scan_js(tmp_path, scan_counts=scan_counts)
+
+    assert run(tmp_path, evidence, tmp_path / "missing-allowlist.json") == 2
+    assert scan_counts[missing_scan] == 0
+
+
+@pytest.mark.parametrize(
+    ("relative", "scanner"),
+    [
+        ("tests/test_unreadable.py", scan_python),
+        ("web/src/unreadable.test.ts", scan_js),
+    ],
+)
+def test_source_read_error_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative: str,
+    scanner: Callable[[Path], object],
+) -> None:
+    path = tmp_path / relative
+    _write(tmp_path, relative, "placeholder\n")
+    original = Path.read_text
+
+    def unreadable(self: Path, *args, **kwargs):
+        if self == path:
+            raise PermissionError("synthetic unreadable source")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    result = scanner(tmp_path)
+    failures = result[0] if isinstance(result, tuple) else result
+
+    assert len(failures) == 1
+    assert "source unreadable" in failures[0]["issue"]
 
 
 def test_symlinked_scan_subtree_fails_closed(tmp_path: Path) -> None:

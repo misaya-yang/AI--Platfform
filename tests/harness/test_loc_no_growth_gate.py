@@ -153,4 +153,42 @@ def test_empty_current_tree_is_gate_error_not_deletion_pass(tmp_path: Path) -> N
     assert gate.run(root, baseline_path, root / "evidence.json") == 2
     evidence = json.loads((root / "evidence.json").read_text(encoding="utf-8"))
     assert evidence["result"] == "error"
-    assert evidence["scan_error"] == "no source files discovered"
+    assert evidence["scan_error"] == "no source files discovered for: python, typescript"
+
+
+@pytest.mark.parametrize("missing_kind", ["python", "typescript"])
+def test_one_language_scan_falling_to_zero_is_gate_error(
+    tmp_path: Path,
+    missing_kind: str,
+) -> None:
+    root, base_sha = _repo(tmp_path)
+    if missing_kind == "python":
+        (root / "src" / "big.py").unlink()
+    else:
+        (root / "web" / "src" / "big.ts").unlink()
+    baseline_path = root / "loc-baseline.json"
+    baseline_path.write_text(json.dumps(_baseline(base_sha)) + "\n", encoding="utf-8")
+    evidence_path = root / "evidence.json"
+
+    assert gate.run(root, baseline_path, evidence_path) == 2
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["scan_error"] == f"no source files discovered for: {missing_kind}"
+
+
+def test_source_read_error_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _base_sha = _repo(tmp_path)
+    unreadable_path = root / "src" / "big.py"
+    original = Path.read_text
+
+    def unreadable(self: Path, *args, **kwargs):
+        if self == unreadable_path:
+            raise PermissionError("synthetic unreadable source")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+
+    with pytest.raises(gate.LocScanError, match="cannot read source file"):
+        gate.walk(root, ".py")

@@ -395,12 +395,18 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
             )
         print(f"GATE ERROR: hygiene scan incomplete: {exc}", file=sys.stderr)
         return 2
-    if sum(scan_counts.values()) == 0:
+    empty_scans = sorted(
+        key
+        for key in ("python_test_files", "typescript_test_files")
+        if scan_counts.get(key, 0) == 0
+    )
+    if empty_scans:
+        detail = f"no files discovered for: {', '.join(empty_scans)}"
         result = {
             "gate": "hygiene-check",
             "tier": "L0",
             "scanned": scan_counts,
-            "scan_error": "no Python or TypeScript test files discovered",
+            "scan_error": detail,
             "result": "error",
         }
         if base == ROOT:
@@ -410,7 +416,7 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
                 encoding="utf-8",
             )
         print(
-            "GATE ERROR: hygiene scan discovered no Python or TypeScript test files",
+            f"GATE ERROR: hygiene scan incomplete: {detail}",
             file=sys.stderr,
         )
         return 2

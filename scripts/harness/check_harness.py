@@ -368,10 +368,85 @@ def _job_runs_entrypoint(fields: dict[str, str], body: str) -> bool:
     run_text = _job_run_text(body)
     if "make" in fields:
         target = fields["make"].strip("\"'")
-        return re.search(rf"\bmake\s+{re.escape(target)}(?:\s|$)", run_text) is not None
+        return _run_text_executes_make_target(run_text, target)
     shell = fields.get("shell", "").strip().strip("\"'")
     commands = [command.strip() for command in shell.split("&&") if command.strip()]
-    return bool(commands) and all(command in run_text for command in commands)
+    return bool(commands) and all(
+        _run_text_executes_shell_command(run_text, command) for command in commands
+    )
+
+
+def _run_text_executes_make_target(run_text: str, target: str) -> bool:
+    """Recognize a real, outcome-preserving Make invocation.
+
+    Gate wiring is a trust boundary: a comment, dry-run, alternate makefile,
+    background command, or explicit error-swallowing suffix must not count as
+    executing the declared target.
+    """
+
+    if re.search(r"\bset\s+\+(?:e|o\s+pipefail)\b", run_text):
+        return False
+    pattern = re.compile(
+        rf"^\s*(?P<environment>(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)"
+        rf"make\s+{re.escape(target)}(?:\s|$)"
+    )
+    for line in _logical_shell_lines(run_text):
+        match = pattern.match(line)
+        if match is None or re.search(
+            r"(?:^|\s)(?:MAKEFLAGS|MFLAGS|GNUMAKEFLAGS)=",
+            match.group("environment"),
+        ):
+            continue
+        if not _shell_line_preserves_outcome(line):
+            continue
+        if re.search(
+            r"(?:^|\s)(?:-n|--dry-run|--just-print|--reconnaissance|"
+            r"-t|--touch|-q|--question|-f|--file|-C|--directory|--eval)"
+            r"(?:=|\s|$)",
+            line,
+        ):
+            continue
+        return True
+    return False
+
+
+def _run_text_executes_shell_command(run_text: str, command: str) -> bool:
+    if re.search(r"\bset\s+\+(?:e|o\s+pipefail)\b", run_text):
+        return False
+    pattern = re.compile(rf"^\s*{re.escape(command)}(?:\s|$)")
+    return any(
+        pattern.match(line) is not None and _shell_line_preserves_outcome(line)
+        for line in _logical_shell_lines(run_text)
+    )
+
+
+def _logical_shell_lines(run_text: str) -> list[str]:
+    logical: list[str] = []
+    pending = ""
+    for raw in run_text.splitlines():
+        line = raw.strip()
+        if pending:
+            line = pending + line
+        if line.endswith("\\"):
+            pending = line[:-1].rstrip() + " "
+            continue
+        if line:
+            logical.append(line)
+        pending = ""
+    if pending:
+        logical.append(pending.rstrip())
+    return logical
+
+
+def _shell_line_preserves_outcome(line: str) -> bool:
+    if "||" in line or ";" in line or "$(" in line or "`" in line:
+        return False
+    if re.search(r"(?:^|\s)&(?:\s|$)", line):
+        return False
+    pipelines = re.split(r"(?<!\|)\|(?!\|)", line)
+    return len(pipelines) == 1 or (
+        len(pipelines) == 2 and pipelines[1].lstrip().startswith("tee ")
+    )
 
 
 def _job_run_text(body: str) -> str:
@@ -381,23 +456,32 @@ def _job_run_text(body: str) -> str:
     index = 0
     while index < len(lines):
         line = lines[index]
-        match = re.match(r"^(\s*)run:\s*(.*?)\s*$", line)
+        match = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*?)\s*$", line)
         if not match:
             index += 1
             continue
         indent = len(match.group(1))
         value = match.group(2)
-        if value not in {"|", ">", ">-", "|-"}:
-            commands.append(value)
+        if value not in {"|", "|+", ">", ">+", ">-", "|-"}:
+            if value and not value.lstrip().startswith("#"):
+                commands.append(value)
             index += 1
             continue
+        folded = value.startswith(">")
+        block_commands: list[str] = []
         index += 1
         while index < len(lines):
             nested = lines[index]
             if nested.strip() and len(nested) - len(nested.lstrip()) <= indent:
                 break
-            commands.append(nested.strip())
+            stripped = nested.strip()
+            if stripped and not stripped.startswith("#"):
+                block_commands.append(stripped)
             index += 1
+        if folded and block_commands:
+            commands.append(" ".join(block_commands))
+        else:
+            commands.extend(block_commands)
     return "\n".join(commands)
 
 

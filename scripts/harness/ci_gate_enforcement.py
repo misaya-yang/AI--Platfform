@@ -71,7 +71,7 @@ def _workflow_run_scripts(body: str) -> str:
     index = 0
     while index < len(lines):
         line = lines[index]
-        match = re.match(r"^(\s*)run:\s*(.*?)\s*$", line)
+        match = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*?)\s*$", line)
         if match is None:
             index += 1
             continue
@@ -82,6 +82,8 @@ def _workflow_run_scripts(body: str) -> str:
                 commands.append(value)
             index += 1
             continue
+        folded = value.startswith(">")
+        block_commands: list[str] = []
         index += 1
         while index < len(lines):
             candidate = lines[index]
@@ -89,8 +91,12 @@ def _workflow_run_scripts(body: str) -> str:
                 break
             stripped = candidate.strip()
             if stripped and not stripped.startswith("#"):
-                commands.append(stripped)
+                block_commands.append(stripped)
             index += 1
+        if folded and block_commands:
+            commands.append(" ".join(block_commands))
+        else:
+            commands.extend(block_commands)
     return "\n".join(commands)
 
 
@@ -98,21 +104,112 @@ def _workflow_runs_entrypoint(fields: dict[str, str], body: str) -> bool:
     scripts = _workflow_run_scripts(body)
     if "make" in fields:
         target = _clean_scalar(fields.get("make"))
-        return (
-            re.search(
-                rf"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-                rf"make\s+{re.escape(target)}(?:\s|$)",
-                scripts,
-                re.MULTILINE,
-            )
-            is not None
-        )
+        return _run_text_executes_make_target(scripts, target)
     shell = _clean_scalar(fields.get("shell"))
     commands = [command.strip() for command in shell.split("&&") if command.strip()]
-    script_lines = scripts.splitlines()
     return bool(commands) and all(
-        any(line.startswith(command) for line in script_lines) for command in commands
+        _run_text_executes_shell_command(scripts, command) for command in commands
     )
+
+
+def _run_text_executes_make_target(run_text: str, target: str) -> bool:
+    """Recognize a real, outcome-preserving Make invocation."""
+
+    if re.search(r"\bset\s+\+(?:e|o\s+pipefail)\b", run_text):
+        return False
+    pattern = re.compile(
+        rf"^\s*(?P<environment>(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)"
+        rf"make\s+{re.escape(target)}(?:\s|$)"
+    )
+    for line in _logical_shell_lines(run_text):
+        match = pattern.match(line)
+        if match is None or re.search(
+            r"(?:^|\s)(?:MAKEFLAGS|MFLAGS|GNUMAKEFLAGS)=",
+            match.group("environment"),
+        ):
+            continue
+        if not _shell_line_preserves_outcome(line):
+            continue
+        if re.search(
+            r"(?:^|\s)(?:-n|--dry-run|--just-print|--reconnaissance|"
+            r"-t|--touch|-q|--question|-f|--file|-C|--directory|--eval)"
+            r"(?:=|\s|$)",
+            line,
+        ):
+            continue
+        return True
+    return False
+
+
+def _run_text_executes_shell_command(run_text: str, command: str) -> bool:
+    if re.search(r"\bset\s+\+(?:e|o\s+pipefail)\b", run_text):
+        return False
+    pattern = re.compile(rf"^\s*{re.escape(command)}(?:\s|$)")
+    return any(
+        pattern.match(line) is not None and _shell_line_preserves_outcome(line)
+        for line in _logical_shell_lines(run_text)
+    )
+
+
+def _logical_shell_lines(run_text: str) -> list[str]:
+    logical: list[str] = []
+    pending = ""
+    for raw in run_text.splitlines():
+        line = raw.strip()
+        if pending:
+            line = pending + line
+        if line.endswith("\\"):
+            pending = line[:-1].rstrip() + " "
+            continue
+        if line:
+            logical.append(line)
+        pending = ""
+    if pending:
+        logical.append(pending.rstrip())
+    return logical
+
+
+def _shell_line_preserves_outcome(line: str) -> bool:
+    if "||" in line or ";" in line or "$(" in line or "`" in line:
+        return False
+    if re.search(r"(?:^|\s)&(?:\s|$)", line):
+        return False
+    pipelines = re.split(r"(?<!\|)\|(?!\|)", line)
+    return len(pipelines) == 1 or (
+        len(pipelines) == 2 and pipelines[1].lstrip().startswith("tee ")
+    )
+
+
+def _checkout_fetches_full_history(body: str) -> bool:
+    """Require ``fetch-depth: 0`` on an actual checkout step."""
+
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^(\s*)-\s+uses:\s*actions/checkout@\S+\s*$", line)
+        if match is None:
+            continue
+        step_indent = len(match.group(1))
+        with_indent: int | None = None
+        index += 1
+        while index < len(lines):
+            candidate = lines[index]
+            if re.match(rf"^\s{{{step_indent}}}-\s+", candidate):
+                break
+            candidate_indent = len(candidate) - len(candidate.lstrip())
+            if re.match(r"^\s+with:\s*$", candidate):
+                with_indent = candidate_indent
+            elif (
+                with_indent is not None
+                and candidate.strip()
+                and candidate_indent <= with_indent
+            ):
+                with_indent = None
+            if with_indent is not None and re.match(
+                r"^\s+fetch-depth:\s*0\s*$", candidate
+            ):
+                return True
+            index += 1
+    return False
 
 
 def validate_workflow_wiring(
@@ -149,9 +246,14 @@ def validate_workflow_wiring(
                 f"gate-enforcement does not require CI job '{job}', so its result is unavailable"
             )
 
+    if not _checkout_fetches_full_history(bodies.get("architecture-gates", "")):
+        failures.append(
+            "CI job 'architecture-gates' checkout must set fetch-depth: 0"
+        )
+
     fixed_snippets = {
         "compose-and-harness": ["make ci-gate-enforcement-selftest"],
-        "architecture-gates": ["fetch-depth: 0", 'exit "$failed"'],
+        "architecture-gates": ['exit "$failed"'],
         "agent-runtime-contracts": ['exit "$failed"'],
         "gate-enforcement": ["if: always()", "make ci-gate-enforcement"],
         "release-ready": ["- gate-enforcement"],

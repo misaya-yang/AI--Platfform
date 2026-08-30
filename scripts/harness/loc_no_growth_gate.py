@@ -327,8 +327,14 @@ def run(base: Path, baseline_path: Path, evidence_path: Path) -> int:
                 encoding="utf-8",
             )
         return 2
-    if not current_py and not current_ts:
-        print("GATE ERROR: LOC scan discovered no source files", file=sys.stderr)
+    empty_scans = [
+        kind
+        for kind, files in (("python", current_py), ("typescript", current_ts))
+        if not files
+    ]
+    if empty_scans:
+        detail = f"no source files discovered for: {', '.join(empty_scans)}"
+        print(f"GATE ERROR: LOC scan incomplete: {detail}", file=sys.stderr)
         if evidence_path is not None:
             evidence_path.parent.mkdir(parents=True, exist_ok=True)
             evidence_path.write_text(
@@ -339,8 +345,11 @@ def run(base: Path, baseline_path: Path, evidence_path: Path) -> int:
                         "baseline": str(baseline_path),
                         "base_git_sha": baseline.get("base_git_sha"),
                         "provenance": provenance,
-                        "scanned": {"python_files": 0, "typescript_files": 0},
-                        "scan_error": "no source files discovered",
+                        "scanned": {
+                            "python_files": len(current_py),
+                            "typescript_files": len(current_ts),
+                        },
+                        "scan_error": detail,
                         "result": "error",
                     },
                     ensure_ascii=False,

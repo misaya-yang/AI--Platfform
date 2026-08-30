@@ -126,6 +126,55 @@ def test_ci_job_must_exist_and_execute_the_declared_target(tmp_path: Path) -> No
     assert any("does not execute its make entrypoint 'unit-gate'" in item for item in wrong_command)
 
 
+@pytest.mark.parametrize(
+    "job_body",
+    [
+        "        run: |\n          # make unit-gate\n          make unrelated-gate\n",
+        "        run: make unit-gate --dry-run\n",
+        "        run: make unit-gate || true\n",
+        "        run: make unit-gate -f /dev/null\n",
+        "        run: make unit-gate | true\n",
+        "        run: MAKEFLAGS=-n make unit-gate\n",
+        "        run: >-\n          make unit-gate\n          --dry-run\n",
+        "        run: |\n          make unit-gate \\\n            --dry-run\n",
+        "        run: |\n          set +e\n          make unit-gate\n          true\n",
+    ],
+)
+def test_ci_job_cannot_claim_a_nonexecuting_or_error_swallowing_make_target(
+    tmp_path: Path,
+    job_body: str,
+) -> None:
+    violations = gate_schema_violations(
+        _gate_lines(),
+        {"unit-gate"},
+        _workflow(tmp_path, job_body=job_body),
+    )
+
+    assert any(
+        "does not execute its make entrypoint 'unit-gate'" in item
+        for item in violations
+    )
+
+
+def test_inline_run_step_executes_the_declared_target(tmp_path: Path) -> None:
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: test\n"
+        "jobs:\n"
+        "  unit-job:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: make unit-gate\n",
+        encoding="utf-8",
+    )
+
+    assert gate_schema_violations(
+        _gate_lines(),
+        {"unit-gate"},
+        workflow,
+    ) == []
+
+
 def test_shell_gate_requires_every_command_in_the_ci_job(tmp_path: Path) -> None:
     lines = _gate_lines(
         entrypoint='shell: "pnpm type-check && pnpm test"',
@@ -137,3 +186,24 @@ def test_shell_gate_requires_every_command_in_the_ci_job(tmp_path: Path) -> None
     )
 
     assert any("does not execute its shell entrypoint" in item for item in missing_test)
+
+
+@pytest.mark.parametrize(
+    "job_body",
+    [
+        "        run: |\n          pnpm type-check\n          pnpm test || true\n",
+        "        run: |\n          pnpm type-check\n          pnpm test-placeholder\n",
+        "        run: |\n          pnpm type-check\n          # pnpm test\n",
+    ],
+)
+def test_shell_gate_rejects_swallowed_suffixed_or_commented_commands(
+    tmp_path: Path,
+    job_body: str,
+) -> None:
+    violations = gate_schema_violations(
+        _gate_lines(entrypoint='shell: "pnpm type-check && pnpm test"'),
+        set(),
+        _workflow(tmp_path, job_body=job_body),
+    )
+
+    assert any("does not execute its shell entrypoint" in item for item in violations)

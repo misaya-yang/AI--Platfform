@@ -265,6 +265,112 @@ def test_workflow_comment_cannot_claim_to_execute_a_gate(tmp_path: Path) -> None
     assert any("does not execute gate 'unit' entrypoint" in issue for issue in issues)
 
 
+@pytest.mark.parametrize(
+    "run_value",
+    [
+        "make unit-gate --dry-run",
+        "make unit-gate || true",
+        "make unit-gate -f /dev/null",
+        "make unit-gate | true",
+        "MAKEFLAGS=-n make unit-gate",
+        ">-\n          make unit-gate\n          --dry-run",
+        "|\n          make unit-gate \\\n            --dry-run",
+        "|\n          set +e\n          make unit-gate\n          true",
+    ],
+)
+def test_workflow_wiring_rejects_nonexecuting_or_error_swallowing_make(
+    tmp_path: Path,
+    run_value: str,
+) -> None:
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: test\n"
+        "jobs:\n"
+        "  unit-job:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f"      - run: {run_value}\n",
+        encoding="utf-8",
+    )
+    gates = {
+        "unit": {
+            "make": "unit-gate",
+            "ci_job": "unit-job",
+            "evidence": "tmp/gate-evidence/unit.log",
+            "required_on": "[change]",
+        }
+    }
+
+    issues = validate_workflow_wiring(workflow, gates)
+
+    assert any("does not execute gate 'unit' entrypoint" in issue for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "run_value",
+    [
+        "|\n          pnpm type-check\n          pnpm test || true",
+        "|\n          pnpm type-check\n          pnpm test-placeholder",
+        "|\n          pnpm type-check\n          # pnpm test",
+    ],
+)
+def test_workflow_shell_gate_rejects_swallowed_suffixed_or_commented_commands(
+    tmp_path: Path,
+    run_value: str,
+) -> None:
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: test\n"
+        "jobs:\n"
+        "  unit-job:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f"      - run: {run_value}\n",
+        encoding="utf-8",
+    )
+    gates = {
+        "unit": {
+            "shell": "pnpm type-check && pnpm test",
+            "ci_job": "unit-job",
+            "evidence": "tmp/gate-evidence/unit.log",
+            "required_on": "[change]",
+        }
+    }
+
+    issues = validate_workflow_wiring(workflow, gates)
+
+    assert any("does not execute gate 'unit' entrypoint" in issue for issue in issues)
+
+
+def test_fetch_depth_must_belong_to_the_architecture_checkout_step(
+    tmp_path: Path,
+) -> None:
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: test\n"
+        "jobs:\n"
+        "  architecture-gates:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: fetch-depth: 0\n"
+        "        run: make unit-gate\n",
+        encoding="utf-8",
+    )
+    gates = {
+        "unit": {
+            "make": "unit-gate",
+            "ci_job": "architecture-gates",
+            "evidence": "tmp/gate-evidence/unit.log",
+            "required_on": "[change]",
+        }
+    }
+
+    issues = validate_workflow_wiring(workflow, gates)
+
+    assert "CI job 'architecture-gates' checkout must set fetch-depth: 0" in issues
+
+
 def test_empty_diff_still_writes_selector_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
