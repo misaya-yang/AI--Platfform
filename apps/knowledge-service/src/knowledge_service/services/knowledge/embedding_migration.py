@@ -1282,6 +1282,21 @@ class EmbeddingMigrationService:
         )
         return _public_action_job(job) if job is not None else None
 
+    async def cancel_action_job(
+        self,
+        job_id: str,
+        *,
+        migration_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any] | None:
+        await self.store.require_action_job_store()
+        job = await self.store.cancel_scoped_action_job(
+            job_id,
+            migration_id=migration_id,
+            dataset_id=dataset_id,
+        )
+        return _public_action_job(job) if job is not None else None
+
     # ------------------------------------------------------------- surface
 
     async def describe(self, dataset: dict[str, Any]) -> dict[str, Any]:

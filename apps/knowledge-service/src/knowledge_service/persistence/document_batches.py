@@ -40,6 +40,7 @@ class DocumentBatchStore:
         actor_roles: Sequence[str],
         document_ids: Sequence[str] | None,
         all_documents: bool = False,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         if operation not in {"reembed", "delete"}:
             raise ValueError("unsupported document batch operation")
@@ -53,7 +54,11 @@ class DocumentBatchStore:
         if not all_documents and not normalized_ids:
             raise ValueError("document_ids must not be empty")
 
-        operation_id = str(uuid.uuid4())
+        normalized_operation_id = str(operation_id or uuid.uuid4()).strip()
+        try:
+            uuid.UUID(normalized_operation_id)
+        except ValueError as exc:
+            raise ValueError("operation_id must be a UUID") from exc
         normalized_roles = sorted(
             {str(role or "").strip() for role in actor_roles if str(role or "").strip()}
         )
@@ -70,20 +75,104 @@ class DocumentBatchStore:
             if not dataset or str(dataset["tenant_id"] or "") != tenant_id:
                 raise ValueError("dataset not found")
 
-            await conn.execute(
+            inserted = await conn.fetchval(
                 """
                     INSERT INTO knowledge.kb_document_batch_operations (
                         operation_id, tenant_id, dataset_id, operation,
                         created_by, actor_roles
                     ) VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb)
+                    ON CONFLICT (operation_id) DO NOTHING
+                    RETURNING TRUE
                     """,
-                operation_id,
+                normalized_operation_id,
                 tenant_id,
                 dataset_id,
                 operation,
                 created_by,
                 json.dumps(normalized_roles),
             )
+
+            if not inserted:
+                existing = await conn.fetchrow(
+                    """
+                    SELECT tenant_id, dataset_id, operation, status
+                    FROM knowledge.kb_document_batch_operations
+                    WHERE operation_id = $1::uuid
+                    FOR SHARE
+                    """,
+                    normalized_operation_id,
+                )
+                if existing is None or (
+                    str(existing["tenant_id"]) != tenant_id
+                    or str(existing["dataset_id"]) != dataset_id
+                    or str(existing["operation"]) != operation
+                ):
+                    raise ValueError("operation_id is already bound to another job")
+                if str(existing["status"]) == "failed":
+                    claiming = int(
+                        await conn.fetchval(
+                            "SELECT COUNT(*) FROM knowledge.kb_document_batch_items"
+                            " WHERE operation_id = $1::uuid AND status = 'claiming'",
+                            normalized_operation_id,
+                        )
+                        or 0
+                    )
+                    if claiming:
+                        raise ValueError(
+                            "cancelled document batch is still draining an owned claim"
+                        )
+                    await conn.execute(
+                        """
+                        UPDATE knowledge.kb_document_batch_items
+                        SET status = 'pending', claimed_by = NULL,
+                            claimed_at = NULL, completed_at = NULL,
+                            error_code = NULL, error = NULL
+                        WHERE operation_id = $1::uuid
+                          AND status = 'failed'
+                        """,
+                        normalized_operation_id,
+                    )
+                    counts = await conn.fetchrow(
+                        """
+                        SELECT COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+                               COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
+                               COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                               COUNT(*) FILTER (WHERE status = 'pending') AS pending
+                        FROM knowledge.kb_document_batch_items
+                        WHERE operation_id = $1::uuid
+                        """,
+                        normalized_operation_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE knowledge.kb_document_batch_operations
+                        SET status = CASE
+                                WHEN $5 > 0 THEN 'pending'
+                                WHEN $2 > 0 AND $3 = 0 AND $4 = 0 THEN 'completed'
+                                WHEN $2 > 0 OR $3 > 0 THEN 'partial'
+                                ELSE 'failed'
+                            END,
+                            queued_count = $2,
+                            skipped_count = $3, failed_count = $4,
+                            error = NULL, last_claimed_at = NULL,
+                            completed_at = CASE WHEN $5 > 0 THEN NULL ELSE NOW() END,
+                            updated_at = NOW()
+                        WHERE operation_id = $1::uuid AND status = 'failed'
+                        """,
+                        normalized_operation_id,
+                        int(counts["queued"] or 0),
+                        int(counts["skipped"] or 0),
+                        int(counts["failed"] or 0),
+                        int(counts["pending"] or 0),
+                    )
+                # A deterministic producer replay reuses the original durable
+                # item snapshot instead of enqueuing duplicate paid work.
+                return await self._get_operation_on_connection(
+                    conn,
+                    operation_id=normalized_operation_id,
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                )
 
             if all_documents:
                 await conn.execute(
@@ -97,7 +186,7 @@ class DocumentBatchStore:
                         WHERE dataset_id = $2
                         ORDER BY created_at, document_id
                         """,
-                    operation_id,
+                    normalized_operation_id,
                     dataset_id,
                 )
             else:
@@ -108,7 +197,7 @@ class DocumentBatchStore:
                         ) VALUES ($1::uuid, $2, $3)
                         """,
                     [
-                        (operation_id, document_id, ordinal)
+                        (normalized_operation_id, document_id, ordinal)
                         for ordinal, document_id in enumerate(normalized_ids)
                     ],
                 )
@@ -120,7 +209,7 @@ class DocumentBatchStore:
                         FROM knowledge.kb_document_batch_items
                         WHERE operation_id = $1::uuid
                         """,
-                    operation_id,
+                    normalized_operation_id,
                 )
                 or 0
             )
@@ -134,13 +223,13 @@ class DocumentBatchStore:
                         updated_at = NOW()
                     WHERE operation_id = $1::uuid
                     """,
-                operation_id,
+                normalized_operation_id,
                 total,
                 status,
             )
 
         result = await self.get_operation(
-            operation_id=operation_id,
+            operation_id=normalized_operation_id,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
         )
@@ -156,40 +245,126 @@ class DocumentBatchStore:
         dataset_id: str,
     ) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT operation_id::text, tenant_id, dataset_id, operation,
-                       status, total_count, queued_count, skipped_count,
-                       failed_count, created_by, error, created_at, updated_at,
-                       completed_at
-                FROM knowledge.kb_document_batch_operations
-                WHERE operation_id = $1::uuid
-                  AND tenant_id = $2
-                  AND dataset_id = $3
-                """,
-                operation_id,
-                tenant_id,
-                dataset_id,
+            return await self._get_operation_on_connection(
+                conn,
+                operation_id=operation_id,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
             )
-            if row is None:
-                return None
-            failures = await conn.fetch(
-                """
-                SELECT document_id, status, error_code, error
-                FROM knowledge.kb_document_batch_items
-                WHERE operation_id = $1::uuid
-                  AND status IN ('skipped', 'failed')
-                ORDER BY ordinal
-                LIMIT 1000
-                """,
-                operation_id,
-            )
+
+    async def _get_operation_on_connection(
+        self,
+        conn: Any,
+        *,
+        operation_id: str,
+        tenant_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            SELECT operation_id::text, tenant_id, dataset_id, operation,
+                   status, total_count, queued_count, skipped_count,
+                   failed_count, created_by, error, created_at, updated_at,
+                   completed_at
+            FROM knowledge.kb_document_batch_operations
+            WHERE operation_id = $1::uuid
+              AND tenant_id = $2
+              AND dataset_id = $3
+            """,
+            operation_id,
+            tenant_id,
+            dataset_id,
+        )
+        if row is None:
+            return None
+        failures = await conn.fetch(
+            """
+            SELECT document_id, status, error_code, error
+            FROM knowledge.kb_document_batch_items
+            WHERE operation_id = $1::uuid
+              AND status IN ('skipped', 'failed')
+            ORDER BY ordinal
+            LIMIT 1000
+            """,
+            operation_id,
+        )
         result = dict(row)
         result["problem_items"] = [dict(item) for item in failures]
         result["problem_items_truncated"] = int(row["skipped_count"] or 0) + int(
             row["failed_count"] or 0
         ) > len(failures)
         return result
+
+    async def cancel_operation(
+        self,
+        *,
+        operation_id: str,
+        tenant_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any] | None:
+        """Fence new claims and retain a terminal cancellation receipt."""
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            operation = await conn.fetchrow(
+                """
+                SELECT status, error
+                FROM knowledge.kb_document_batch_operations
+                WHERE operation_id = $1::uuid
+                  AND tenant_id = $2 AND dataset_id = $3
+                FOR UPDATE
+                """,
+                operation_id,
+                tenant_id,
+                dataset_id,
+            )
+            if operation is None:
+                return None
+            status = str(operation["status"])
+            error = str(operation["error"] or "")
+            if not (status == "failed" and error == "cancelled by operator"):
+                if status in {"completed", "partial", "failed"}:
+                    raise ValueError(
+                        f"document batch in state '{status}' cannot be cancelled"
+                    )
+                await conn.execute(
+                    """
+                    UPDATE knowledge.kb_document_batch_items
+                    SET status = 'failed', error_code = 'cancelled',
+                        error = 'cancelled by operator', completed_at = NOW()
+                    WHERE operation_id = $1::uuid AND status = 'pending'
+                    """,
+                    operation_id,
+                )
+                counts = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+                           COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
+                           COUNT(*) FILTER (WHERE status = 'failed') AS failed
+                    FROM knowledge.kb_document_batch_items
+                    WHERE operation_id = $1::uuid
+                    """,
+                    operation_id,
+                )
+                await conn.execute(
+                    """
+                    UPDATE knowledge.kb_document_batch_operations
+                    SET status = 'failed', queued_count = $2,
+                        skipped_count = $3, failed_count = $4,
+                        error = 'cancelled by operator',
+                        completed_at = NOW(), updated_at = NOW()
+                    WHERE operation_id = $1::uuid
+                    """,
+                    operation_id,
+                    int(counts["queued"] or 0),
+                    int(counts["skipped"] or 0),
+                    int(counts["failed"] or 0),
+                )
+            return await self._get_operation_on_connection(
+                conn,
+                operation_id=operation_id,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            )
 
     async def claim_next_item(
         self,
@@ -351,9 +526,18 @@ class DocumentBatchStore:
             await conn.execute(
                 """
                     UPDATE knowledge.kb_document_batch_operations
-                    SET status = $2, queued_count = $3, skipped_count = $4,
+                    SET status = CASE
+                            WHEN error = 'cancelled by operator' THEN 'failed'
+                            ELSE $2
+                        END,
+                        queued_count = $3, skipped_count = $4,
                         failed_count = $5, updated_at = NOW(),
-                        completed_at = CASE WHEN $6 = 0 THEN NOW() ELSE NULL END
+                        completed_at = CASE
+                            WHEN error = 'cancelled by operator'
+                                THEN COALESCE(completed_at, NOW())
+                            WHEN $6 = 0 THEN NOW()
+                            ELSE NULL
+                        END
                     WHERE operation_id = $1::uuid
                     """,
                 operation_id,
@@ -372,15 +556,47 @@ class DocumentBatchStore:
     ) -> None:
         """Return a transiently blocked claim to the durable fair queue."""
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """
-                UPDATE knowledge.kb_document_batch_items
-                SET status = 'pending', claimed_by = NULL, claimed_at = NULL
-                WHERE operation_id = $1::uuid
-                  AND document_id = $2
-                  AND status = 'claiming'
+                UPDATE knowledge.kb_document_batch_items AS item
+                SET status = CASE
+                        WHEN operation.status = 'failed' THEN 'failed'
+                        ELSE 'pending'
+                    END,
+                    claimed_by = NULL, claimed_at = NULL,
+                    error_code = CASE
+                        WHEN operation.status = 'failed' THEN 'cancelled'
+                        ELSE NULL
+                    END,
+                    error = CASE
+                        WHEN operation.status = 'failed' THEN operation.error
+                        ELSE NULL
+                    END,
+                    completed_at = CASE
+                        WHEN operation.status = 'failed' THEN NOW()
+                        ELSE NULL
+                    END
+                FROM knowledge.kb_document_batch_operations AS operation
+                WHERE item.operation_id = $1::uuid
+                  AND item.document_id = $2
+                  AND item.status = 'claiming'
+                  AND operation.operation_id = item.operation_id
                 """,
                 operation_id,
                 document_id,
+            )
+            await conn.execute(
+                """
+                UPDATE knowledge.kb_document_batch_operations AS operation
+                SET failed_count = counts.failed, updated_at = NOW()
+                FROM (
+                    SELECT COUNT(*) FILTER (WHERE status = 'failed') AS failed
+                    FROM knowledge.kb_document_batch_items
+                    WHERE operation_id = $1::uuid
+                ) AS counts
+                WHERE operation.operation_id = $1::uuid
+                  AND operation.status = 'failed'
+                """,
+                operation_id,
             )

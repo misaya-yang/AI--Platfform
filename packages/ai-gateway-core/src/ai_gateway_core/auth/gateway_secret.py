@@ -135,6 +135,9 @@ class GatewaySecret:
     version: str | None = None
     key_id: str | None = None
     keys: dict[str, str] | None = None
+    caller_service: str = "gateway"
+    audience: str = "internal"
+    allowed_path_prefixes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.secret or len(self.secret) < 16:
@@ -144,6 +147,11 @@ class GatewaySecret:
         ).strip().lower()
         if self.version not in {"v1", "v2"}:
             raise ValueError("INTERNAL_AUTH_VERSION must be 'v1' or 'v2'")
+        self.caller_service = _validated_binding("caller_service", self.caller_service)
+        self.audience = _validated_binding("audience", self.audience)
+        self.allowed_path_prefixes = tuple(
+            _validated_path_prefix(value) for value in self.allowed_path_prefixes
+        )
 
         env_keys = _parse_internal_auth_keys(os.getenv("INTERNAL_AUTH_KEYS", ""))
         if self.keys is None:
@@ -188,6 +196,7 @@ class GatewaySecret:
         rid = request_id or secrets.token_hex(16)
         ts = str(_epoch_ms())
         if self.version == "v2":
+            self._require_allowed_path(path or "")
             kid = self.key_id or "local"
             body_hash = _body_sha256(body)
             sig = self._hmac_v2(
@@ -291,6 +300,7 @@ class GatewaySecret:
         body: bytes | str | None,
         identity_headers: Mapping[str, str] | None,
     ) -> str:
+        self._require_allowed_path(path)
         if len(parts) != 6:
             raise InvalidGatewaySecret("malformed header")
         _, key_id, rid, ts_str, body_hash, sig = parts
@@ -347,6 +357,8 @@ class GatewaySecret:
             raise InvalidGatewaySecret("unknown key id")
         canonical = "\n".join(
             [
+                self.caller_service,
+                self.audience,
                 method.upper(),
                 path,
                 query,
@@ -359,6 +371,36 @@ class GatewaySecret:
         )
         mac = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), sha256)
         return mac.hexdigest()
+
+    def _require_allowed_path(self, path: str) -> None:
+        if self.allowed_path_prefixes and not any(
+            _path_matches_prefix(path, prefix) for prefix in self.allowed_path_prefixes
+        ):
+            raise InvalidGatewaySecret("path outside key scope")
+
+
+def _validated_binding(name: str, value: str) -> str:
+    normalized = str(value or "").strip()
+    if (
+        not normalized
+        or len(normalized) > 64
+        or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for character in normalized)
+    ):
+        raise ValueError(f"{name} must be a non-empty service identifier")
+    return normalized
+
+
+def _validated_path_prefix(value: str) -> str:
+    normalized = str(value or "").strip().rstrip("/") or "/"
+    if not normalized.startswith("/") or any(character in normalized for character in "\r\n?#"):
+        raise ValueError("internal auth path prefixes must be absolute paths")
+    return normalized
+
+
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    if prefix == "/":
+        return path.startswith("/")
+    return path == prefix or path.startswith(f"{prefix}/")
 
 
 def _canonical_identity_headers(headers: Mapping[str, str] | None) -> str:

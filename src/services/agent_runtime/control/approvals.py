@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .http_headers import runtime_headers
 from .types import AgentRuntimeControlError
 
 if TYPE_CHECKING:
@@ -24,12 +25,12 @@ async def get_approval(
 ) -> dict[str, Any] | None:
     response = await plane.http_client.get(
         f"{plane.runtime_url}/internal/v1/approvals/{approval_id}",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        ),
     )
     if response.status_code == 404:
         return None
@@ -53,12 +54,12 @@ async def decide_approval(
 ) -> dict[str, Any]:
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/approvals/{approval_id}/decision",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        ),
         json={
             "decision": "approve" if approved else "reject",
             "reason": reason,

@@ -9,6 +9,7 @@ allowlist and the BM25 v2 kill switch.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -21,12 +22,14 @@ from ...persistence.bm25_v2_lifecycle import (
     LifecycleStateConflict,
     LifecycleTransitionBusy,
 )
+from ...persistence.document_batches import DocumentBatchStore
 from ...services.knowledge.bm25_v2_lifecycle import Bm25V2LifecycleError
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.vector_store import VectorStoreError
 from ..deps import get_knowledge_service, get_user_context
 
 router = APIRouter(tags=["Maintenance"])
+_BM25_REBUILD_JOB_NAMESPACE = uuid.UUID("109ba33d-538e-46fa-bd29-2b088e30b9e6")
 
 
 class Bm25CutoverSchema(BaseModel):
@@ -42,6 +45,32 @@ def _lifecycle_service(svc: KnowledgeService | None) -> Any:
     if service is None:
         raise HTTPException(status_code=503, detail="BM25 v2 lifecycle store unavailable")
     return service
+
+
+def _batch_store(svc: KnowledgeService) -> DocumentBatchStore:
+    return DocumentBatchStore(getattr(svc.db, "_pool", None))
+
+
+def _rebuild_job_receipt(
+    dataset_id: str,
+    operation: dict[str, Any],
+    *,
+    content_revision: int | None = None,
+) -> dict[str, Any]:
+    job_id = str(operation.get("operation_id") or "").strip()
+    receipt = {
+        **operation,
+        "job_id": job_id,
+        "execution_id": job_id,
+        "job_url": (
+            f"/api/v1/knowledge/datasets/{dataset_id}/bm25-v2/"
+            f"rebuild/jobs/{job_id}"
+        ),
+        "job_kind": "bm25_v2_rebuild",
+    }
+    if content_revision is not None:
+        receipt["content_revision"] = int(content_revision)
+    return receipt
 
 
 async def _owner_dataset(
@@ -112,6 +141,112 @@ async def verify_bm25_v2(
         return await service.verify_cross_authority(dataset_id)
     except Exception as exc:
         raise _map_error(exc) from exc
+
+
+@router.post(
+    "/knowledge/datasets/{dataset_id}/bm25-v2/rebuild/jobs",
+    status_code=202,
+)
+async def enqueue_bm25_v2_rebuild(
+    dataset_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Create one content-revision-scoped durable BM25 shadow rebuild."""
+
+    service = _lifecycle_service(svc)
+    dataset = await _owner_dataset(svc, user, dataset_id)
+    try:
+        lifecycle = await service.get_lifecycle_state(dataset_id)
+        content_revision = int(lifecycle.get("content_revision") or 0)
+        operation_id = str(
+            uuid.uuid5(
+                _BM25_REBUILD_JOB_NAMESPACE,
+                ":".join(
+                    (
+                        str(dataset.get("tenant_id") or ""),
+                        dataset_id,
+                        str(content_revision),
+                    )
+                ),
+            )
+        )
+        operation = await _batch_store(svc).create_operation(
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+            operation="reembed",
+            created_by=user.user_id,
+            actor_roles=user.roles or [],
+            document_ids=None,
+            all_documents=True,
+            operation_id=operation_id,
+        )
+    except (Bm25V2LifecycleError, Bm25V2LifecycleDbError) as exc:
+        raise _map_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _rebuild_job_receipt(
+        dataset_id,
+        operation,
+        content_revision=content_revision,
+    )
+
+
+@router.get(
+    "/knowledge/datasets/{dataset_id}/bm25-v2/rebuild/jobs/{job_id}"
+)
+async def get_bm25_v2_rebuild_job(
+    dataset_id: str,
+    job_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    dataset = await _owner_dataset(svc, user, dataset_id)
+    try:
+        uuid.UUID(str(job_id or "").strip())
+        operation = await _batch_store(svc).get_operation(
+            operation_id=job_id,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="BM25 rebuild job not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if operation is None:
+        raise HTTPException(status_code=404, detail="BM25 rebuild job not found")
+    return _rebuild_job_receipt(dataset_id, operation)
+
+
+@router.delete(
+    "/knowledge/datasets/{dataset_id}/bm25-v2/rebuild/jobs/{job_id}"
+)
+async def cancel_bm25_v2_rebuild_job(
+    dataset_id: str,
+    job_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    dataset = await _owner_dataset(svc, user, dataset_id)
+    try:
+        uuid.UUID(str(job_id or "").strip())
+        operation = await _batch_store(svc).cancel_operation(
+            operation_id=job_id,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "cannot be cancelled" in message:
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise HTTPException(status_code=404, detail="BM25 rebuild job not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if operation is None:
+        raise HTTPException(status_code=404, detail="BM25 rebuild job not found")
+    return _rebuild_job_receipt(dataset_id, operation)
 
 
 @router.post("/knowledge/datasets/{dataset_id}/bm25-v2/cutover/dry-run")

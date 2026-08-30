@@ -22,10 +22,12 @@ remains the human-friendly aggregation key for log scraping.
 from .httpx_hooks import instrument_httpx_client
 from .init import init_tracing, is_initialized
 from .middleware import OTelInboundMiddleware
+from .propagation import internal_http_headers
 
 __all__ = [
     "OTelInboundMiddleware",
     "init_tracing",
     "instrument_httpx_client",
+    "internal_http_headers",
     "is_initialized",
 ]

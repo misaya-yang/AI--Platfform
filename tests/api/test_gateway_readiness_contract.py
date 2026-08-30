@@ -63,6 +63,7 @@ def _transport(
     runtime_status: int = 200,
     runtime_payload: object = None,
     knowledge_status: int = 200,
+    capability_worker_status: int = 200,
 ) -> httpx.MockTransport:
     runtime_payload = runtime_payload or {"status": "ready", "kernel": "agent-runtime"}
 
@@ -74,6 +75,16 @@ def _transport(
                 knowledge_status,
                 request=request,
                 json={"status": "ready" if knowledge_status == 200 else "not_ready"},
+            )
+        if request.url.host == "capability-worker.test":
+            return httpx.Response(
+                capability_worker_status,
+                request=request,
+                json={
+                    "status": (
+                        "ready" if capability_worker_status == 200 else "not_ready"
+                    )
+                },
             )
         raise AssertionError(f"unexpected health probe: {request.url}")
 
@@ -102,6 +113,7 @@ async def test_optional_knowledge_failure_degrades_without_unreadying_core(
     assert snapshot["degraded"] is True
     assert snapshot["capabilities"] == {
         "knowledge_service": "status_503",
+        "capability_worker": "not_configured",
         "image_worker": "healthy",
     }
     assert database.queries == ["SELECT 1"]
@@ -131,6 +143,32 @@ async def test_optional_image_worker_failure_does_not_unready_core(
     assert snapshot["core_ready"] is True
     assert snapshot["degraded"] is True
     assert snapshot["capabilities"]["image_worker"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_optional_capability_worker_failure_degrades_only_its_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.main import _gateway_readiness_snapshot
+
+    monkeypatch.delenv("KB_SERVICE_URL", raising=False)
+    app = _app()
+    app.state.agent_capability_catalog_service = SimpleNamespace(
+        worker_url="http://capability-worker.test"
+    )
+    async with httpx.AsyncClient(
+        transport=_transport(capability_worker_status=503)
+    ) as client:
+        snapshot = await _gateway_readiness_snapshot(
+            app,
+            _settings(),
+            SimpleNamespace(database=_Database(), redis=_Redis()),
+            http_client=client,
+        )
+
+    assert snapshot["core_ready"] is True
+    assert snapshot["degraded"] is True
+    assert snapshot["capabilities"]["capability_worker"] == "status_503"
 
 
 @pytest.mark.asyncio

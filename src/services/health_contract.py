@@ -144,6 +144,7 @@ async def gateway_readiness_snapshot(
     }
     capabilities: dict[str, str] = {
         "knowledge_service": "not_configured",
+        "capability_worker": "not_configured",
         "image_worker": _background_task_status(
             getattr(app.state, "image_task_worker", None), "_loop_task"
         ),
@@ -155,8 +156,21 @@ async def gateway_readiness_snapshot(
     runtime_url = getattr(control, "runtime_url", None) if control is not None else None
     runtime_checks: dict[str, str] = {}
     knowledge_checks: dict[str, str] = {}
+    capability_worker_checks: dict[str, str] = {}
+    catalog_service = getattr(app.state, "agent_capability_catalog_service", None)
+    capability_worker_url = (
+        getattr(catalog_service, "worker_url", None)
+        if catalog_service is not None
+        else os.environ.get("AI_PLATFORM_CAPABILITY_WORKER_URL")
+    )
 
-    database_ready, redis_ready, _runtime_ready, _knowledge_ready = await asyncio.gather(
+    (
+        database_ready,
+        redis_ready,
+        _runtime_ready,
+        _knowledge_ready,
+        _capability_worker_ready,
+    ) = await asyncio.gather(
         gateway_database_is_ready(container.database)
         if database_enabled
         else asyncio.sleep(0, result=False),
@@ -169,6 +183,14 @@ async def gateway_readiness_snapshot(
             runtime_checks,
             path="/health/ready",
             required=True,
+            expected_status="ready",
+            client=http_client,
+        ),
+        probe_http_service(
+            "capability_worker",
+            capability_worker_url,
+            capability_worker_checks,
+            path="/health/ready",
             expected_status="ready",
             client=http_client,
         ),
@@ -190,6 +212,9 @@ async def gateway_readiness_snapshot(
     core["agent_runtime"] = runtime_checks.get("agent_runtime", "unavailable")
     capabilities["knowledge_service"] = knowledge_checks.get(
         "knowledge_service", "not_configured"
+    )
+    capabilities["capability_worker"] = capability_worker_checks.get(
+        "capability_worker", "not_configured"
     )
 
     core_ready = all(value == "healthy" for value in core.values())

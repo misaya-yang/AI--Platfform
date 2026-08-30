@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
+from ai_gateway_core.tracing import internal_http_headers
 
 from ...core.assistant_capability_catalog import load_assistant_capability_catalog
 from .capability_leases import (
@@ -593,12 +594,14 @@ class CapabilityCatalogService:
         try:
             response: _HTTPResponse = await client.post(
                 self._worker_endpoint(),
-                headers={
-                    "x-ai-platform-internal-token": self.internal_token,
-                    "x-ai-tenant-id": query.tenant_id,
-                    "x-ai-user-id": query.user_id,
-                    "x-ai-session-id": query.session_id,
-                },
+                headers=internal_http_headers(
+                    {
+                        "x-ai-platform-internal-token": self.internal_token,
+                        "x-ai-tenant-id": query.tenant_id,
+                        "x-ai-user-id": query.user_id,
+                        "x-ai-session-id": query.session_id,
+                    }
+                ),
                 json=query.request_body(include_model=False),
             )
         except (httpx.HTTPError, ValueError) as exc:
@@ -727,12 +730,14 @@ class HttpCapabilityCatalogClient:
         try:
             response: _HTTPResponse = await self.http_client.post(
                 f"{self.base_url}/catalog",
-                headers={
-                    "x-ai-platform-internal-token": self.internal_token,
-                    "x-ai-tenant-id": query.tenant_id,
-                    "x-ai-user-id": query.user_id,
-                    "x-ai-session-id": query.session_id,
-                },
+                headers=internal_http_headers(
+                    {
+                        "x-ai-platform-internal-token": self.internal_token,
+                        "x-ai-tenant-id": query.tenant_id,
+                        "x-ai-user-id": query.user_id,
+                        "x-ai-session-id": query.session_id,
+                    }
+                ),
                 json=query.request_body(include_model=True),
             )
         except (httpx.HTTPError, ValueError) as exc:

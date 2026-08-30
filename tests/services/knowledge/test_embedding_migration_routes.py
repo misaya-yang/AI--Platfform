@@ -22,6 +22,7 @@ from knowledge_service.api.routes.embedding_migration import (
     MigrationStartSchema,
     abort_migration,
     backfill_migration,
+    cancel_migration_job,
     cutover_migration,
     describe_migration,
     gate_migration,
@@ -145,6 +146,23 @@ class FakeMigrationService:
             or str(job.get("dataset_id") or "") != dataset_id
         ):
             return None
+        return job
+
+    async def cancel_action_job(
+        self,
+        job_id: str,
+        *,
+        migration_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any] | None:
+        job = await self.get_action_job(
+            job_id,
+            migration_id=migration_id,
+            dataset_id=dataset_id,
+        )
+        if job is not None:
+            job = {**job, "state": "failed", "error": "cancelled by operator"}
+            self.jobs[job_id] = job
         return job
 
     async def cutover(self, migration_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -392,6 +410,8 @@ async def test_gate_enqueues_serializable_evaluator_overrides() -> None:
     result = await gate_migration("dataset-a", _MIGRATION_ID, body=body, svc=svc, user=_USER)
     assert result["state"] == "queued"
     assert result["job_id"] == _JOB_ID
+    assert result["execution_id"] == _JOB_ID
+    assert result["job_url"].endswith(f"/{_MIGRATION_ID}/jobs/{_JOB_ID}")
     name, kwargs = svc.embedding_migration_service.calls[-1]
     assert name == "enqueue"
     assert kwargs["migration_id"] == _MIGRATION_ID
@@ -402,6 +422,24 @@ async def test_gate_enqueues_serializable_evaluator_overrides() -> None:
         "tolerance": 0.2,
         "floor": 0.7,
     }
+
+
+@pytest.mark.asyncio
+async def test_migration_job_get_and_cancel_share_durable_receipt_url() -> None:
+    svc = _svc()
+    enqueued = await backfill_migration(
+        "dataset-a", _MIGRATION_ID, svc=svc, user=_USER
+    )
+    fetched = await get_migration_job(
+        "dataset-a", _MIGRATION_ID, _JOB_ID, svc=svc, user=_USER
+    )
+    cancelled = await cancel_migration_job(
+        "dataset-a", _MIGRATION_ID, _JOB_ID, svc=svc, user=_USER
+    )
+
+    assert enqueued["job_url"] == fetched["job_url"] == cancelled["job_url"]
+    assert cancelled["state"] == "failed"
+    assert cancelled["error"] == "cancelled by operator"
 
 
 @pytest.mark.asyncio

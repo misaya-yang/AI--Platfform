@@ -120,6 +120,28 @@ def _document_batch_store(svc: KnowledgeService) -> DocumentBatchStore:
     return DocumentBatchStore(getattr(svc.db, "_pool", None))
 
 
+def _pipeline_execution_receipt(
+    payload: dict[str, Any],
+    *,
+    dataset_id: str,
+    document_id: str,
+    execution_id: str | None,
+) -> dict[str, Any]:
+    """Preserve the legacy body and add a durable execution receipt."""
+
+    normalized = str(execution_id or "").strip() or None
+    return {
+        **payload,
+        "execution_id": normalized,
+        "job_url": (
+            f"/api/v1/knowledge/{dataset_id}/documents/{document_id}/"
+            f"executions/{normalized}"
+            if normalized
+            else None
+        ),
+    }
+
+
 def _document_metadata_manager(svc: KnowledgeService) -> DocumentMetadataManager:
     manager = getattr(svc, "_document_metadata_manager", None)
     if manager is None:
@@ -1681,7 +1703,12 @@ async def reindex_document(
                 detail="Document is already queued/processing or is not eligible for reindex",
             )
         logger.info("Reindex (reembed) queued for document %s (dataset=%s)", document_id, dataset_id)
-        return {"status": "queuing", "document_id": document_id}
+        return _pipeline_execution_receipt(
+            {"status": "queuing", "document_id": document_id},
+            dataset_id=dataset_id,
+            document_id=document_id,
+            execution_id=execution_id,
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1734,7 +1761,16 @@ async def reprocess_document(
                 detail="Document is already queued/processing or is not eligible for reprocess",
             )
         logger.info("Reprocess queued for document %s (dataset=%s)", document_id, dataset_id)
-        return {"status": "queuing", "document_id": document_id, "action": "reprocess"}
+        return _pipeline_execution_receipt(
+            {
+                "status": "queuing",
+                "document_id": document_id,
+                "action": "reprocess",
+            },
+            dataset_id=dataset_id,
+            document_id=document_id,
+            execution_id=execution_id,
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1808,7 +1844,12 @@ async def recover_document(
         }
         if recover_stage:
             receipt["recover_stage"] = recover_stage
-        return receipt
+        return _pipeline_execution_receipt(
+            receipt,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            execution_id=execution_id,
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1867,11 +1908,50 @@ async def retry_document(
                 detail="Document is already queued/processing or is not eligible for retry",
             )
         logger.info("Retry queued for document %s (dataset=%s)", document_id, dataset_id)
-        return {"status": "queuing", "document_id": document_id, "action": "retry"}
+        return _pipeline_execution_receipt(
+            {"status": "queuing", "document_id": document_id, "action": "retry"},
+            dataset_id=dataset_id,
+            document_id=document_id,
+            execution_id=execution_id,
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get(
+    "/knowledge/{dataset_id}/documents/{document_id}/executions/{execution_id}"
+)
+async def get_document_pipeline_execution(
+    dataset_id: str,
+    document_id: str,
+    execution_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Return one scope-checked durable execution receipt."""
+
+    try:
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        getter = getattr(svc.db, "get_pipeline_execution", None)
+        if not callable(getter):
+            raise HTTPException(
+                status_code=503,
+                detail="pipeline execution store unavailable",
+            )
+        execution = await getter(execution_id)
+        if (
+            not isinstance(execution, dict)
+            or str(execution.get("dataset_id") or "") != dataset_id
+            or str(execution.get("document_id") or "") != document_id
+        ):
+            raise HTTPException(status_code=404, detail="pipeline execution not found")
+        return execution
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.delete("/knowledge/{dataset_id}/documents/{document_id}")

@@ -13,6 +13,7 @@ from knowledge_service.api.routes.knowledge import (
     compare_document_versions,
     debug_dataset,
     force_complete_document,
+    get_document_pipeline_execution,
     get_document_version,
     get_image_segment,
     hit_test,
@@ -48,6 +49,45 @@ DATASET = {
     "index_config": {},
     "content_revision": 7,
 }
+
+
+@pytest.mark.asyncio
+async def test_pipeline_execution_receipt_is_scoped_to_dataset_and_document() -> None:
+    class Database:
+        async def get_pipeline_execution(self, execution_id: str):
+            return {
+                "execution_id": execution_id,
+                "dataset_id": "dataset-a",
+                "document_id": "document-a",
+                "status": "running",
+            }
+
+    class Service:
+        db = Database()
+
+        async def require_dataset_access(self, _user, dataset_id: str, *, required: str):
+            assert dataset_id == "dataset-a"
+            assert required == "viewer"
+            return DATASET
+
+    receipt = await get_document_pipeline_execution(
+        "dataset-a",
+        "document-a",
+        "exec-1",
+        svc=Service(),  # type: ignore[arg-type]
+        user=USER,
+    )
+    assert receipt["execution_id"] == "exec-1"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_document_pipeline_execution(
+            "dataset-a",
+            "document-other",
+            "exec-1",
+            svc=Service(),  # type: ignore[arg-type]
+            user=USER,
+        )
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -547,7 +587,12 @@ async def test_reindex_route_never_overwrites_durable_queued_state() -> None:
         user=USER,
     )
 
-    assert result == {"status": "queuing", "document_id": "document-a"}
+    assert result == {
+        "status": "queuing",
+        "document_id": "document-a",
+        "execution_id": None,
+        "job_url": None,
+    }
     assert worker.calls == [("dataset-a", "document-a")]
     # The reindex route is the reembed verb landing point (PRD T1 item 3):
     # the claim must be pinned with the action, never a bare default ingest.
@@ -769,6 +814,10 @@ async def test_reprocess_route_pins_action_and_submission_snapshot() -> None:
         "status": "queuing",
         "document_id": "document-a",
         "action": "reprocess",
+        "execution_id": "exec-1",
+        "job_url": (
+            "/api/v1/knowledge/dataset-a/documents/document-a/executions/exec-1"
+        ),
     }
     assert worker.calls == [
         {
@@ -881,6 +930,10 @@ async def test_recover_route_derives_stage_from_furthest_timestamp() -> None:
         "document_id": "document-a",
         "action": "recover",
         "recover_stage": "indexing",
+        "execution_id": "exec-1",
+        "job_url": (
+            "/api/v1/knowledge/dataset-a/documents/document-a/executions/exec-1"
+        ),
     }
     assert worker.calls[0]["action"] == "recover"
     assert worker.calls[0]["recover_stage"] == "indexing"
@@ -952,6 +1005,10 @@ async def test_retry_route_pins_retry_action_on_claim() -> None:
         "status": "queuing",
         "document_id": "document-a",
         "action": "retry",
+        "execution_id": "exec-1",
+        "job_url": (
+            "/api/v1/knowledge/dataset-a/documents/document-a/executions/exec-1"
+        ),
     }
     assert worker.calls[0]["action"] == "retry"
     assert worker.calls[0]["execution_id"] == "exec-1"

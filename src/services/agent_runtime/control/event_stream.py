@@ -15,6 +15,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
+from .http_headers import runtime_headers
 from .types import AgentRuntimeControlError, AgentTurn
 
 if TYPE_CHECKING:
@@ -92,12 +93,14 @@ async def stream_events(
     _logger: logging.Logger = logger,
 ) -> AsyncIterator[bytes]:
     url = f"{plane.runtime_url}/internal/v1/threads/{turn.runtime_thread_id}/events"
-    headers = {
-        "x-ai-platform-internal-token": plane.runtime_internal_token,
-        "x-ai-tenant-id": tenant_id,
-        "x-ai-user-id": user_id,
-        "x-ai-session-id": session_id,
-    }
+    headers = runtime_headers(
+        plane,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+        run_id=turn.run_id,
+        turn_id=turn.run_id,
+    )
     terminal_status: str | None = None
     async with plane.http_client.stream(
         "GET",
@@ -200,12 +203,14 @@ async def stream_thread_events(
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream Runtime replay + live broadcast without Gateway DB polling."""
     url = f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/events"
-    headers = {
-        "x-ai-platform-internal-token": plane.runtime_internal_token,
-        "x-ai-tenant-id": tenant_id,
-        "x-ai-user-id": user_id,
-        "x-ai-session-id": session_id,
-    }
+    headers = runtime_headers(
+        plane,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+        run_id=turn_id,
+        turn_id=turn_id,
+    )
     frame: list[str] = []
     terminal_status: str | None = None
     async with plane.http_client.stream(

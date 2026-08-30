@@ -26,6 +26,7 @@ from ..runtime_configuration import (
     build_runtime_platform_config,
     runtime_platform_config_hash,
 )
+from .http_headers import runtime_headers
 from .types import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
@@ -593,12 +594,14 @@ async def start_turn(
         effort = None
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/turns",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            turn_id=run_id,
+        ),
         json={
             "runId": str(run_id),
             "snapshotId": str(snapshot_id),

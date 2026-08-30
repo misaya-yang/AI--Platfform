@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 
+from .http_headers import runtime_headers
 from .types import (
     BASE_AGENT_INSTRUCTIONS_V1,
     GENERIC_AGENT_INSTRUCTIONS_V1,
@@ -71,12 +72,12 @@ async def cleanup_session(
         )
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/sessions/{quote(session_id, safe='')}/cleanup",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        ),
         json={},
     )
     if response.status_code == 404:
@@ -280,7 +281,12 @@ async def ensure_thread(
         }
         response = await plane.http_client.post(
             f"{plane.runtime_url}/internal/v1/threads",
-            headers={"x-ai-platform-internal-token": plane.runtime_internal_token},
+            headers=runtime_headers(
+                plane,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+            ),
             json={
                 "tenantId": tenant_id,
                 "userId": user_id,
@@ -348,12 +354,12 @@ async def resume_thread(
         developer_instructions = GENERIC_AGENT_INSTRUCTIONS_V1
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/resume",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        ),
         json={
             "model": model_id,
             "modelPlaneBaseUrl": plane.model_plane_base_url,
@@ -419,12 +425,14 @@ async def interrupt_turn(
     del reason  # The strict Agent turn/interrupt wire body is intentionally empty.
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/turns/{turn_id}/interrupt",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
+        headers=runtime_headers(
+            plane,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=turn_id,
+            turn_id=turn_id,
+        ),
         # Agent App Server's typed turn/interrupt request has an empty
         # body and only acknowledges after TurnAborted is emitted. The
         # public reason remains Gateway audit context; forwarding it would

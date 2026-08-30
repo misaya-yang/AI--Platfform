@@ -170,6 +170,7 @@ def _store_unavailable(exc: Exception) -> HTTPException:
 
 async def _enqueue_action(
     service: Any,
+    dataset_id: str,
     migration_id: str,
     *,
     action: str,
@@ -185,7 +186,8 @@ async def _enqueue_action(
         )
     )
     try:
-        return await asyncio.shield(enqueue)
+        job = await asyncio.shield(enqueue)
+        return _migration_job_receipt(dataset_id, migration_id, job)
     except asyncio.CancelledError as cancellation:
         # Disconnect cancellation must not roll back an in-flight enqueue.
         # This shields only the short PostgreSQL transaction; paid/long work
@@ -206,6 +208,24 @@ async def _enqueue_action(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise _store_unavailable(exc) from exc
+
+
+def _migration_job_receipt(
+    dataset_id: str,
+    migration_id: str,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    job_id = str(job.get("job_id") or "").strip()
+    return {
+        **job,
+        "execution_id": job_id or None,
+        "job_url": (
+            f"/api/v1/knowledge/datasets/{dataset_id}/embedding-migration/"
+            f"{migration_id}/jobs/{job_id}"
+            if job_id
+            else None
+        ),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +301,7 @@ async def backfill_migration(
     await _scoped_migration(service, dataset_id, migration_id)
     return await _enqueue_action(
         service,
+        dataset_id,
         migration_id,
         action="backfill",
         user=user,
@@ -302,6 +323,7 @@ async def verify_migration(
     await _scoped_migration(service, dataset_id, migration_id)
     return await _enqueue_action(
         service,
+        dataset_id,
         migration_id,
         action="verify",
         user=user,
@@ -330,6 +352,7 @@ async def gate_migration(
                 overrides[key] = value
     return await _enqueue_action(
         service,
+        dataset_id,
         migration_id,
         action="gate",
         payload=overrides,
@@ -369,7 +392,40 @@ async def get_migration_job(
         or str(job.get("dataset_id") or "") != str(dataset_id)
     ):
         raise HTTPException(status_code=404, detail="migration job not found")
-    return job
+    return _migration_job_receipt(dataset_id, migration_id, job)
+
+
+@router.delete(
+    "/knowledge/datasets/{dataset_id}/embedding-migration/"
+    "{migration_id}/jobs/{job_id}"
+)
+async def cancel_migration_job(
+    dataset_id: str,
+    migration_id: str,
+    job_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    service = _migration_service(svc)
+    await _owner_dataset(svc, user, dataset_id)
+    await _scoped_migration(service, dataset_id, migration_id)
+    try:
+        uuid.UUID(str(job_id or "").strip())
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(status_code=404, detail="migration job not found") from exc
+    try:
+        job = await service.cancel_action_job(
+            job_id,
+            migration_id=migration_id,
+            dataset_id=dataset_id,
+        )
+    except MigrationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _store_unavailable(exc) from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="migration job not found")
+    return _migration_job_receipt(dataset_id, migration_id, job)
 
 
 @router.post(

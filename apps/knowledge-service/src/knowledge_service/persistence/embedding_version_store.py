@@ -923,6 +923,62 @@ class EmbeddingVersionStore:
             )
         return self._action_job_to_dict(row) if row else None
 
+    async def cancel_scoped_action_job(
+        self,
+        job_id: str,
+        *,
+        migration_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any] | None:
+        """Cancel a scoped queued/running action and fence its claim token.
+
+        The existing schema uses ``failed`` as its durable cancellation
+        terminal. Clearing the live claim makes the worker heartbeat fail and
+        prevents a late result CAS from overwriting that terminal receipt.
+        """
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT * FROM knowledge.embedding_migration_action_jobs"
+                " WHERE job_id = $1::uuid AND migration_id = $2::uuid"
+                " AND dataset_id = $3 FOR UPDATE",
+                str(job_id or "").strip(),
+                str(migration_id or "").strip(),
+                str(dataset_id or "").strip(),
+            )
+            if current is None:
+                return None
+            state = str(current["state"])
+            error = str(current["error"] or "")
+            if state == "failed" and error == "cancelled by operator":
+                return self._action_job_to_dict(current)
+            if state not in {"queued", "running"}:
+                raise MigrationStateError(
+                    f"migration action job in state '{state}' cannot be cancelled"
+                )
+            row = await conn.fetchrow(
+                """
+                UPDATE knowledge.embedding_migration_action_jobs
+                SET state = 'failed', result = NULL,
+                    error = 'cancelled by operator',
+                    claimed_by = NULL, claim_token = NULL,
+                    terminal_claim_token = CASE
+                        WHEN state = 'running' THEN claim_token
+                        ELSE terminal_claim_token
+                    END,
+                    lease_expires_at = NULL,
+                    last_heartbeat_at = CASE
+                        WHEN state = 'running' THEN NOW()
+                        ELSE last_heartbeat_at
+                    END,
+                    finished_at = NOW(), updated_at = NOW()
+                WHERE job_id = $1::uuid AND state IN ('queued', 'running')
+                RETURNING *
+                """,
+                str(job_id or "").strip(),
+            )
+        return self._action_job_to_dict(row) if row else None
+
     async def describe_action_jobs(
         self, dataset_id: str, *, terminal_limit: int = 10
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:

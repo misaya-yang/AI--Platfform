@@ -293,6 +293,56 @@ def test_v2_signature_uses_key_id_for_rotation() -> None:
     )
 
 
+def test_v2_key_scope_binds_caller_audience_and_path() -> None:
+    kwargs = {
+        "secret": SECRET,
+        "version": "v2",
+        "key_id": "active",
+        "keys": {"active": SECRET, "previous": OTHER},
+        "allowed_path_prefixes": ("/api/v1/knowledge",),
+    }
+    signer = GatewaySecret(
+        **kwargs,
+        caller_service="gateway",
+        audience="knowledge-service",
+        replay_store=InMemoryReplayStore(),
+    )
+    header = signer.sign(
+        request_id="service-bound",
+        method="POST",
+        path="/api/v1/knowledge/dataset-a/retrieve",
+        body=b"{}",
+    )
+    verifier = GatewaySecret(
+        **kwargs,
+        caller_service="gateway",
+        audience="knowledge-service",
+        replay_store=InMemoryReplayStore(),
+    )
+    assert verifier.verify(
+        header,
+        method="POST",
+        path="/api/v1/knowledge/dataset-a/retrieve",
+        body=b"{}",
+    ) == "service-bound"
+
+    wrong_audience = GatewaySecret(
+        **kwargs,
+        caller_service="gateway",
+        audience="agent-runtime",
+        replay_store=InMemoryReplayStore(),
+    )
+    with pytest.raises(InvalidGatewaySecret, match="signature"):
+        wrong_audience.verify(
+            header,
+            method="POST",
+            path="/api/v1/knowledge/dataset-a/retrieve",
+            body=b"{}",
+        )
+    with pytest.raises(InvalidGatewaySecret, match="path outside key scope"):
+        signer.sign(method="POST", path="/api/v1/assistant/chat", body=b"{}")
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}

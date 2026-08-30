@@ -261,18 +261,11 @@ class InternalServiceClient:
         headers: dict[str, str] | None,
         has_json: bool,
     ) -> dict[str, str]:
-        out = dict(headers or {})
+        from ai_gateway_core.tracing import internal_http_headers
+
+        out = internal_http_headers(headers)
         if has_json and not any(k.lower() == "content-type" for k in out):
             out["Content-Type"] = "application/json"
-
-        try:
-            from ai_gateway_core.proxy.request_id_middleware import REQUEST_ID_CTX
-
-            request_id = REQUEST_ID_CTX.get()
-        except Exception:  # noqa: BLE001
-            request_id = ""
-        if request_id and not any(k.lower() == "x-request-id" for k in out):
-            out["X-Request-Id"] = request_id
 
         if self._cfg.gateway_secret is not None:
             query = str(httpx.QueryParams(query_params or {}))
