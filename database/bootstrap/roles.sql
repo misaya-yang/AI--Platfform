@@ -142,6 +142,25 @@ REVOKE CREATE ON SCHEMA public, gateway, assistant, knowledge FROM
     ai_gateway_knowledge_api,
     ai_gateway_knowledge_worker;
 
+-- Trusted extension installation needs CREATE on this database. Keep it on
+-- the NOLOGIN owner only: the migrator must explicitly SET ROLE, while
+-- application roles and PUBLIC cannot create schemas or extensions.
+DO $$
+BEGIN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM PUBLIC', current_database());
+    EXECUTE format(
+        'REVOKE CREATE ON DATABASE %I FROM '
+        'ai_gateway_migrator, ai_gateway_gateway, ai_gateway_runtime, '
+        'ai_gateway_capability_worker, ai_gateway_knowledge_api, '
+        'ai_gateway_knowledge_worker',
+        current_database()
+    );
+    EXECUTE format(
+        'GRANT CREATE ON DATABASE %I TO ai_gateway_owner', current_database()
+    );
+END
+$$;
+
 -- 6. Safe defaults for baseline and future epoch objects ---------------------
 -- PostgreSQL grants PUBLIC EXECUTE on new routines and PUBLIC USAGE on new
 -- types unless the creating role overrides those defaults.  Baseline DDL runs

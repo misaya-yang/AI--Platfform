@@ -7,7 +7,7 @@ Classes (PRD ARC-03 §3B.6):
 2. acl — object owners, ACL entries and default privileges, mapped to the
    logical principal ids of the baseline manifest so that configurable LOGIN
    role prefixes never change an equivalent-permission hash.
-3. extensions — allowlisted extension name/version pairs.
+3. extensions — allowlisted extension name/version/schema/logical-owner tuples.
 4. reference_data — exact hash over declared system-owned immutable rows only.
 
 Ledger/history tables and catalog schemas are excluded by construction.  User
@@ -16,19 +16,28 @@ data and credentials never enter a fingerprint.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-import math
-from collections.abc import Iterable, Mapping
-from datetime import date, datetime, time
-from decimal import Decimal
+from collections.abc import Iterable
 from typing import Any
-from uuid import UUID
 
 from .constants import (
     CATALOG_SCHEMAS,
-    EXTENSION_ALLOWLIST,
+)
+from .fingerprint_catalog import (
+    CatalogFingerprintError,
+    column_acl_lines,
+    database_acl_lines,
+    extension_catalog_lines,
+    policy_acl_lines,
+    structural_catalog_detail_lines,
+)
+from .fingerprint_values import (
+    UnsupportedFingerprintValue,
+    canonical_digest,
+    canonical_value_tree,
+)
+from .fingerprint_values import (
+    diff_line_lists as diff_line_lists,
 )
 from .manifest import ReferenceDataSet
 
@@ -62,20 +71,46 @@ _SCHEMA_FILTER = """
     AND n.nspname NOT LIKE 'pg_toast_temp_%'
 """
 
+_EXTENSION_RELATION_FILTER = """
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_depend AS extension_dependency
+        WHERE extension_dependency.classid = 'pg_class'::regclass
+          AND extension_dependency.objid = c.oid
+          AND extension_dependency.deptype = 'e'
+    )
+"""
+
+_EXTENSION_FUNCTION_FILTER = """
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_depend AS extension_dependency
+        WHERE extension_dependency.classid = 'pg_proc'::regclass
+          AND extension_dependency.objid = p.oid
+          AND extension_dependency.deptype = 'e'
+    )
+"""
+
+_EXTENSION_TYPE_FILTER = """
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_depend AS extension_dependency
+        WHERE extension_dependency.classid = 'pg_type'::regclass
+          AND extension_dependency.objid = t.oid
+          AND extension_dependency.deptype = 'e'
+    )
+"""
+
+_PLATFORM_TYPE_FILTER = """
+    AND (
+        t.typtype IN ('e', 'd', 'r', 'm')
+        OR (t.typtype = 'c' AND type_relation.relkind = 'c')
+    )
+"""
+
 
 class FingerprintError(RuntimeError):
     """A fingerprint could not be computed or failed its allowlist checks."""
 
 
-def canonical_digest(lines: Iterable[str]) -> str:
-    """SHA-256 over newline-joined canonical lines."""
-    material = "\n".join(lines)
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def _normalized_owner(
-    owner: str, owner_map: dict[str, str] | None
-) -> str:
+def _normalized_owner(owner: str, owner_map: dict[str, str] | None) -> str:
     if owner_map and owner in owner_map:
         return owner_map[owner]
     return owner
@@ -119,19 +154,42 @@ async def structural_lines(conn: Any) -> list[str]:
 
     relations = await conn.fetch(
         f"""
-        SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind
+        SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind,
+               c.relpersistence AS persistence,
+               c.relispartition AS is_partition,
+               c.relrowsecurity AS row_security,
+               c.relforcerowsecurity AS force_row_security,
+               c.relreplident AS replica_identity,
+               COALESCE(access_method.amname, '') AS access_method,
+               COALESCE(pg_get_partkeydef(c.oid), '') AS partition_key,
+               CASE WHEN c.relispartition
+                    THEN pg_get_expr(c.relpartbound, c.oid, false) ELSE '' END
+                    AS partition_bound,
+               COALESCE((
+                   SELECT string_agg(option, ',' ORDER BY option)
+                   FROM unnest(c.reloptions) AS option
+               ), '') AS options
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        LEFT JOIN pg_am AS access_method ON access_method.oid = c.relam
         WHERE c.relkind <> ALL(ARRAY['i', 'I', 't', 'c'])
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
         list(CATALOG_SCHEMAS),
     )
     for row in relations:
         kind = _RELKIND_NAMES.get(row["kind"], row["kind"])
-        lines.append(f"relation:{row['schema']}.{row['name']}:{kind}")
+        lines.append(
+            f"relation:{row['schema']}.{row['name']}:{kind}:"
+            f"persistence={row['persistence']}:partition={int(row['is_partition'])}:"
+            f"rls={int(row['row_security'])}/{int(row['force_row_security'])}:"
+            f"replica_identity={row['replica_identity']}:am={row['access_method']}:"
+            f"partition_key={row['partition_key']}:bound={row['partition_bound']}:"
+            f"options={row['options']}"
+        )
 
     columns = await conn.fetch(
         f"""
@@ -139,14 +197,22 @@ async def structural_lines(conn: Any) -> list[str]:
                format_type(a.atttypid, a.atttypmod) AS type,
                a.attnotnull AS not_null,
                COALESCE(pg_get_expr(d.adbin, d.adrelid), '') AS default_expr,
-               a.attnum AS position
+               a.attnum AS position, a.attidentity AS identity,
+               a.attgenerated AS generated, a.attstorage AS storage,
+               a.attcompression AS compression,
+               COALESCE(collation_namespace.nspname || '.' || collation.collname, '')
+                   AS collation
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         JOIN pg_attribute AS a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
         LEFT JOIN pg_attrdef AS d ON d.adrelid = c.oid AND d.adnum = a.attnum
+        LEFT JOIN pg_collation AS collation ON collation.oid = a.attcollation
+        LEFT JOIN pg_namespace AS collation_namespace
+          ON collation_namespace.oid = collation.collnamespace
         WHERE c.relkind IN ('r', 'p', 'f', 'm', 'v')
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname, a.attnum
         """,
         list(CATALOG_SCHEMAS),
@@ -154,7 +220,9 @@ async def structural_lines(conn: Any) -> list[str]:
     for row in columns:
         lines.append(
             "column:{schema}.{relation}.{column}:{position}:{type}:"
-            "notnull={not_null}:default={default_expr}".format(
+            "notnull={not_null}:default={default_expr}:identity={identity}:"
+            "generated={generated}:storage={storage}:compression={compression}:"
+            "collation={collation}".format(
                 schema=row["schema"],
                 relation=row["relation"],
                 column=row["column"],
@@ -162,19 +230,26 @@ async def structural_lines(conn: Any) -> list[str]:
                 type=row["type"],
                 not_null="1" if row["not_null"] else "0",
                 default_expr=row["default_expr"],
+                identity=row["identity"],
+                generated=row["generated"],
+                storage=row["storage"],
+                compression=row["compression"],
+                collation=row["collation"],
             )
         )
 
     constraints = await conn.fetch(
         f"""
         SELECT n.nspname AS schema, c.relname AS relation, con.conname AS name,
-               con.contype AS type, pg_get_constraintdef(con.oid) AS definition
+               con.contype AS type, con.convalidated AS validated,
+               pg_get_constraintdef(con.oid) AS definition
         FROM pg_constraint AS con
         JOIN pg_class AS c ON c.oid = con.conrelid
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         WHERE TRUE
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname, con.conname
         """,
         list(CATALOG_SCHEMAS),
@@ -182,19 +257,23 @@ async def structural_lines(conn: Any) -> list[str]:
     for row in constraints:
         lines.append(
             f"constraint:{row['schema']}.{row['relation']}.{row['name']}:"
-            f"{row['type']}:{row['definition']}"
+            f"{row['type']}:validated={int(row['validated'])}:{row['definition']}"
         )
 
     indexes = await conn.fetch(
         f"""
         SELECT n.nspname AS schema, c.relname AS name,
                pg_get_indexdef(c.oid) AS definition,
-               indisunique AS is_unique, indisprimary AS is_primary
+               i.indisunique AS is_unique, i.indisprimary AS is_primary,
+               i.indisvalid AS is_valid, i.indisready AS is_ready,
+               i.indisexclusion AS is_exclusion, i.indisreplident AS is_replica_identity,
+               i.indisclustered AS is_clustered
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         JOIN pg_index AS i ON i.indexrelid = c.oid
         WHERE c.relkind IN ('i', 'I')
         {_SCHEMA_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         AND NOT (n.nspname = 'public' AND (
             SELECT rc.relname FROM pg_class AS rc WHERE rc.oid = i.indrelid
         ) IN (
@@ -211,28 +290,42 @@ async def structural_lines(conn: Any) -> list[str]:
     for row in indexes:
         flags = "u" if row["is_unique"] else ""
         flags += "p" if row["is_primary"] else ""
+        flags += "v" if row["is_valid"] else ""
+        flags += "r" if row["is_ready"] else ""
+        flags += "x" if row["is_exclusion"] else ""
+        flags += "i" if row["is_replica_identity"] else ""
+        flags += "c" if row["is_clustered"] else ""
         lines.append(f"index:{row['schema']}.{row['name']}:{flags}:{row['definition']}")
 
     sequences = await conn.fetch(
-        """
-        SELECT schemaname AS schema, sequencename AS name, data_type,
-               start_value, increment_by, cycle
-        FROM pg_sequences
-        WHERE schemaname <> ALL($1)
-          AND schemaname NOT LIKE 'pg_temp_%'
-          AND schemaname NOT LIKE 'pg_toast_temp_%'
-        ORDER BY schemaname, sequencename
+        f"""
+        SELECT n.nspname AS schema, c.relname AS name,
+               format_type(s.seqtypid, NULL) AS data_type,
+               s.seqstart AS start_value, s.seqincrement AS increment_by,
+               s.seqmin AS min_value, s.seqmax AS max_value,
+               s.seqcache AS cache_size, s.seqcycle AS cycle
+        FROM pg_sequence AS s
+        JOIN pg_class AS c ON c.oid = s.seqrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE TRUE
+        {_SCHEMA_FILTER}
+        {_EXTENSION_RELATION_FILTER}
+        ORDER BY n.nspname, c.relname
         """,
         list(CATALOG_SCHEMAS),
     )
     for row in sequences:
         lines.append(
-            "sequence:{schema}.{name}:{data_type}:start={start}:by={by}:cycle={cycle}".format(
+            "sequence:{schema}.{name}:{data_type}:start={start}:by={by}:"
+            "min={min}:max={max}:cache={cache}:cycle={cycle}".format(
                 schema=row["schema"],
                 name=row["name"],
                 data_type=row["data_type"],
                 start=row["start_value"],
                 by=row["increment_by"],
+                min=row["min_value"],
+                max=row["max_value"],
+                cache=row["cache_size"],
                 cycle="1" if row["cycle"] else "0",
             )
         )
@@ -247,6 +340,8 @@ async def structural_lines(conn: Any) -> list[str]:
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         WHERE TRUE
         {_SCHEMA_FILTER}
+        {_EXTENSION_FUNCTION_FILTER}
+          AND p.prokind IN ('f', 'p', 'w')
         ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
         """,
         list(CATALOG_SCHEMAS),
@@ -258,19 +353,46 @@ async def structural_lines(conn: Any) -> list[str]:
             f"{security}:{row['definition']}"
         )
 
+    lines.extend(await structural_catalog_detail_lines(conn))
+
     types = await conn.fetch(
         f"""
-        SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type
+        SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type,
+               CASE WHEN t.typbasetype = 0 THEN ''
+                    ELSE format_type(t.typbasetype, t.typtypmod) END AS base_type,
+               t.typnotnull AS not_null, COALESCE(t.typdefault, '') AS default_expr,
+               COALESCE(collation_namespace.nspname || '.' || collation.collname, '')
+                   AS collation,
+               CASE WHEN range_definition.rngsubtype IS NULL THEN ''
+                    ELSE format_type(range_definition.rngsubtype, NULL) END AS range_subtype,
+               CASE WHEN range_definition.rngcanonical = 0 THEN ''
+                    ELSE range_definition.rngcanonical::regprocedure::text END AS canonical,
+               CASE WHEN range_definition.rngsubdiff = 0 THEN ''
+                    ELSE range_definition.rngsubdiff::regprocedure::text END AS subtype_diff
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
-        WHERE t.typtype IN ('e', 'd')
+        LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
+        LEFT JOIN pg_collation AS collation ON collation.oid = t.typcollation
+        LEFT JOIN pg_namespace AS collation_namespace
+          ON collation_namespace.oid = collation.collnamespace
+        LEFT JOIN pg_range AS range_definition
+          ON range_definition.rngtypid = t.oid OR range_definition.rngmultitypid = t.oid
+        WHERE TRUE
         {_SCHEMA_FILTER}
+        {_PLATFORM_TYPE_FILTER}
+        {_EXTENSION_TYPE_FILTER}
         ORDER BY n.nspname, t.typname
         """,
         list(CATALOG_SCHEMAS),
     )
     for row in types:
-        lines.append(f"type:{row['schema']}.{row['name']}:{row['type']}")
+        lines.append(
+            f"type:{row['schema']}.{row['name']}:{row['type']}:"
+            f"base={row['base_type']}:notnull={1 if row['not_null'] else 0}:"
+            f"default={row['default_expr']}:collation={row['collation']}:"
+            f"range_subtype={row['range_subtype']}:canonical={row['canonical']}:"
+            f"subtype_diff={row['subtype_diff']}"
+        )
         if row["type"] == "e":
             labels = await conn.fetch(
                 "SELECT enumlabel FROM pg_enum WHERE enumtypid = "
@@ -280,8 +402,44 @@ async def structural_lines(conn: Any) -> list[str]:
                 row["name"],
             )
             lines.extend(
-                f"enum:{row['schema']}.{row['name']}:{label['enumlabel']}"
-                for label in labels
+                f"enum:{row['schema']}.{row['name']}:{label['enumlabel']}" for label in labels
+            )
+        if row["type"] == "d":
+            constraints = await conn.fetch(
+                "SELECT conname, pg_get_constraintdef(oid) AS definition "
+                "FROM pg_constraint WHERE contypid = ("
+                "SELECT t2.oid FROM pg_type AS t2 "
+                "JOIN pg_namespace AS n2 ON n2.oid = t2.typnamespace "
+                "WHERE n2.nspname = $1 AND t2.typname = $2"
+                ") ORDER BY conname",
+                row["schema"],
+                row["name"],
+            )
+            lines.extend(
+                f"domain_constraint:{row['schema']}.{row['name']}."
+                f"{constraint['conname']}:{constraint['definition']}"
+                for constraint in constraints
+            )
+        if row["type"] == "c":
+            attributes = await conn.fetch(
+                "SELECT a.attnum AS position, a.attname AS name, "
+                "format_type(a.atttypid, a.atttypmod) AS type, "
+                "COALESCE(cn.nspname || '.' || col.collname, '') AS collation "
+                "FROM pg_type AS t2 "
+                "JOIN pg_namespace AS n2 ON n2.oid = t2.typnamespace "
+                "JOIN pg_attribute AS a ON a.attrelid = t2.typrelid "
+                "LEFT JOIN pg_collation AS col ON col.oid = a.attcollation "
+                "LEFT JOIN pg_namespace AS cn ON cn.oid = col.collnamespace "
+                "WHERE n2.nspname = $1 AND t2.typname = $2 "
+                "AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+                row["schema"],
+                row["name"],
+            )
+            lines.extend(
+                f"composite_attribute:{row['schema']}.{row['name']}."
+                f"{attribute['name']}:{attribute['position']}:{attribute['type']}:"
+                f"collation={attribute['collation']}"
+                for attribute in attributes
             )
 
     return lines
@@ -301,14 +459,14 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         WHERE c.relkind <> ALL(ARRAY['i', 'I', 't', 'c'])
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
         list(CATALOG_SCHEMAS),
     )
     for row in owners:
         lines.append(
-            f"owner:{row['schema']}.{row['name']}:"
-            f"{_normalized_owner(row['owner'], principal_map)}"
+            f"owner:{row['schema']}.{row['name']}:{_normalized_owner(row['owner'], principal_map)}"
         )
 
     schema_owners = await conn.fetch(
@@ -324,8 +482,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
     )
     for row in schema_owners:
         lines.append(
-            f"schema_owner:{row['schema']}:"
-            f"{_normalized_owner(row['owner'], principal_map)}"
+            f"schema_owner:{row['schema']}:{_normalized_owner(row['owner'], principal_map)}"
         )
 
     function_owners = await conn.fetch(
@@ -337,6 +494,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         WHERE TRUE
         {_SCHEMA_FILTER}
+        {_EXTENSION_FUNCTION_FILTER}
         ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
         """,
         list(CATALOG_SCHEMAS),
@@ -353,8 +511,11 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                pg_get_userbyid(t.typowner) AS owner
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
-        WHERE t.typtype IN ('e', 'd')
+        LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
+        WHERE TRUE
         {_SCHEMA_FILTER}
+        {_PLATFORM_TYPE_FILTER}
+        {_EXTENSION_TYPE_FILTER}
         ORDER BY n.nspname, t.typname
         """,
         list(CATALOG_SCHEMAS),
@@ -378,6 +539,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         WHERE c.relkind <> ALL(ARRAY['i', 'I', 't', 'c'])
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
+        {_EXTENSION_RELATION_FILTER}
         GROUP BY n.nspname, c.relname, a.grantee, a.grant_option, c.relowner
         ORDER BY n.nspname, c.relname, grantee, a.grant_option
         """,
@@ -390,6 +552,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
             f"{row['privileges']}:grantopt={1 if row['grant_option'] else 0}"
         )
 
+    lines.extend(await column_acl_lines(conn, principal_map))
+
     function_acls = await conn.fetch(
         f"""
         SELECT n.nspname AS schema, p.proname AS name,
@@ -401,6 +565,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) AS a
         WHERE TRUE
         {_SCHEMA_FILTER}
+        {_EXTENSION_FUNCTION_FILTER}
         GROUP BY n.nspname, p.proname, p.oid, a.grantee, a.grant_option
         ORDER BY n.nspname, p.proname, identity_args, grantee
         """,
@@ -435,6 +600,14 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
             f"grantopt={1 if row['grant_option'] else 0}"
         )
 
+    lines.extend(
+        await database_acl_lines(
+            conn,
+            principal_map,
+            _like_prefix_pattern(role_prefix),
+        )
+    )
+
     type_acls = await conn.fetch(
         f"""
         SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type,
@@ -443,9 +616,12 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
+        LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
         CROSS JOIN LATERAL aclexplode(COALESCE(t.typacl, acldefault('T', t.typowner))) AS a
-        WHERE t.typtype IN ('e', 'd')
+        WHERE TRUE
         {_SCHEMA_FILTER}
+        {_PLATFORM_TYPE_FILTER}
+        {_EXTENSION_TYPE_FILTER}
         GROUP BY n.nspname, t.typname, t.typtype, a.grantee, a.grant_option
         ORDER BY n.nspname, t.typname, grantee, a.grant_option
         """,
@@ -457,6 +633,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
             f"type_acl:{row['schema']}.{row['name']}:{row['type']}:{grantee}:"
             f"{row['privileges']}:grantopt={1 if row['grant_option'] else 0}"
         )
+
+    lines.extend(await policy_acl_lines(conn, principal_map))
 
     default_privileges = await conn.fetch(
         """
@@ -502,9 +680,19 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
     roles = await conn.fetch(
         """
         SELECT r.rolname AS name, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
-               r.rolcanlogin, r.rolinherit,
+               r.rolcanlogin, r.rolinherit, r.rolreplication, r.rolbypassrls,
                COALESCE((SELECT string_agg(option, ',' ORDER BY option)
-                         FROM pg_options_to_table(r.rolconfig)), '') AS config
+                         FROM pg_options_to_table(r.rolconfig)), '') AS config,
+               ARRAY(
+                   SELECT granted.rolname || ':' ||
+                          membership.admin_option::integer || ':' ||
+                          membership.inherit_option::integer || ':' ||
+                          membership.set_option::integer
+                   FROM pg_auth_members AS membership
+                   JOIN pg_roles AS granted ON granted.oid = membership.roleid
+                   WHERE membership.member = r.oid
+                   ORDER BY granted.rolname
+               ) AS memberships
         FROM pg_roles AS r
         WHERE r.rolname LIKE $1 ESCAPE E'\\'
         ORDER BY r.rolname
@@ -521,27 +709,27 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                 ("D", row["rolcreatedb"]),
                 ("L", row["rolcanlogin"]),
                 ("I", row["rolinherit"]),
+                ("P", row["rolreplication"]),
+                ("B", row["rolbypassrls"]),
             )
             if present
         )
-        lines.append(f"role:{name}:{flags}:{row['config']}")
+        memberships = []
+        for membership in row["memberships"] or []:
+            physical_role, admin, inherit, set_option = str(membership).rsplit(":", 3)
+            logical_role = _normalized_owner(physical_role, principal_map)
+            memberships.append(f"{logical_role}:admin={admin}:inherit={inherit}:set={set_option}")
+        lines.append(f"role:{name}:{flags}:{row['config']}:memberships={','.join(memberships)}")
 
     return lines
 
 
-async def extensions_lines(conn: Any) -> list[str]:
+async def extensions_lines(conn: Any, *, role_prefix: str) -> list[str]:
     """Allowlisted extensions only; anything else fails closed."""
-    rows = await conn.fetch("SELECT extname, extversion FROM pg_extension ORDER BY extname")
-    lines: list[str] = []
-    for row in rows:
-        if row["extname"] == "plpgsql":
-            continue  # built-in, present everywhere
-        if row["extname"] not in EXTENSION_ALLOWLIST:
-            raise FingerprintError(
-                f"extension {row['extname']!r} is not in the allowlist {EXTENSION_ALLOWLIST}"
-            )
-        lines.append(f"extension:{row['extname']}:{row['extversion']}")
-    return lines
+    try:
+        return await extension_catalog_lines(conn, logical_principal_map(role_prefix))
+    except CatalogFingerprintError as exc:
+        raise FingerprintError(str(exc)) from exc
 
 
 async def reference_data_lines(conn: Any, reference_sets: Iterable[ReferenceDataSet]) -> list[str]:
@@ -551,14 +739,10 @@ async def reference_data_lines(conn: Any, reference_sets: Iterable[ReferenceData
         columns = list(dict.fromkeys([*ref.natural_key, *ref.immutable_columns]))
         column_list = ", ".join(columns)
         where = f" WHERE {ref.where}" if ref.where else ""
-        order_by = ", ".join(ref.natural_key)
-        rows = await conn.fetch(
-            f"SELECT {column_list} FROM {ref.table}{where} ORDER BY {order_by}"
-        )
+        rows = await conn.fetch(f"SELECT {column_list} FROM {ref.table}{where}")
+        canonical_rows = sorted(_canonical_row(row[column] for column in columns) for row in rows)
         lines.append(f"reference:{ref.table}:columns={','.join(columns)}:rows={len(rows)}")
-        for row in rows:
-            values = _canonical_row(row[column] for column in columns)
-            lines.append(f"row:{ref.table}:{values}")
+        lines.extend(f"row:{ref.table}:{values}" for values in canonical_rows)
     return lines
 
 
@@ -580,58 +764,10 @@ def _canonical_row(values: Iterable[Any]) -> str:
 
 
 def _canonical_value_tree(value: Any) -> list[Any]:
-    if value is None:
-        return ["null"]
-    if isinstance(value, bool):
-        return ["bool", value]
-    if isinstance(value, int):
-        return ["int", str(value)]
-    if isinstance(value, Decimal):
-        if value.is_finite():
-            normalized = format(value.normalize(), "f")
-            if normalized == "-0":
-                normalized = "0"
-        else:
-            normalized = str(value)
-        return ["decimal", normalized]
-    if isinstance(value, float):
-        if math.isnan(value):
-            rendered = "nan"
-        elif math.isinf(value):
-            rendered = "+inf" if value > 0 else "-inf"
-        else:
-            rendered = value.hex()
-        return ["float", rendered]
-    if isinstance(value, str):
-        return ["str", value]
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return ["bytes", base64.b64encode(bytes(value)).decode("ascii")]
-    if isinstance(value, datetime):
-        return ["datetime", value.isoformat(timespec="microseconds")]
-    if isinstance(value, date):
-        return ["date", value.isoformat()]
-    if isinstance(value, time):
-        return ["time", value.isoformat(timespec="microseconds")]
-    if isinstance(value, UUID):
-        return ["uuid", str(value)]
-    if isinstance(value, Mapping):
-        items = [
-            [_canonical_value_tree(key), _canonical_value_tree(item)]
-            for key, item in value.items()
-        ]
-        items.sort(
-            key=lambda pair: json.dumps(
-                pair[0], ensure_ascii=True, separators=(",", ":")
-            )
-        )
-        return ["map", items]
-    if isinstance(value, list):
-        return ["list", [_canonical_value_tree(item) for item in value]]
-    if isinstance(value, tuple):
-        return ["tuple", [_canonical_value_tree(item) for item in value]]
-    raise FingerprintError(
-        f"unsupported reference-data value type: {type(value).__module__}.{type(value).__qualname__}"
-    )
+    try:
+        return canonical_value_tree(value)
+    except UnsupportedFingerprintValue as exc:
+        raise FingerprintError(str(exc)) from exc
 
 
 async def compute_fingerprints(
@@ -643,7 +779,7 @@ async def compute_fingerprints(
     """Compute all four fingerprints in one read-only pass."""
     structural = canonical_digest(await structural_lines(conn))
     acl = canonical_digest(await acl_lines(conn, role_prefix=role_prefix))
-    extensions = canonical_digest(await extensions_lines(conn))
+    extensions = canonical_digest(await extensions_lines(conn, role_prefix=role_prefix))
     reference = canonical_digest(await reference_data_lines(conn, reference_sets))
     return {
         "structural": structural,
@@ -655,12 +791,3 @@ async def compute_fingerprints(
 
 def fingerprint_classes() -> tuple[str, ...]:
     return _FINGERPRINT_CLASSES
-
-
-def diff_line_lists(expected: list[str], actual: list[str]) -> list[str]:
-    """Render drift between two canonical line lists (for drift reports)."""
-    expected_set = set(expected)
-    actual_set = set(actual)
-    drift = [f"- {line}" for line in sorted(expected_set - actual_set)]
-    drift.extend(f"+ {line}" for line in sorted(actual_set - expected_set))
-    return drift

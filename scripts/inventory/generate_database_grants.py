@@ -54,6 +54,8 @@ POLICY_SCHEMA = "arc03-grants-policy/v1"
 ROLE_SUFFIXES = frozenset(
     {"gateway", "runtime", "capability_worker", "knowledge_api", "knowledge_worker"}
 )
+REVOKE_ROLE_SUFFIXES = frozenset({*ROLE_SUFFIXES, "migrator"})
+PLATFORM_SCHEMAS = frozenset({"public", "gateway", "assistant", "knowledge"})
 KIND_PRIVILEGES: dict[str, frozenset[str]] = {
     "table": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     "view": frozenset({"SELECT"}),
@@ -65,7 +67,7 @@ PRIVILEGE_ORDER = {
     name: position
     for position, name in enumerate(("SELECT", "INSERT", "UPDATE", "DELETE", "USAGE", "EXECUTE"))
 }
-IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]*")
+IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 ROLE_PREFIX_RE = re.compile(r"[a-z][a-z0-9_]{0,20}_")
 IDENTITY_ARGUMENTS_RE = re.compile(r"[a-z0-9_ ,.\[\]]*")
 WRITE_PRIVILEGES = frozenset({"INSERT", "UPDATE", "DELETE"})
@@ -100,6 +102,14 @@ class Grant:
     identity_arguments: str
     role: str
     privileges: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GrantObject:
+    kind: str
+    schema: str
+    name: str
+    identity_arguments: str
 
 
 def _strings(value: object, context: str, unresolved: list[str]) -> tuple[str, ...]:
@@ -196,7 +206,7 @@ def _validate_identifier(value: object, context: str, unresolved: list[str]) -> 
 def _load_policy_entries(
     inventory_objects: dict[tuple[str, str], InventoryObject],
     policy: dict[str, Any],
-) -> list[Grant]:
+) -> tuple[list[Grant], list[GrantObject]]:
     unresolved: list[str] = []
     if policy.get("schema_version") != POLICY_SCHEMA:
         unresolved.append(f"policy.schema_version must be {POLICY_SCHEMA!r}")
@@ -207,6 +217,7 @@ def _load_policy_entries(
     seen: set[tuple[str, str]] = set()
     qualified_seen: set[tuple[str, str, str, str]] = set()
     grants: list[Grant] = []
+    managed_objects: list[GrantObject] = []
     for index, row in enumerate(raw_objects):
         context = f"policy object[{index}]"
         if not isinstance(row, dict):
@@ -228,6 +239,8 @@ def _load_policy_entries(
 
         schema = _validate_identifier(row.get("schema"), f"{context}.schema", unresolved)
         name = _validate_identifier(row.get("name"), f"{context}.name", unresolved)
+        if schema not in PLATFORM_SCHEMAS:
+            unresolved.append(f"{context}.schema must be one of {sorted(PLATFORM_SCHEMAS)}")
         if row.get("owner") != "owner":
             unresolved.append(f"{context}.owner must be the NOLOGIN logical owner 'owner'")
         evidence = _strings(row.get("evidence"), f"{context}.evidence", unresolved)
@@ -251,6 +264,7 @@ def _load_policy_entries(
         if qualified_key in qualified_seen:
             unresolved.append(f"policy maps multiple inventory objects to {qualified_key}")
         qualified_seen.add(qualified_key)
+        managed_objects.append(GrantObject(kind, schema, name, identity_arguments))
 
         accesses = row.get("access")
         if not isinstance(accesses, list):
@@ -343,17 +357,19 @@ def _load_policy_entries(
         )
     if unresolved:
         raise GrantContractError(unresolved)
-    return grants
+    return grants, managed_objects
 
 
 def _quote_identifier(value: str) -> str:
     return f'"{value}"'
 
 
-def _object_sql(grant: Grant) -> tuple[str, str]:
+def _object_sql(grant: Grant | GrantObject) -> tuple[str, str]:
     qualified = f"{_quote_identifier(grant.schema)}.{_quote_identifier(grant.name)}"
     if grant.kind == "function":
         return "FUNCTION", f"{qualified}({grant.identity_arguments})"
+    if grant.kind in {"table", "view"}:
+        return "TABLE", qualified
     return grant.kind.upper(), qualified
 
 
@@ -383,7 +399,7 @@ def generate_grants_sql(
             ]
         )
     objects = _inventory_objects(inventory)
-    grants = _load_policy_entries(objects, policy)
+    grants, managed_objects = _load_policy_entries(objects, policy)
     policy_sha = hashlib.sha256(policy_bytes).hexdigest()
 
     merged: dict[tuple[str, str, str, str, str], set[str]] = {}
@@ -398,6 +414,27 @@ def generate_grants_sql(
         "-- This file grants no schema CREATE and no privileges to PUBLIC.",
         "",
     ]
+    for schema in sorted(PLATFORM_SCHEMAS):
+        for role in sorted(REVOKE_ROLE_SUFFIXES):
+            lines.append(
+                f"REVOKE ALL PRIVILEGES ON SCHEMA {_quote_identifier(schema)} "
+                f"FROM {_quote_identifier(role_prefix + role)};"
+            )
+    lines.append("")
+
+    for managed in sorted(
+        managed_objects,
+        key=lambda item: (item.kind, item.schema, item.name, item.identity_arguments),
+    ):
+        object_kind, object_name = _object_sql(managed)
+        for role in sorted(REVOKE_ROLE_SUFFIXES):
+            lines.append(
+                f"REVOKE ALL PRIVILEGES ON {object_kind} {object_name} "
+                f"FROM {_quote_identifier(role_prefix + role)};"
+            )
+    if managed_objects:
+        lines.append("")
+
     schema_roles = sorted({(schema, role) for _kind, schema, _name, _arguments, role in merged})
     for schema, role in schema_roles:
         lines.append(

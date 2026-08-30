@@ -54,6 +54,12 @@ _REQUIRED_CHANGE_FIELDS = (
     "owner",
     "transaction_mode",
     "rollback_class",
+    "preconditions",
+    "postconditions",
+    "timeout_seconds",
+    "lock_budget_seconds",
+    "resume_handler",
+    "repair_handler",
 )
 
 
@@ -152,6 +158,7 @@ class BaselineManifest:
     generator: str
     generated_at: str
     postgres_version: str
+    files_sha256: tuple[tuple[str, str], ...] = ()
     reference_data: tuple[ReferenceDataSet, ...] = ()
 
     @property
@@ -228,17 +235,29 @@ def _as_str_tuple(value: object, field_name: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise AuthorityManifestError(f"manifest field {field_name!r} must be a list of SQL strings")
     if any(not item.strip() for item in value):
-        raise AuthorityManifestError(
-            f"manifest field {field_name!r} cannot contain blank SQL"
-        )
+        raise AuthorityManifestError(f"manifest field {field_name!r} cannot contain blank SQL")
     return tuple(value)
+
+
+def _condition_tuple(value: object, field_name: str) -> tuple[str, ...]:
+    conditions = _as_str_tuple(value, field_name)
+    if not conditions:
+        raise AuthorityManifestError(
+            f"manifest field {field_name!r} must declare at least one read-only SELECT"
+        )
+    for condition in conditions:
+        if not re.match(r"^\s*SELECT\b", condition, re.IGNORECASE) or any(
+            marker in condition for marker in (";", "--", "/*", "*/")
+        ):
+            raise AuthorityManifestError(
+                f"manifest field {field_name!r} must contain one read-only SELECT per item"
+            )
+    return conditions
 
 
 def _positive_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise AuthorityManifestError(
-            f"manifest field {field_name!r} must be a positive integer"
-        )
+        raise AuthorityManifestError(f"manifest field {field_name!r} must be a positive integer")
     return value
 
 
@@ -274,6 +293,12 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
     for entry in raw_changes:
         if not isinstance(entry, dict):
             raise AuthorityManifestError(f"epoch manifest {path}: change entry must be a mapping")
+        allowed_change_fields = {*_REQUIRED_CHANGE_FIELDS, "notes"}
+        unknown = sorted(set(entry) - allowed_change_fields)
+        if unknown:
+            raise AuthorityManifestError(
+                f"epoch manifest {path}: change entry has unknown fields {unknown}"
+            )
         missing = [key for key in _REQUIRED_CHANGE_FIELDS if key not in entry]
         if missing:
             raise AuthorityManifestError(
@@ -287,13 +312,13 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
         seen_sequences.add(sequence)
         try:
             mode = TransactionMode(entry["transaction_mode"])
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise AuthorityManifestError(
                 f"epoch manifest {path}: unknown transaction_mode {entry['transaction_mode']!r}"
             ) from exc
         try:
             rollback = RollbackClass(entry["rollback_class"])
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise AuthorityManifestError(
                 f"epoch manifest {path}: unknown rollback_class {entry['rollback_class']!r}"
             ) from exc
@@ -312,10 +337,10 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
                 f"{sequence:03d}_<snake_case>.sql"
             )
         timeout_seconds = _positive_int(
-            entry.get("timeout_seconds", 300), f"changes[{sequence}].timeout_seconds"
+            entry["timeout_seconds"], f"changes[{sequence}].timeout_seconds"
         )
         lock_budget_seconds = _positive_int(
-            entry.get("lock_budget_seconds", 30),
+            entry["lock_budget_seconds"],
             f"changes[{sequence}].lock_budget_seconds",
         )
         if lock_budget_seconds > timeout_seconds:
@@ -323,21 +348,17 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
                 f"epoch manifest {path}: change {sequence} lock budget cannot exceed timeout"
             )
         resume_handler = _optional_identifier(
-            entry.get("resume_handler"), f"changes[{sequence}].resume_handler"
+            entry["resume_handler"], f"changes[{sequence}].resume_handler"
         )
         repair_handler = _optional_identifier(
-            entry.get("repair_handler"), f"changes[{sequence}].repair_handler"
+            entry["repair_handler"], f"changes[{sequence}].repair_handler"
         )
-        if mode is TransactionMode.NON_TRANSACTIONAL and not (
-            resume_handler or repair_handler
-        ):
+        if mode is TransactionMode.NON_TRANSACTIONAL and not (resume_handler or repair_handler):
             raise AuthorityManifestError(
                 f"epoch manifest {path}: non-transactional change {sequence} "
                 "must declare a resume_handler or repair_handler"
             )
-        if mode is TransactionMode.TRANSACTIONAL and (
-            resume_handler or repair_handler
-        ):
+        if mode is TransactionMode.TRANSACTIONAL and (resume_handler or repair_handler):
             raise AuthorityManifestError(
                 f"epoch manifest {path}: transactional change {sequence} "
                 "cannot declare recovery handlers"
@@ -351,8 +372,8 @@ def load_epoch_manifest(path: Path) -> EpochManifest:
                 owner=owner,
                 transaction_mode=mode,
                 rollback_class=rollback,
-                preconditions=_as_str_tuple(entry.get("preconditions"), "preconditions"),
-                postconditions=_as_str_tuple(entry.get("postconditions"), "postconditions"),
+                preconditions=_condition_tuple(entry["preconditions"], "preconditions"),
+                postconditions=_condition_tuple(entry["postconditions"], "postconditions"),
                 timeout_seconds=timeout_seconds,
                 lock_budget_seconds=lock_budget_seconds,
                 resume_handler=resume_handler,
@@ -420,6 +441,7 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
         "generator",
         "generated_at",
         "postgres_version",
+        "files_sha256",
     )
     missing = [key for key in required if not raw.get(key)]
     if missing:
@@ -447,9 +469,9 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
             f"baseline manifest {path}: generated_at must include a timezone"
         )
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", str(raw["postgres_version"])):
-        raise AuthorityManifestError(
-            f"baseline manifest {path}: postgres_version is invalid"
-        )
+        raise AuthorityManifestError(f"baseline manifest {path}: postgres_version is invalid")
+    if not re.fullmatch(r"[0-9]+", str(raw["schema_revision"])):
+        raise AuthorityManifestError(f"baseline manifest {path}: schema_revision must be numeric")
 
     digest_fields = (
         "structural_sha256",
@@ -460,20 +482,83 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
     for digest_field in digest_fields:
         _validate_full_sha256(raw[digest_field], digest_field)
 
+    required_baseline_files = {
+        "cutover_convergence.sql",
+        "grants.sql",
+        "init.sql",
+        "reference_data.sql",
+        "verify.sql",
+    }
+    raw_file_digests = raw["files_sha256"]
+    if not isinstance(raw_file_digests, dict):
+        raise AuthorityManifestError(f"baseline manifest {path}: files_sha256 must be an object")
+    declared_baseline_files = set(raw_file_digests)
+    actual_baseline_files = {
+        candidate.name for candidate in path.parent.glob("*.sql") if candidate.is_file()
+    }
+    if (
+        declared_baseline_files != required_baseline_files
+        or actual_baseline_files != required_baseline_files
+    ):
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: SQL coverage mismatch; "
+            f"required={sorted(required_baseline_files)}, "
+            f"declared={sorted(declared_baseline_files)}, "
+            f"actual={sorted(actual_baseline_files)}"
+        )
+    files_sha256: list[tuple[str, str]] = []
+    for filename in sorted(required_baseline_files):
+        declared_sha = _validate_full_sha256(raw_file_digests[filename], f"files_sha256.{filename}")
+        actual_sha = file_sha256(path.parent / filename)
+        if actual_sha != declared_sha:
+            raise AuthorityManifestError(
+                f"baseline manifest {path}: checksum drift for {filename}: "
+                f"declared {declared_sha}, actual {actual_sha}"
+            )
+        files_sha256.append((filename, declared_sha))
+
+    raw_reference_data = raw.get("reference_data", [])
+    if not isinstance(raw_reference_data, list):
+        raise AuthorityManifestError(f"baseline manifest {path}: reference_data must be a list")
     reference_sets: list[ReferenceDataSet] = []
-    for entry in raw.get("reference_data", []):
+    seen_reference_tables: set[str] = set()
+    for entry in raw_reference_data:
         if not isinstance(entry, dict):
             raise AuthorityManifestError(
                 f"baseline manifest {path}: reference_data entries must be objects"
             )
+        if "table" not in entry:
+            raise AuthorityManifestError(
+                f"baseline manifest {path}: reference_data entry needs table"
+            )
+        table = _validate_relation_name(entry["table"], "reference_data.table")
+        if table in seen_reference_tables:
+            raise AuthorityManifestError(
+                f"baseline manifest {path}: reference_data duplicates table {table!r}"
+            )
+        seen_reference_tables.add(table)
         natural_key = entry.get("natural_key")
         immutable_columns = entry.get("immutable_columns")
-        if not natural_key or not immutable_columns:
+        if (
+            not isinstance(natural_key, list)
+            or not natural_key
+            or any(not isinstance(column, str) for column in natural_key)
+            or len(natural_key) != len(set(natural_key))
+            or not isinstance(immutable_columns, list)
+            or not immutable_columns
+            or any(not isinstance(column, str) for column in immutable_columns)
+            or len(immutable_columns) != len(set(immutable_columns))
+        ):
             raise AuthorityManifestError(
                 f"baseline manifest {path}: reference_data entry for "
                 f"{entry.get('table')!r} needs natural_key and immutable_columns"
             )
-        where = str(entry.get("where", ""))
+        raw_where = entry.get("where", "")
+        if not isinstance(raw_where, str):
+            raise AuthorityManifestError(
+                f"baseline manifest {path}: reference_data.where must be a string"
+            )
+        where = raw_where
         if any(marker in where for marker in (";", "--", "/*", "*/")) or any(
             ord(character) < 32 for character in where
         ):
@@ -482,7 +567,7 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
             )
         reference_sets.append(
             ReferenceDataSet(
-                table=_validate_relation_name(entry["table"], "reference_data.table"),
+                table=table,
                 natural_key=tuple(_validate_identifier(c, "natural_key") for c in natural_key),
                 immutable_columns=tuple(
                     _validate_identifier(c, "immutable_columns") for c in immutable_columns
@@ -503,6 +588,7 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
         generator=str(raw["generator"]),
         generated_at=str(raw["generated_at"]),
         postgres_version=str(raw["postgres_version"]),
+        files_sha256=tuple(files_sha256),
         reference_data=tuple(reference_sets),
     )
 

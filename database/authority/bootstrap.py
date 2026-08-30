@@ -23,6 +23,7 @@ from . import ledger
 from .adoption import validate_existing_adoption_marker
 from .constants import (
     DEFAULT_ROLE_PREFIX,
+    EXTENSION_ALLOWLIST,
     LEDGER_TABLES,
     LOGICAL_PRINCIPALS,
     PLATFORM_SCHEMAS,
@@ -66,6 +67,14 @@ _SCHEMA_BOOTSTRAP_STATE_SQL = """
 /* arc03-schema-bootstrap-state */
 SELECT namespace.nspname,
        pg_get_userbyid(namespace.nspowner) AS owner,
+       EXISTS (
+           SELECT 1
+           FROM aclexplode(
+               COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+           ) AS privilege
+           WHERE privilege.grantee = 0
+             AND privilege.privilege_type = 'CREATE'
+       ) AS public_create,
        ARRAY(
            SELECT principal
            FROM unnest($2::text[]) AS principal
@@ -111,6 +120,26 @@ LEFT JOIN pg_default_acl AS schema_acl
  AND schema_acl.defaclnamespace = namespace.oid
  AND schema_acl.defaclobjtype = desired.objtype
 ORDER BY desired.nspname, desired.objtype
+"""
+
+_DATABASE_BOOTSTRAP_STATE_SQL = """
+/* arc03-database-bootstrap-state */
+SELECT EXISTS (
+           SELECT 1
+           FROM pg_database AS database
+           CROSS JOIN LATERAL aclexplode(
+               COALESCE(database.datacl, acldefault('d', database.datdba))
+           ) AS privilege
+           WHERE database.datname = current_database()
+             AND privilege.grantee = 0
+             AND privilege.privilege_type = 'CREATE'
+       ) AS public_create,
+       ARRAY(
+           SELECT principal
+           FROM unnest($1::text[]) AS principal
+           WHERE has_database_privilege(principal, current_database(), 'CREATE')
+           ORDER BY principal
+       ) AS create_roles
 """
 
 
@@ -187,9 +216,24 @@ async def role_bootstrap_issues(conn: Any, role_prefix: str) -> list[str]:
         row = by_schema[schema]
         if str(row["owner"]) != owner:
             issues.append(f"schema {schema} owner is {row['owner']!r}, expected {owner!r}")
+        if bool(row["public_create"]):
+            issues.append(f"schema {schema} grants CREATE to PUBLIC")
         create_roles = sorted(str(value) for value in (row["create_roles"] or []))
         if create_roles != [owner]:
             issues.append(f"schema {schema} CREATE roles are {create_roles}, expected [{owner!r}]")
+    database_state = await conn.fetchrow(_DATABASE_BOOTSTRAP_STATE_SQL, names)
+    if database_state is None:
+        issues.append("current database privilege state is unavailable")
+    else:
+        if bool(database_state["public_create"]):
+            issues.append("current database grants CREATE to PUBLIC")
+        database_create_roles = sorted(
+            str(value) for value in (database_state["create_roles"] or [])
+        )
+        if database_create_roles != [owner]:
+            issues.append(
+                f"current database CREATE roles are {database_create_roles}, expected [{owner!r}]"
+            )
     default_acl_rows = await conn.fetch(
         _DEFAULT_ACL_BOOTSTRAP_STATE_SQL,
         owner,
@@ -245,9 +289,18 @@ async def provision_roles_admin(conn: Any, paths: AuthorityPaths, role_prefix: s
         )
 
 
-async def bootstrap_extensions(conn: Any, paths: AuthorityPaths) -> None:
+async def bootstrap_extensions(
+    conn: Any,
+    paths: AuthorityPaths,
+    role_prefix: str = DEFAULT_ROLE_PREFIX,
+) -> None:
+    render_role_sql("", role_prefix)
     extensions_sql = (paths.bootstrap_dir / "extensions.sql").read_text(encoding="utf-8")
-    await conn.execute(extensions_sql)
+    owner_role = f"{role_prefix}owner"
+    async with conn.transaction():
+        await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+        await conn.execute(extensions_sql)
+        await conn.execute("RESET ROLE")
 
 
 async def run_baseline_sql_file(conn: Any, path: Path, *, role_prefix: str | None = None) -> None:
@@ -266,9 +319,38 @@ async def run_baseline_sql_file(conn: Any, path: Path, *, role_prefix: str | Non
         await conn.execute(sql)
 
 
-async def database_empty(
-    conn: Any, *, allowed_empty_schemas: tuple[str, ...] = ()
-) -> bool:
+async def verify_baseline_sql_file(conn: Any, path: Path) -> list[dict[str, Any]]:
+    """Execute the frozen single-SELECT verification contract and fail closed."""
+    if not path.exists():
+        raise AuthorityError(f"required baseline verify file missing: {path}")
+    sql = path.read_text(encoding="utf-8")
+    without_line_comments = re.sub(r"(?m)^\s*--[^\n]*(?:\n|$)", "", sql).strip()
+    if without_line_comments.endswith(";"):
+        without_line_comments = without_line_comments[:-1].rstrip()
+    if not re.match(r"^SELECT\b", without_line_comments, re.IGNORECASE) or ";" in (
+        without_line_comments
+    ):
+        raise AuthorityError(
+            f"baseline verify file {path} must contain exactly one read-only SELECT"
+        )
+    rows = [dict(row) for row in await conn.fetch(sql)]
+    if not rows:
+        raise AuthorityError(f"baseline verify file {path} returned zero checks")
+    names: set[str] = set()
+    failures: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        name = str(row.get("check_name") or "")
+        if not name or name in names or row.get("ok") is not True:
+            failures.append(name or f"row-{index}")
+        names.add(name)
+    if failures:
+        raise AuthorityError(
+            f"baseline verify file {path} failed or returned malformed checks: {failures}"
+        )
+    return rows
+
+
+async def database_empty(conn: Any, *, allowed_empty_schemas: tuple[str, ...] = ()) -> bool:
     """True when the database has no user-created schema objects.
 
     Relations alone are insufficient: an enum, function, custom schema or
@@ -286,6 +368,12 @@ async def database_empty(
               AND n.nspname NOT LIKE 'pg_temp%'
               AND n.nspname NOT LIKE 'pg_toast_temp%'
               AND c.relkind IN ('r', 'p', 'm', 'S', 'v', 'f', 'c')
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_depend AS dependency
+                  WHERE dependency.classid = 'pg_class'::regclass
+                    AND dependency.objid = c.oid
+                    AND dependency.deptype = 'e'
+              )
             UNION ALL
             SELECT count(*)
             FROM pg_proc AS p
@@ -293,6 +381,12 @@ async def database_empty(
             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
               AND n.nspname NOT LIKE 'pg_temp%'
               AND n.nspname NOT LIKE 'pg_toast_temp%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_depend AS dependency
+                  WHERE dependency.classid = 'pg_proc'::regclass
+                    AND dependency.objid = p.oid
+                    AND dependency.deptype = 'e'
+              )
             UNION ALL
             SELECT count(*)
             FROM pg_type AS t
@@ -303,6 +397,12 @@ async def database_empty(
               AND t.typrelid = 0
               AND t.typelem = 0
               AND t.typtype IN ('b', 'c', 'd', 'e', 'm', 'r')
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_depend AS dependency
+                  WHERE dependency.classid = 'pg_type'::regclass
+                    AND dependency.objid = t.oid
+                    AND dependency.deptype = 'e'
+              )
             UNION ALL
             SELECT count(*)
             FROM pg_namespace AS n
@@ -313,10 +413,11 @@ async def database_empty(
             UNION ALL
             SELECT count(*)
             FROM pg_extension
-            WHERE extname <> 'plpgsql'
+            WHERE extname <> ALL($2::text[])
         ) AS user_objects
         """,
         list(allowed_empty_schemas),
+        ["plpgsql", *EXTENSION_ALLOWLIST],
     )
     return not count
 
@@ -392,7 +493,7 @@ async def fresh_install(
         allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
     )
     async with conn.transaction():
-        await bootstrap_extensions(conn, paths)
+        await bootstrap_extensions(conn, paths, role_prefix)
 
         baseline_dir = paths.baseline_dir(baseline.baseline_id)
         # Objects created for the baseline are owned by the NOLOGIN owner; the
@@ -405,6 +506,7 @@ async def fresh_install(
         finally:
             await conn.execute("RESET ROLE")
         await run_baseline_sql_file(conn, baseline_dir / "grants.sql", role_prefix=role_prefix)
+        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
 
         computed = await compute_fingerprints(
             conn, role_prefix=role_prefix, reference_sets=baseline.reference_data

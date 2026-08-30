@@ -62,6 +62,12 @@ def _write_epoch(directory: Path, *, baseline_id: str | None = None) -> Path:
                         "owner": "owner",
                         "transaction_mode": "transactional",
                         "rollback_class": "forward-fix-only",
+                        "preconditions": ["SELECT TRUE"],
+                        "postconditions": ["SELECT TRUE"],
+                        "timeout_seconds": 300,
+                        "lock_budget_seconds": 30,
+                        "resume_handler": None,
+                        "repair_handler": None,
                     }
                 ],
             },
@@ -215,7 +221,12 @@ def test_epoch_manifest_rejects_extra_sql_and_checksum_drift(tmp_path: Path) -> 
             {"transaction_mode": "non_transactional"},
             "must declare a resume_handler or repair_handler",
         ),
+        ({"transaction_mode": {"invalid": "shape"}}, "unknown transaction_mode"),
+        ({"rollback_class": ["invalid"]}, "unknown rollback_class"),
         ({"resume_handler": "unexpected"}, "cannot declare recovery handlers"),
+        ({"preconditions": []}, "at least one read-only SELECT"),
+        ({"postconditions": ["DELETE FROM widgets RETURNING TRUE"]}, "read-only SELECT"),
+        ({"typo_field": True}, "unknown fields"),
     ],
 )
 def test_epoch_manifest_rejects_unsafe_execution_contracts(
@@ -417,8 +428,10 @@ class FakeExecutionConnection:
 
 
 async def test_049_executes_without_runner_transaction(tmp_path: Path) -> None:
-    content = "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_user_tenant_status_updated " \
+    content = (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_user_tenant_status_updated "
         "ON sessions (user_id, tenant_id, status, updated_at DESC);\n"
+    )
     path = tmp_path / "049_session_list_performance.sql"
     path.write_text(content, encoding="utf-8")
     migration = type("Migration", (), {"path": path})()

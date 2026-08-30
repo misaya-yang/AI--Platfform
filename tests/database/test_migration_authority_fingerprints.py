@@ -13,6 +13,7 @@ from database.authority.fingerprint import (
     _like_prefix_pattern,
     acl_lines,
     compute_fingerprints,
+    extensions_lines,
     reference_data_lines,
     structural_lines,
 )
@@ -93,6 +94,17 @@ class AclConnection(EmptyConnection):
                     "privileges": "SELECT",
                 }
             ]
+        if "aclexplode(attribute.attacl)" in query:
+            return [
+                {
+                    "schema": "public",
+                    "relation": "widgets",
+                    "column": "tenant_id",
+                    "grantee": "ai_platform_gateway",
+                    "grant_option": False,
+                    "privileges": "SELECT",
+                }
+            ]
         if "aclexplode(COALESCE(p.proacl" in query:
             return [
                 {
@@ -113,6 +125,14 @@ class AclConnection(EmptyConnection):
                     "privileges": "USAGE",
                 }
             ]
+        if "FROM pg_database AS database" in query:
+            return [
+                {
+                    "grantee": "ai_platform_owner",
+                    "grant_option": False,
+                    "privileges": "CREATE",
+                }
+            ]
         if "aclexplode(COALESCE(t.typacl" in query:
             return [
                 {
@@ -122,6 +142,19 @@ class AclConnection(EmptyConnection):
                     "grantee": "ai_platform_gateway",
                     "grant_option": False,
                     "privileges": "USAGE",
+                }
+            ]
+        if "FROM pg_policy AS policy" in query:
+            return [
+                {
+                    "schema": "public",
+                    "relation": "widgets",
+                    "name": "tenant_widgets",
+                    "permissive": False,
+                    "command": "r",
+                    "roles": ["ai_platform_gateway"],
+                    "using_expr": "tenant_id = current_setting('app.tenant')::uuid",
+                    "check_expr": "",
                 }
             ]
         if "FROM pg_default_acl AS d" in query:
@@ -144,7 +177,10 @@ class AclConnection(EmptyConnection):
                     "rolcreatedb": False,
                     "rolcanlogin": True,
                     "rolinherit": True,
+                    "rolreplication": True,
+                    "rolbypassrls": True,
                     "config": "",
+                    "memberships": ["ai_platform_owner:0:0:1"],
                 }
             ]
         raise AssertionError(f"unexpected ACL query: {query}")
@@ -162,10 +198,30 @@ async def test_structural_queries_filter_temporary_schemas() -> None:
 
     assert fingerprints == []
     schema_query = next(query for query, _ in conn.queries if "FROM pg_namespace AS n" in query)
-    sequence_query = next(query for query, _ in conn.queries if "FROM pg_sequences" in query)
+    sequence_query = next(query for query, _ in conn.queries if "FROM pg_sequence AS s" in query)
     for query in (schema_query, sequence_query):
         assert "NOT LIKE 'pg_temp_%'" in query
         assert "NOT LIKE 'pg_toast_temp_%'" in query
+    assert any("JOIN pg_aggregate AS a" in query for query, _args in conn.queries)
+    assert any("pg_get_viewdef" in query for query, _args in conn.queries)
+    assert any("pg_get_triggerdef" in query for query, _args in conn.queries)
+    assert any("type_relation.relkind = 'c'" in query for query, _args in conn.queries)
+    relation_query = next(
+        query for query, _args in conn.queries if "c.relpersistence AS persistence" in query
+    )
+    assert "c.relrowsecurity AS row_security" in relation_query
+    assert "c.relreplident AS replica_identity" in relation_query
+    assert "pg_get_partkeydef" in relation_query
+    column_query = next(
+        query for query, _args in conn.queries if "a.attidentity AS identity" in query
+    )
+    assert "a.attgenerated AS generated" in column_query
+    assert "a.attcompression AS compression" in column_query
+    trigger_query = next(query for query, _args in conn.queries if "pg_get_triggerdef" in query)
+    assert "trigger.tgenabled AS enabled" in trigger_query
+    for query, _args in conn.queries:
+        if "FROM pg_class AS c" in query or "FROM pg_proc AS p" in query:
+            assert "extension_dependency.deptype = 'e'" in query
 
 
 async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None:
@@ -178,11 +234,17 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
     assert "function_owner:public.run_widget(uuid):owner" in lines
     assert "type_owner:public.widget_state:e:owner" in lines
     assert "acl:public.widgets:gateway:SELECT:grantopt=0" in lines
+    assert "column_acl:public.widgets.tenant_id:gateway:SELECT:grantopt=0" in lines
     assert "function_acl:public.run_widget(uuid):runtime:EXECUTE:grantopt=0" in lines
     assert "schema_acl:public:gateway:USAGE:grantopt=0" in lines
+    assert "database_acl:owner:CREATE:grantopt=0" in lines
     assert "type_acl:public.widget_state:e:gateway:USAGE:grantopt=0" in lines
+    assert (
+        "policy:public.widgets.tenant_widgets:permissive=0:command=r:roles=gateway:"
+        "using=tenant_id = current_setting('app.tenant')::uuid:check="
+    ) in lines
     assert "default_privilege:owner:table:public:gateway:SELECT:grantopt=0" in lines
-    assert "role:gateway:LI:" in lines
+    assert "role:gateway:LIPB::memberships=owner:admin=0:inherit=0:set=1" in lines
 
     default_query, default_args = next(
         (query, args) for query, args in conn.queries if "FROM pg_default_acl AS d" in query
@@ -204,9 +266,7 @@ def test_reference_row_serialization_has_no_delimiter_or_type_collisions() -> No
     assert _canonical_value(None) != _canonical_value("\x00null")
     assert _canonical_value(True) != _canonical_value("true")
     assert _canonical_value(1) != _canonical_value("1")
-    assert _canonical_value({"b": [2], "a": 1}) == _canonical_value(
-        {"a": 1, "b": [2]}
-    )
+    assert _canonical_value({"b": [2], "a": 1}) == _canonical_value({"a": 1, "b": [2]})
 
 
 def test_reference_serialization_rejects_unknown_driver_types() -> None:
@@ -220,6 +280,30 @@ class ReferenceConnection:
 
     async def fetch(self, _query: str, *_args: Any) -> list[dict[str, Any]]:
         return [self.row]
+
+
+class ExtensionConnection:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def fetch(self, _query: str, *_args: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "extname": self.name,
+                "extversion": "1.0",
+                "schema": "public",
+                "owner": "ai_platform_owner",
+            }
+        ]
+
+
+async def test_extension_fingerprint_binds_schema_owner_and_allowlist() -> None:
+    assert await extensions_lines(ExtensionConnection("pgcrypto"), role_prefix="ai_platform_") == [
+        "extension:pgcrypto:1.0:schema=public:owner=owner"
+    ]
+
+    with pytest.raises(FingerprintError, match="not in the allowlist"):
+        await extensions_lines(ExtensionConnection("unreviewed"), role_prefix="ai_platform_")
 
 
 async def test_reference_fingerprint_rows_preserve_column_boundaries() -> None:
@@ -239,6 +323,28 @@ async def test_reference_fingerprint_rows_preserve_column_boundaries() -> None:
     )
 
     assert left != right
+
+
+async def test_reference_fingerprint_is_independent_of_database_collation_order() -> None:
+    reference = ReferenceDataSet(
+        table="public.system_values",
+        natural_key=("key",),
+        immutable_columns=("value",),
+    )
+
+    class OrderedConnection:
+        def __init__(self, rows: list[dict[str, str]]) -> None:
+            self.rows = rows
+
+        async def fetch(self, query: str, *_args: Any) -> list[dict[str, str]]:
+            assert "ORDER BY" not in query
+            return self.rows
+
+    rows = [{"key": "ä", "value": "2"}, {"key": "z", "value": "1"}]
+
+    assert await reference_data_lines(OrderedConnection(rows), [reference]) == (
+        await reference_data_lines(OrderedConnection(list(reversed(rows))), [reference])
+    )
 
 
 async def test_compute_fingerprints_always_returns_the_four_named_classes() -> None:
@@ -332,6 +438,44 @@ async def test_migrate_rejects_existing_marker_manifest_drift_before_epoch(
         await commands.command_migrate(authority)
 
     assert not authority.epoch_called
+    assert authority.conn.closed
+    assert authority.lock_conn.closed
+
+
+async def test_migrate_routes_empty_database_to_frozen_fresh_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline()
+    authority = CommandAuthority(tmp_path, _marker(baseline))
+    authority.marker = None  # type: ignore[assignment]
+    calls: list[str] = []
+    monkeypatch.setattr(commands, "baseline_ready", lambda *_args: True)
+    monkeypatch.setattr(
+        commands,
+        "load_baseline",
+        lambda *_args: (baseline, "5" * 64),
+    )
+
+    async def empty(_conn: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fresh(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        calls.append("fresh")
+        return baseline.fingerprints
+
+    async def forbidden_legacy(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("empty frozen-baseline installs must not execute legacy SQL")
+
+    monkeypatch.setattr(commands, "database_empty", empty)
+    monkeypatch.setattr(commands, "fresh_install", fresh)
+    monkeypatch.setattr(commands.legacy, "apply_legacy_chain", forbidden_legacy)
+
+    result = await commands.command_migrate(authority, log=calls.append)
+
+    assert result.exit_code == 0
+    assert calls[0] == "fresh"
+    assert "fresh install on baseline" in calls[-1]
     assert authority.conn.closed
     assert authority.lock_conn.closed
 

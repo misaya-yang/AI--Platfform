@@ -32,7 +32,8 @@ from .numeric_reconciliation import (
     NumericReconciliationReceipt,
     reconcile_numeric_legacy_history,
 )
-from .runner import AuthorityError, AuthorityPaths
+from .per_service_manifest import PER_SERVICE_MANIFEST_NAME, load_per_service_manifest
+from .runner import AuthorityBlockedError, AuthorityError, AuthorityPaths
 
 # Same four required objects migrate.sh/base_schema_exists checks.
 _BASE_SCHEMA_PROBE = """
@@ -43,8 +44,6 @@ SELECT CASE WHEN
     AND COALESCE(to_regclass('knowledge.segments'), to_regclass('public.segments')) IS NOT NULL
 THEN TRUE ELSE FALSE END
 """
-
-PER_SERVICE_ORDER = ("_global", "gateway", "assistant", "knowledge")
 
 _TRACKING_FILENAME = "filename"
 _TRACKING_VERSION = "version"
@@ -525,28 +524,44 @@ async def apply_per_service_chain(conn: Any, paths: AuthorityPaths, log: Any = p
     root = _per_service_root(paths)
     if not root.is_dir():
         return 0
-    applied_rows = await conn.fetch("SELECT name FROM public.schema_migrations_meta")
+    manifest = load_per_service_manifest(root / PER_SERVICE_MANIFEST_NAME)
+    applied_rows = await conn.fetch("SELECT name, notes FROM public.schema_migrations_meta")
     applied = {str(row["name"]) for row in applied_rows}
+    applied_notes = {str(row["name"]): str(row["notes"] or "") for row in applied_rows}
+    global_bootstrap = manifest.changes[0]
+    if not global_bootstrap.is_recorded(applied):
+        raise AuthorityBlockedError(
+            "per-service ledger exists without the atomic phase6_schemas_created "
+            "or canonical _global:001 receipt; refusing to replay its historical "
+            "PUBLIC CREATE/database search_path change"
+        )
     applied_count = 0
-    for service in PER_SERVICE_ORDER:
-        service_dir = root / service
-        if not service_dir.is_dir():
-            continue
-        for file_path in sorted(service_dir.glob("*.sql")):
-            ledger_key = f"{service}:{file_path.name}"
-            if ledger_key in applied:
-                continue
-            log(f"authority: per-service: applying {ledger_key}")
-            sql = file_path.read_text(encoding="utf-8")
-            async with conn.transaction():
-                await conn.execute(sql)
-                await conn.execute(
-                    "INSERT INTO public.schema_migrations_meta(name, notes) "
-                    "VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
-                    ledger_key,
-                    f"file=migrations/per_service/{service}/{file_path.name}",
+    for spec in manifest.changes:
+        if spec.is_recorded(applied):
+            checksum_match = re.search(
+                r"(?:^|;)sha256=([0-9a-f]{64})(?:;|$)",
+                applied_notes.get(spec.key, ""),
+            )
+            if checksum_match is not None and checksum_match.group(1) != spec.sha256:
+                raise AuthorityBlockedError(
+                    f"per-service ledger {spec.key} records checksum "
+                    f"{checksum_match.group(1)}, manifest declares {spec.sha256}"
                 )
-            applied_count += 1
+            continue
+        log(f"authority: per-service: applying {spec.key}")
+        sql, _had_outer_transaction = _strip_outer_transaction(
+            (root / spec.file).read_text(encoding="utf-8")
+        )
+        async with conn.transaction():
+            await conn.execute(sql)
+            await conn.execute(
+                "INSERT INTO public.schema_migrations_meta(name, notes) "
+                "VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                spec.key,
+                f"file=migrations/per_service/{spec.file};"
+                f"sha256={spec.sha256};rollback={spec.rollback_class.value}",
+            )
+        applied_count += 1
     if applied_count == 0:
         log("authority: per-service track already complete")
     return applied_count

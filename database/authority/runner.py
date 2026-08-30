@@ -46,19 +46,30 @@ from .manifest import (
 )
 
 RUNNER_VERSION = "database-authority/1"
-RUNNER_DIGEST = hashlib.sha256(RUNNER_VERSION.encode("utf-8")).hexdigest()
+# Recovery compatibility is a property of the executable state machine, not a
+# manually bumped label. Any source change intentionally invalidates open
+# non-transactional attempts until a reviewed repair/resume decision is made.
+RUNNER_DIGEST = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 _TRANSACTION_STATEMENT_RE = re.compile(
-    r"^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|ABORT)\b",
-    re.IGNORECASE | re.MULTILINE,
+    r"^(?P<command>BEGIN\b|START\s+TRANSACTION\b|COMMIT\b|END\b|ROLLBACK\b|"
+    r"SAVEPOINT\b|RELEASE(?:\s+SAVEPOINT)?\b|ABORT\b|PREPARE\s+TRANSACTION\b|"
+    r"SET\s+TRANSACTION\b|SET\s+SESSION\s+CHARACTERISTICS\s+AS\s+TRANSACTION\b)"
+    r"(?:\s+.*)?$",
+    re.IGNORECASE,
 )
 _NON_TRANSACTIONAL_MARKER_RE = re.compile(
     r"^\s*--\s*@checkpoint\s+(?P<name>[a-z0-9_]+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_DOLLAR_QUOTED_RE = re.compile(r"\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*)?\$.*?\$(?P=tag)\$", re.DOTALL)
+_DOLLAR_QUOTED_RE = re.compile(
+    r"\$\$.*?\$\$|\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\$.*?\$(?P=tag)\$",
+    re.DOTALL,
+)
 _SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'")
+_DOUBLE_QUOTED_RE = re.compile(r'"(?:[^"]|"")*"')
 _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 ATTEMPT_LEASE_TIMEOUT = timedelta(minutes=15)
 _PREAMBLE_CHECKPOINT = "__preamble__"
@@ -118,8 +129,10 @@ def strip_sql_bodies(sql: str) -> str:
     top-level ``BEGIN;``/``COMMIT;`` still is.
     """
     stripped = _DOLLAR_QUOTED_RE.sub(" $$ ", sql)
+    stripped = _BLOCK_COMMENT_RE.sub("", stripped)
     stripped = _LINE_COMMENT_RE.sub("", stripped)
     stripped = _SINGLE_QUOTED_RE.sub("''", stripped)
+    stripped = _DOUBLE_QUOTED_RE.sub('""', stripped)
     return stripped
 
 
@@ -196,6 +209,8 @@ class MigrationAuthority:
             import asyncpg
 
             asyncpg_module = asyncpg
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,20}_", role_prefix):
+            raise AuthorityError(f"unsafe role prefix: {role_prefix!r}")
         self._asyncpg = asyncpg_module
         self.dsn = dsn
         self.paths = paths
@@ -271,12 +286,14 @@ class MigrationAuthority:
 
     @staticmethod
     def _reject_embedded_transactions(sql: str, change_name: str) -> None:
-        match = _TRANSACTION_STATEMENT_RE.search(strip_sql_bodies(sql))
-        if match:
-            raise AuthorityError(
-                f"change {change_name} contains transaction control "
-                f"({match.group(1).upper()}); the runner owns transactions"
-            )
+        for statement in strip_sql_bodies(sql).split(";"):
+            normalized = " ".join(statement.split())
+            match = _TRANSACTION_STATEMENT_RE.fullmatch(normalized)
+            if match:
+                raise AuthorityError(
+                    f"change {change_name} contains transaction control "
+                    f"({match.group('command').upper()}); the runner owns transactions"
+                )
 
     @staticmethod
     def _split_checkpoints(sql: str) -> list[tuple[str, str]]:
@@ -373,18 +390,13 @@ class MigrationAuthority:
 
         start = time.monotonic()
         async with conn.transaction():
-            await conn.execute(
-                f"SET LOCAL statement_timeout = {int(spec.timeout_seconds) * 1000}"
-            )
-            await conn.execute(
-                f"SET LOCAL lock_timeout = {int(spec.lock_budget_seconds) * 1000}"
-            )
+            await conn.execute(f"SET LOCAL statement_timeout = {int(spec.timeout_seconds) * 1000}")
+            await conn.execute(f"SET LOCAL lock_timeout = {int(spec.lock_budget_seconds) * 1000}")
             await self._evaluate_conditions(
                 conn, spec.preconditions, change_name=spec.name, phase="pre"
             )
-            if spec.owner == "owner":
-                owner_role = f"{self.role_prefix}owner"
-                await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+            execution_role = f"{self.role_prefix}{spec.owner}"
+            await conn.execute(f'SET LOCAL ROLE "{execution_role}"')
             await conn.execute(sql)
             # Ledger rows are written by the connected migrator identity,
             # never by the temporary object-owner role.
@@ -423,9 +435,7 @@ class MigrationAuthority:
             )
         self._reject_embedded_transactions(sql, spec.name)
 
-        declared_handlers = {
-            name for name in (spec.resume_handler, spec.repair_handler) if name
-        }
+        declared_handlers = {name for name in (spec.resume_handler, spec.repair_handler) if name}
         if not declared_handlers:
             raise AuthorityBlockedError(
                 f"non-transactional change {spec.sequence} has no declared "
@@ -533,17 +543,11 @@ class MigrationAuthority:
         start_index = 0
         if checkpoint:
             start_index = next(
-                index + 1
-                for index, (name, _segment) in enumerate(segments)
-                if name == checkpoint
+                index + 1 for index, (name, _segment) in enumerate(segments) if name == checkpoint
             )
         start = time.monotonic()
-        await conn.execute(
-            f"SET statement_timeout = {int(spec.timeout_seconds) * 1000}"
-        )
-        await conn.execute(
-            f"SET lock_timeout = {int(spec.lock_budget_seconds) * 1000}"
-        )
+        await conn.execute(f"SET statement_timeout = {int(spec.timeout_seconds) * 1000}")
+        await conn.execute(f"SET lock_timeout = {int(spec.lock_budget_seconds) * 1000}")
         try:
             if recovery_kind is not None:
                 context = RecoveryContext(
@@ -565,14 +569,12 @@ class MigrationAuthority:
                 conn, spec.preconditions, change_name=spec.name, phase="pre"
             )
             for checkpoint_name, segment in segments[start_index:]:
-                if spec.owner == "owner":
-                    owner_role = f"{self.role_prefix}owner"
-                    await conn.execute(f'SET ROLE "{owner_role}"')
+                execution_role = f"{self.role_prefix}{spec.owner}"
+                await conn.execute(f'SET ROLE "{execution_role}"')
                 try:
                     await conn.execute(segment)
                 finally:
-                    if spec.owner == "owner":
-                        await conn.execute("RESET ROLE")
+                    await conn.execute("RESET ROLE")
                 updated = await conn.fetchval(
                     _UPDATE_ATTEMPT_CHECKPOINT_FENCED,
                     attempt_id,
@@ -600,9 +602,7 @@ class MigrationAuthority:
                 failed_state,
                 type(exc).__name__,
             )
-            self._require_fence(
-                terminal, action="record failed attempt", attempt_id=attempt_id
-            )
+            self._require_fence(terminal, action="record failed attempt", attempt_id=attempt_id)
             raise
         finally:
             # Non-transactional changes use session-scoped settings. Always
@@ -629,9 +629,7 @@ class MigrationAuthority:
                 ledger.ATTEMPT_STATE_SUCCEEDED,
                 None,
             )
-            self._require_fence(
-                terminal, action="record successful attempt", attempt_id=attempt_id
-            )
+            self._require_fence(terminal, action="record successful attempt", attempt_id=attempt_id)
         return duration_ms
 
     async def apply_epoch(
@@ -641,16 +639,33 @@ class MigrationAuthority:
         applied = await self.applied_changes(conn, epoch_manifest.baseline_id)
         applied_lines: list[str] = []
 
-        expected_next = max(applied, default=0) + 1
+        declared = epoch_manifest.by_sequence()
+        unknown_sequences = sorted(set(applied) - set(declared))
+        if unknown_sequences:
+            raise AuthorityError(
+                f"baseline {epoch_manifest.baseline_id} ledger contains sequences "
+                f"outside its immutable manifest: {unknown_sequences}"
+            )
+        for sequence, recorded_checksum in sorted(applied.items()):
+            declared_checksum = declared[sequence].sha256
+            if recorded_checksum != declared_checksum:
+                raise AuthorityError(
+                    f"change {sequence} is recorded with checksum {recorded_checksum} "
+                    f"but the manifest declares {declared_checksum}; ledger history "
+                    "is immutable — refusing to migrate"
+                )
+        applied_sequences = sorted(applied)
+        expected_applied = list(range(1, len(applied_sequences) + 1))
+        if applied_sequences != expected_applied:
+            raise AuthorityError(
+                f"baseline {epoch_manifest.baseline_id} ledger is not a contiguous "
+                f"prefix: recorded={applied_sequences}, expected={expected_applied}"
+            )
+
+        expected_next = len(applied_sequences) + 1
         for spec in epoch_manifest.changes:
             recorded = applied.get(spec.sequence)
             if recorded is not None:
-                if recorded != spec.sha256:
-                    raise AuthorityError(
-                        f"change {spec.sequence} is recorded with checksum "
-                        f"{recorded} but the manifest declares {spec.sha256}; "
-                        "ledger history is immutable — refusing to migrate"
-                    )
                 continue
             if spec.sequence != expected_next:
                 raise AuthorityError(

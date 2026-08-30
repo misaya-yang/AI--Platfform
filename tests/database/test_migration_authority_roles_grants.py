@@ -24,6 +24,7 @@ from scripts.inventory.generate_database_grants import (
 ROOT = Path(__file__).resolve().parents[2]
 ROLES_SQL = ROOT / "database/bootstrap/roles.sql"
 CUTOVER_SQL = ROOT / "database/baselines/2026_08_post_kb_v1/cutover_convergence.sql"
+EXTENSIONS_SQL = ROOT / "database/bootstrap/extensions.sql"
 ROLE_SUFFIXES = (
     "owner",
     "migrator",
@@ -74,10 +75,19 @@ def _assert_role_contract(sql: str) -> None:
     assert "REVOKE ALL ON SCHEMA public, gateway, assistant, knowledge FROM PUBLIC" in sql
     assert "pg_auth_members" in sql
     assert "GRANT ai_gateway_owner TO ai_gateway_migrator" in sql
+    assert "GRANT CREATE ON DATABASE %I TO ai_gateway_owner" in sql
+    assert "REVOKE CREATE ON DATABASE %I FROM PUBLIC" in sql
 
 
 def test_roles_sql_forces_attributes_ownership_and_no_application_create() -> None:
     _assert_role_contract(ROLES_SQL.read_text(encoding="utf-8"))
+
+
+def test_extensions_have_one_explicit_owner_controlled_target_schema() -> None:
+    sql = EXTENSIONS_SQL.read_text(encoding="utf-8")
+
+    for extension in ('"uuid-ossp"', "pgcrypto", "pg_trgm"):
+        assert f"CREATE EXTENSION IF NOT EXISTS {extension} WITH SCHEMA public;" in sql
 
 
 @pytest.mark.parametrize(
@@ -95,9 +105,18 @@ def test_roles_contract_negative_self_tests(mutation: Any) -> None:
 
 
 class FakeRoleBootstrapConnection:
-    def __init__(self, *, ready: bool, superuser: bool) -> None:
+    def __init__(
+        self,
+        *,
+        ready: bool,
+        superuser: bool,
+        public_create: bool = False,
+        public_database_create: bool = False,
+    ) -> None:
         self.ready = ready
         self.superuser = superuser
+        self.public_create = public_create
+        self.public_database_create = public_database_create
         self.executed: list[str] = []
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
@@ -127,7 +146,13 @@ class FakeRoleBootstrapConnection:
             names = list(args[1])
             owner = next(name for name in names if name.endswith("owner"))
             return [
-                {"nspname": schema, "owner": owner, "create_roles": [owner]} for schema in args[0]
+                {
+                    "nspname": schema,
+                    "owner": owner,
+                    "public_create": self.public_create,
+                    "create_roles": [owner],
+                }
+                for schema in args[0]
             ]
         if "arc03-default-acl-bootstrap-state" in query:
             if not self.ready:
@@ -141,6 +166,18 @@ class FakeRoleBootstrapConnection:
                 for schema in args[1]
                 for object_type in ("r", "S", "f", "T")
             ]
+        raise AssertionError(f"unexpected query: {query}")
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        if "arc03-database-bootstrap-state" in query:
+            if not self.ready:
+                return None
+            names = list(args[0])
+            owner = next(name for name in names if name.endswith("owner"))
+            return {
+                "public_create": self.public_database_create,
+                "create_roles": [owner],
+            }
         raise AssertionError(f"unexpected query: {query}")
 
     async def fetchval(self, query: str, *_args: Any) -> bool:
@@ -177,6 +214,28 @@ async def test_nonadmin_authority_fails_before_role_ddl_when_bootstrap_is_incomp
         )
 
     assert conn.executed == []
+
+
+async def test_role_bootstrap_rejects_public_schema_create_even_when_named_roles_are_safe() -> None:
+    conn = FakeRoleBootstrapConnection(ready=True, superuser=False, public_create=True)
+
+    issues = await bootstrap.role_bootstrap_issues(conn, "ai_gateway_")
+
+    assert issues == [
+        f"schema {schema} grants CREATE to PUBLIC" for schema in sorted(PLATFORM_SCHEMAS)
+    ]
+
+
+async def test_role_bootstrap_rejects_public_database_create() -> None:
+    conn = FakeRoleBootstrapConnection(
+        ready=True,
+        superuser=False,
+        public_database_create=True,
+    )
+
+    assert await bootstrap.role_bootstrap_issues(conn, "ai_gateway_") == [
+        "current database grants CREATE to PUBLIC"
+    ]
 
 
 async def test_schema_authority_never_uses_its_admin_connection_for_role_ddl() -> None:
@@ -374,6 +433,11 @@ def test_grants_generation_is_deterministic_explicit_and_never_broad() -> None:
         'GRANT SELECT, INSERT, UPDATE ON TABLE "assistant"."sessions" TO "ai_gateway_runtime";'
     ) in first
     assert (
+        'REVOKE ALL PRIVILEGES ON TABLE "assistant"."session_summaries" FROM "ai_gateway_gateway";'
+    ) in first
+    assert ('REVOKE ALL PRIVILEGES ON SCHEMA "public" FROM "ai_gateway_gateway";') in first
+    assert ('REVOKE ALL PRIVILEGES ON SCHEMA "public" FROM "ai_gateway_migrator";') in first
+    assert (
         'GRANT EXECUTE ON FUNCTION "assistant"."append_runtime_item"(uuid, jsonb) '
         'TO "ai_gateway_runtime";'
     ) in first
@@ -523,6 +587,13 @@ async def test_roles_and_cutover_contract_on_explicit_scratch_postgres() -> None
                 assert not await conn.fetchval(
                     "SELECT has_schema_privilege($1, $2, 'CREATE')", role, schema
                 )
+            assert not await conn.fetchval(
+                "SELECT has_database_privilege($1, current_database(), 'CREATE')", role
+            )
+        assert await conn.fetchval(
+            "SELECT has_database_privilege($1, current_database(), 'CREATE')",
+            prefix + "owner",
+        )
 
         assert await conn.fetchval(
             "SELECT pg_has_role($1, $2, 'MEMBER')",

@@ -5,16 +5,18 @@ transactions in the runner's hands, and fails closed instead of guessing.
 
 Flow of ``command_migrate`` for a database without a baseline marker:
 
-1. guard: an unknown, non-empty database without any platform object is
+1. frozen baseline + empty database: install the baseline directly; legacy
+   ``schema.sql`` and the historical chain are never replayed;
+2. non-empty database guard: an unknown database without any platform object is
    refused (the authority never mistakes foreign data for a legacy install);
-2. base schema: ``database/schema.sql`` is applied when the required objects
+3. legacy base schema: ``database/schema.sql`` is applied when the required objects
    are missing (same rule as ``ensure_base_schema`` in migrate.sh);
-3. legacy chain: the historical ``002…112`` files are executed by the
+4. legacy chain: the historical ``002…112`` files are executed by the
    authority's native executor, recorded in whichever legacy ledger shape
    the database already carries (filename ledger created when none exists);
-4. per-service track: topped up ONLY on databases that already carry
+5. per-service track: topped up ONLY on databases that already carry
    ``public.schema_migrations_meta``;
-5. cutover + adoption (when the baseline files are frozen and adoption is
+6. cutover + adoption (when the baseline files are frozen and adoption is
    allowed): roles → extensions → convergence change → grants → ledger →
    fingerprint comparison → ONE adoption marker.  Legacy ledgers are then
    frozen evidence, never written again.
@@ -44,8 +46,9 @@ from .bootstrap import (
     fresh_install,
     run_baseline_sql_file,
     startup_schema_check,
+    verify_baseline_sql_file,
 )
-from .constants import DEFAULT_BASELINE_ID, EPOCH_MANIFEST_NAME
+from .constants import DEFAULT_BASELINE_ID, EPOCH_MANIFEST_NAME, PLATFORM_SCHEMAS
 from .discovery import LEGACY_MANIFEST_NAME, discover_legacy_migrations
 from .manifest import (
     BaselineManifest,
@@ -105,13 +108,27 @@ def load_baseline(paths: AuthorityPaths, baseline_id: str) -> tuple[BaselineMani
     baseline_dir = paths.baseline_dir(baseline_id)
     manifest_path = baseline_dir / "manifest.json"
     baseline = load_baseline_manifest(manifest_path)
+    legacy_manifest = load_legacy_manifest(paths.migrations_root / LEGACY_MANIFEST_NAME)
+    if baseline.last_legacy_change != legacy_manifest.freeze_point:
+        raise AuthorityError(
+            f"baseline {baseline.baseline_id} freezes legacy change "
+            f"{baseline.last_legacy_change!r}, but the immutable legacy manifest "
+            f"freezes {legacy_manifest.freeze_point!r}"
+        )
     return baseline, baseline_manifest_sha256(manifest_path)
 
 
 def baseline_ready(paths: AuthorityPaths, baseline_id: str = DEFAULT_BASELINE_ID) -> bool:
     """A baseline is usable only when all of its frozen files exist."""
     baseline_dir = paths.baseline_dir(baseline_id)
-    required = ("manifest.json", "init.sql", "reference_data.sql", "grants.sql", "verify.sql")
+    required = (
+        "manifest.json",
+        "init.sql",
+        "reference_data.sql",
+        "grants.sql",
+        "verify.sql",
+        "cutover_convergence.sql",
+    )
     return all((baseline_dir / name).exists() for name in required)
 
 
@@ -170,8 +187,10 @@ async def command_migrate(
     """Bring one database to the current schema revision.
 
     * baseline adopted  -> apply pending epoch changes only;
-    * no baseline, baseline files ready -> complete the legacy chain, cut
-      over ownership/grants, adopt the baseline;
+    * no baseline, baseline files ready, empty database -> install the frozen
+      baseline and then apply its epoch;
+    * no baseline, baseline files ready, existing database -> complete the
+      legacy chain, cut over ownership/grants, adopt the baseline;
     * no baseline, baseline files not ready -> compatibility mode: apply the
       legacy chain only (pre-freeze transition behaviour).
 
@@ -199,6 +218,27 @@ async def command_migrate(
             adopted = await authority.adopted_baseline(conn)
 
             if adopted is None:
+                if baseline is not None and await database_empty(
+                    conn,
+                    allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
+                ):
+                    await fresh_install(
+                        conn,
+                        paths,
+                        baseline,
+                        manifest_sha,
+                        role_prefix=authority.role_prefix,
+                    )
+                    epoch_dir = paths.epoch_dir(baseline_id)
+                    manifest_path = epoch_dir / EPOCH_MANIFEST_NAME
+                    if manifest_path.exists():
+                        epoch_manifest = load_epoch_manifest(manifest_path)
+                        for line in await authority.apply_epoch(conn, epoch_manifest, epoch_dir):
+                            log(f"authority: {line}")
+                    log(f"authority: fresh install on baseline {baseline.baseline_id} complete")
+                    result = MigrationCommandResult(0)
+                    _write_migration_evidence(result, reconciliation_evidence_out)
+                    return result
                 await _guard_known_database(conn)
                 try:
                     _, _, reconciliation_receipt = await legacy.apply_legacy_chain(
@@ -321,10 +361,11 @@ async def _cutover_and_adopt(
     # Roles/extensions are idempotent; an adopted database must carry the
     # same role set and search_path configuration as a fresh install.
     await bootstrap_roles(conn, paths, authority.role_prefix)
-    await bootstrap_extensions(conn, paths)
+    await bootstrap_extensions(conn, paths, authority.role_prefix)
 
     await run_baseline_sql_file(conn, cutover_path, role_prefix=authority.role_prefix)
     await run_baseline_sql_file(conn, grants_path, role_prefix=authority.role_prefix)
+    await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
 
     await conn.execute(ledger.LEDGER_DDL)
     computed = await adopt_baseline(
@@ -474,14 +515,11 @@ async def command_verify(
             if expected != actual:
                 failures.append(name)
 
-        verify_sql = paths.baseline_dir(baseline_id) / "verify.sql"
-        if verify_sql.exists():
-            rows = await conn.fetch(verify_sql.read_text(encoding="utf-8"))
-            for row in rows:
-                check = dict(row)
-                if not check.get("ok", True):
-                    failures.append(str(check))
-                    log(f"verify check failed: {check}")
+        checks = await verify_baseline_sql_file(
+            conn, paths.baseline_dir(baseline_id) / "verify.sql"
+        )
+        for check in checks:
+            log(f"verify check {check['check_name']}: match")
 
         if failures:
             raise AuthorityError(f"verification failed for: {failures}")
