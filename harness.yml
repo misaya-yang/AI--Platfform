@@ -178,6 +178,15 @@ commands:
   hygiene_check:
     make: hygiene-check
     purpose: Test hygiene — empty/self-proving bodies, .only/.fixme scan.
+  evidence_policy_gate:
+    make: evidence-policy-gate
+    purpose: Validate portable evidence and the PRD-bounded quality candidate set.
+  compatibility_manifest_gate:
+    make: compatibility-manifest-gate
+    purpose: Validate the unified release compatibility manifest at draft or candidate level.
+  platform_release_gate:
+    make: platform-release-gate
+    purpose: Run the candidate manifest plus every platform integration/fresh/rollback gate.
   loc_no_growth_gate:
     make: loc-no-growth-gate
     purpose: Oversized files never grow; new files stay under the LOC thresholds.
@@ -207,7 +216,7 @@ commands:
 gates:
   harness:
     make: harness-check
-    triggers: [AGENTS.md, CLAUDE.md, harness.yml, Makefile, scripts/harness/check_harness.py, tests/harness/test_check_harness_gate_schema.py, "docs/**", "deploy/runbooks/**", "reports/**", ".gitignore", ".editorconfig", ".gitattributes", ".pre-commit-config.yaml", ".claude/**", ".agents/**", README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, DEPLOY.md, CODE_OF_CONDUCT.md, RELEASE.md, SUPPORT.md, LICENSE]
+    triggers: [AGENTS.md, CLAUDE.md, harness.yml, Makefile, scripts/harness/check_harness.py, tests/harness/test_check_harness_gate_schema.py, "docs/**", "deploy/runbooks/**", "deploy/release/**", "reports/**", ".gitignore", ".editorconfig", ".gitattributes", ".pre-commit-config.yaml", ".claude/**", ".agents/**", README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, DEPLOY.md, CODE_OF_CONDUCT.md, RELEASE.md, SUPPORT.md, LICENSE]
     tier: L0
     required_on: [change, release]
     resource: offline
@@ -543,7 +552,7 @@ gates:
   hygiene:
     make: hygiene-check
     purpose: Empty/self-proving tests, .only/.fixme scan (negative self-test included).
-    triggers: ["tests/**", "web/src/**", "web/e2e/**", "sdk/**", scripts/harness/hygiene_check.py]
+    triggers: ["tests/**", "web/src/**", "web/e2e/**", "sdk/**", scripts/harness/hygiene_check.py, "scripts/evidence/**", "deploy/evidence/**", "deploy/repository-quality/**"]
     tier: L0
     required_on: [change, release]
     resource: offline
@@ -551,6 +560,28 @@ gates:
     timeout: 5
     evidence: tmp/gate-evidence/hygiene-check.json
     ci_job: architecture-gates
+  compatibility_manifest:
+    make: compatibility-manifest-gate
+    purpose: Bind Git/images/runtime overlay/DB/contracts/topology/toolchains/vector revisions and service version reports into one release unit.
+    triggers: ["deploy/release/**", "scripts/release/**", packages/ai-gateway-core/src/ai_gateway_core/release_manifest.py, src/api/version.py, apps/knowledge-service/src/knowledge_service/api/version.py]
+    tier: L0
+    required_on: [release, manual]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: deploy/release/compatibility-manifest.json
+    ci_job: manual
+  platform_integration:
+    make: platform-release-gate
+    purpose: Execute actual DB, Agent Execution, Knowledge, fresh-install and rollback gates with zero unexpected skips.
+    triggers: [deploy/release/integration-gates.json, scripts/release/integration_gates.py]
+    tier: L3
+    required_on: [release, manual]
+    resource: live-stack
+    skip: never
+    timeout: 180
+    evidence: tmp/gate-evidence/all-integration.json
+    ci_job: manual
   loc_no_growth:
     make: loc-no-growth-gate
     purpose: Oversized files never grow; new files stay under threshold; bound to the checked-in ledger.

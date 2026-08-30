@@ -209,6 +209,7 @@ def create_app() -> FastAPI:
             "/health/ready",
             "/docs",
             "/openapi.json",
+            "/version",
             # Frontend metadata endpoints (high frequency, low cost)
             "/api/v1/services",
             "/api/v1/assistant/config",
@@ -265,6 +266,7 @@ def create_app() -> FastAPI:
             "/health/ready",
             "/docs",
             "/openapi.json",
+            "/version",
             # This exact path is not public: the route performs independent
             # service-token and signed Runtime lease verification.
             "/internal/v1/agent-model-plane/responses",
@@ -347,6 +349,9 @@ def create_app() -> FastAPI:
 
     # ========== 路由 ==========
 
+    from .api.version import router as version_router
+
+    app.include_router(version_router)
     app.include_router(api_router, prefix="/api/v1")
     from .api.v1.local_nodes import router as local_node_router
     from .api.v1.agent_local_nodes import router as internal_local_node_router

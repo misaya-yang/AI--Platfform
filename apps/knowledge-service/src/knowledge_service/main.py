@@ -826,8 +826,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 secret=_gateway_secret_env,
                 version=auth_version,
                 replay_store=replay_store,
+                caller_service="gateway",
+                audience="knowledge-service",
+                allowed_path_prefixes=("/api/v1",),
             ),
             allow_anonymous=resolved.app.allow_anonymous,
+            separately_authenticated_paths=frozenset({"/version"}),
             separately_authenticated_prefixes=frozenset({"/internal/v2/capabilities/"}),
         )
         logger.info(
@@ -849,6 +853,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # --- Health ---
+    from .api.version import version_router
+
+    version_service_id = (
+        "knowledge-worker" if resolved.runtime_role == "worker" else "knowledge-service"
+    )
+    app.include_router(version_router(version_service_id))
+
     @app.middleware("http")
     async def security_headers(request, call_next):
         response = await call_next(request)

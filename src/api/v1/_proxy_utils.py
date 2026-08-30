@@ -249,7 +249,12 @@ def _build_signer() -> GatewaySecret | None:
     secret = os.getenv("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
     if not secret:
         return None
-    return GatewaySecret(secret=secret)
+    return GatewaySecret(
+        secret=secret,
+        caller_service="gateway",
+        audience="knowledge-service",
+        allowed_path_prefixes=("/api/v1",),
+    )
 
 
 _signer = _build_signer()

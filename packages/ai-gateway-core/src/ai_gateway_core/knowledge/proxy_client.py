@@ -59,7 +59,12 @@ def _get_signer() -> GatewaySecret | None:
         secret = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN")
         if not secret:
             return None
-        _gateway_secret_signer = GatewaySecret(secret=secret)
+        _gateway_secret_signer = GatewaySecret(
+            secret=secret,
+            caller_service="gateway",
+            audience="knowledge-service",
+            allowed_path_prefixes=("/api/v1",),
+        )
         return _gateway_secret_signer
 
 
@@ -174,9 +179,9 @@ class KBProxyClient:
         return headers
 
     async def health_check(self) -> bool:
-        """Check if KB service is reachable."""
+        """Check the public probe without signing outside the v2 API scope."""
         try:
-            resp = await self._get_service_client().request("GET", "/health")
+            resp = await self._get_client().get("/health")
             return resp.status_code == 200
         except Exception:
             return False

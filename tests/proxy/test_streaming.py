@@ -89,6 +89,8 @@ class TestStreamingProxy:
     def mock_config_loader(self, proxy_config):
         """Mock 配置加载器"""
         loader = AsyncMock()
+        loader.database = None
+        loader.redis = None
         loader.get_config = AsyncMock(return_value=proxy_config)
         return loader
 
@@ -558,6 +560,8 @@ class TestStreamingErrorHandling:
     @pytest.fixture
     def mock_config_loader(self, proxy_config):
         loader = AsyncMock()
+        loader.database = None
+        loader.redis = None
         loader.get_config = AsyncMock(return_value=proxy_config)
         return loader
 
@@ -584,16 +588,66 @@ class TestStreamingErrorHandling:
 
     @pytest.mark.asyncio
     async def test_streaming_timeout_handling(self, transparent_proxy):
-        """测试流式超时处理"""
-        # 测试超时场景的错误处理逻辑
-        # 实际超时测试需要集成测试环境
-        pass
+        """A streaming header timeout maps to 504 and releases capacity."""
+        client = httpx.AsyncClient()
+        release_slot = AsyncMock()
+        try:
+            with patch.object(
+                client,
+                "send",
+                AsyncMock(side_effect=httpx.ReadTimeout("upstream timed out")),
+            ):
+                response = await transparent_proxy._proxy_streaming(
+                    client=client,
+                    method="POST",
+                    url="http://langgraph:8123/runs/stream",
+                    headers={},
+                    body=b"{}",
+                    params={},
+                    config=await transparent_proxy.config_loader.get_config("langgraph"),
+                    context=RequestContext(request_id="timeout-test"),
+                    path="/runs/stream",
+                    release_slot=release_slot,
+                )
+        finally:
+            await client.aclose()
+
+        assert response.status_code == 504
+        assert response.error == "Upstream timeout: upstream timed out"
+        release_slot.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_connection_error_handling(self, transparent_proxy):
-        """测试连接错误处理"""
-        # 测试连接失败时的错误响应
-        pass
+        """A streaming connection failure maps to 502 and releases capacity."""
+        client = httpx.AsyncClient()
+        release_slot = AsyncMock()
+        request = httpx.Request("POST", "http://langgraph:8123/runs/stream")
+        try:
+            with patch.object(
+                client,
+                "send",
+                AsyncMock(
+                    side_effect=httpx.ConnectError("connection refused", request=request)
+                ),
+            ):
+                response = await transparent_proxy._proxy_streaming(
+                    client=client,
+                    method="POST",
+                    url=str(request.url),
+                    headers={},
+                    body=b"{}",
+                    params={},
+                    config=await transparent_proxy.config_loader.get_config("langgraph"),
+                    context=RequestContext(request_id="connection-test"),
+                    path="/runs/stream",
+                    release_slot=release_slot,
+                )
+        finally:
+            await client.aclose()
+
+        assert response.status_code == 502
+        assert response.error == "Upstream error: connection refused"
+        release_slot.assert_awaited_once_with()
 
 
 # ============ Content Type Detection Tests ============

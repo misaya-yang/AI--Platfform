@@ -6,10 +6,8 @@
 
 from .database import DatabaseStorage
 from .redis import RedisStorage
-from .storage import FileStorage
 
 __all__ = [
     "DatabaseStorage",
     "RedisStorage",
-    "FileStorage",
 ]

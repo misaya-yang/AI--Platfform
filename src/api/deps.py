@@ -57,11 +57,6 @@ def get_health_monitor(request: Request):
     return request.app.state.health_monitor
 
 
-def get_langgraph_proxy(request: Request) -> LangGraphProxy | None:
-    """获取 LangGraph 代理"""
-    return getattr(request.app.state, "langgraph_proxy", None)
-
-
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     """获取 LangGraph 代理（若未初始化则返回 503）"""
     proxy = getattr(request.app.state, "langgraph_proxy", None)

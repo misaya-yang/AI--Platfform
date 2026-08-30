@@ -1,0 +1,60 @@
+{
+  "schema_version": "ai-platform/compatibility-manifest/v1",
+  "status": "draft",
+  "release_id": null,
+  "source": {"git_sha": null, "git_tree_sha": null},
+  "services": {
+    "gateway": {"image_digest": null, "reported_version": null},
+    "frontend": {"image_digest": null, "reported_version": null},
+    "knowledge-service": {"image_digest": null, "reported_version": null},
+    "knowledge-worker": {"image_digest": null, "reported_version": null},
+    "migrator": {"image_digest": null, "reported_version": null},
+    "agent-runtime": {"image_digest": null, "reported_version": null},
+    "capability-worker": {"image_digest": null, "reported_version": null}
+  },
+  "runtime_overlay": {
+    "lock": "deploy/agent-runtime-source/lock.json",
+    "lock_sha256": null,
+    "upstream_sha": null,
+    "overlay_sha256": null,
+    "schema_digest": null
+  },
+  "database": {
+    "baseline_id": "2026_08_post_kb_v1",
+    "baseline_manifest_sha256": null,
+    "migration_revision": null,
+    "grants_revision": null
+  },
+  "contracts": {
+    "openapi_sha256": null,
+    "sse_fixture_sha256": null,
+    "capability_contract_sha256": null,
+    "agent_event_schema_sha256": null
+  },
+  "topology": {
+    "compact_profile_revision": null,
+    "scale_profile_revision": null,
+    "service_topology_revision": null,
+    "data_access_revision": null,
+    "quality_baseline_revision": null,
+    "evidence_policy_revision": null
+  },
+  "toolchains": {"python_major": "3", "node_major": "22", "rust": null},
+  "vectors": {
+    "qdrant_dataset_revision": null,
+    "memory_namespace_revision": null,
+    "collection_or_alias": null,
+    "embedding_provider": null,
+    "embedding_model": null,
+    "embedding_dimension": null,
+    "bm25_revision": null
+  },
+  "receipts": {
+    "platform_db": null,
+    "agent_execution": null,
+    "knowledge": null,
+    "fresh_install": null,
+    "rollback": null,
+    "version_agreement": null
+  }
+}

@@ -539,13 +539,47 @@ test-isolation:             ## 运行 Agent Runtime 与 Gateway 隔离契约测�
 
 # -- Repository quality gates (ARC-00B) ---------------------------------------
 
-.PHONY: hygiene-check loc-no-growth-gate web-quality-gate affected-gates ci-gate-enforcement ci-gate-enforcement-selftest rust-changed-crate-gate gateway-unit-gate
+.PHONY: hygiene-check evidence-policy-gate artifact-status artifact-cleanup compatibility-manifest-gate platform-db-convergence-gate agent-execution-integration-gate knowledge-integration-gate fresh-install-gate platform-rollback-rehearsal platform-release-gate loc-no-growth-gate web-quality-gate affected-gates ci-gate-enforcement ci-gate-enforcement-selftest rust-changed-crate-gate gateway-unit-gate
 
 BASE_SHA ?=
 
 hygiene-check:              ## 卫生检查: 空测试体/自证测试、.only/.fixme 扫描（含负向自测）
 	@python3 scripts/harness/hygiene_check.py --selftest
 	@python3 scripts/harness/hygiene_check.py
+	@$(MAKE) evidence-policy-gate
+
+evidence-policy-gate:       ## ARC-07 evidence policy/manifest与具名候选机械合同
+	@python3 scripts/evidence/artifacts.py validate
+	@python3 scripts/evidence/known_candidates.py
+
+artifact-status:            ## 只读列出scratch artifact分类/年龄/大小/拒绝原因
+	@python3 scripts/evidence/artifacts.py status $(ARTIFACT_ARGS)
+
+artifact-cleanup:           ## 默认dry-run；apply需精确authorization manifest和外部quarantine
+	@python3 scripts/evidence/artifacts.py cleanup $(ARTIFACT_ARGS)
+
+COMPATIBILITY_LEVEL ?= draft
+compatibility-manifest-gate: ## draft验证结构/离线事实；release必须COMPATIBILITY_LEVEL=candidate
+	@python3 scripts/release/compatibility_manifest.py --level "$(COMPATIBILITY_LEVEL)"
+
+platform-db-convergence-gate: ## L2真实DB authority/fingerprint/migration matrix；缺DSN=BLOCKED
+	@python3 scripts/release/integration_gates.py --gate platform-db
+
+agent-execution-integration-gate: ## L2真实ThreadStore/Runtime/Worker/write-path组合门禁
+	@python3 scripts/release/integration_gates.py --gate agent-execution
+
+knowledge-integration-gate: ## L2真实Knowledge unit/Qdrant/live retrieval组合门禁
+	@python3 scripts/release/integration_gates.py --gate knowledge
+
+fresh-install-gate:        ## L3隔离quickstart/validate/status；必须显式live authorization
+	@python3 scripts/release/integration_gates.py --gate fresh-install
+
+platform-rollback-rehearsal: ## L3 DB+Runtime+Knowledge current→frozen→current组合门禁
+	@python3 scripts/release/integration_gates.py --gate rollback
+
+platform-release-gate:     ## ARC-08最终总门禁：完整manifest + L2/L3/fresh/rollback零skip
+	@$(MAKE) compatibility-manifest-gate COMPATIBILITY_LEVEL=candidate
+	@python3 scripts/release/integration_gates.py --gate all
 
 loc-no-growth-gate:         ## LOC 不增长门禁: 超阈值文件零增长 + 新文件低于阈值（绑定基线清单）
 	@python3 scripts/harness/loc_no_growth_gate.py --selftest

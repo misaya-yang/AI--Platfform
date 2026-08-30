@@ -59,7 +59,12 @@ def _get_signer() -> GatewaySecret | None:
     secret = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
     if not secret:
         return None
-    return GatewaySecret(secret=secret)
+    return GatewaySecret(
+        secret=secret,
+        caller_service="gateway",
+        audience="knowledge-service",
+        allowed_path_prefixes=("/api/v1",),
+    )
 
 
 class KnowledgeServiceAgentKnowledgeResolver:
