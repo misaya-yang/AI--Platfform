@@ -24,10 +24,13 @@ import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import { getErrorMessage } from "@/lib/utils";
 
-import { useServices, useHealth } from "@/hooks/useServices";
+import { useArchitectureStatus, useServices, useHealth } from "@/hooks/useServices";
 import { ServiceCard } from "@/components/ServiceCard";
 import { ServiceForm } from "@/components/ServiceForm";
 import { useAppStore } from "@/store/useAppStore";
+import { useAuthStore } from "@/store/useAuthStore";
+import { ArchitectureStatusPanel } from "@/components/services/ArchitectureStatusPanel";
+import { canViewArchitectureStatus } from "@/components/services/architectureStatusPresentation";
 
 // Provider & Model imports
 import { ProviderCard, ProviderForm, ModelTable, ModelForm } from "@/components/llm";
@@ -73,6 +76,14 @@ export function ServicesPage() {
     [servicesQuery.data]
   );
   const health = healthQuery.data || {};
+  const user = useAuthStore((state) => state.user);
+  const canViewArchitecture = useMemo(
+    () => canViewArchitectureStatus(user?.roles ?? [], user?.permissions ?? []),
+    [user?.permissions, user?.roles],
+  );
+  const architectureQuery = useArchitectureStatus(
+    activeTab === "services" && canViewArchitecture
+  );
   // Filtered Services
   const filteredServices = useMemo(() => {
     let result = services;
@@ -526,6 +537,13 @@ export function ServicesPage() {
         <div className="min-h-[500px]">
           {/* Services Tab */}
           <TabsContent value="services" className="mt-0 space-y-4 focus-visible:outline-hidden focus-visible:ring-0">
+            <ArchitectureStatusPanel
+              data={architectureQuery.data}
+              loading={architectureQuery.isLoading}
+              error={architectureQuery.isError}
+              allowed={canViewArchitecture}
+              onRefresh={() => void architectureQuery.refetch()}
+            />
             {servicesQuery.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[1, 2, 3, 4, 5, 6].map((i) => (

@@ -5,6 +5,7 @@ import {
   listServices,
   getProvidersHealth,
 } from "@/api/gateway";
+import { getArchitectureStatus } from "@/api/architecture";
 
 export function useServices() {
   return useQuery({
@@ -30,6 +31,18 @@ export function useHealth() {
     refetchInterval: () =>
       typeof document === "undefined" || !document.hidden ? 30000 : false,
     refetchIntervalInBackground: false,
+  });
+}
+
+export function useArchitectureStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ["architecture-status"],
+    queryFn: getArchitectureStatus,
+    enabled,
+    staleTime: 15000,
+    refetchInterval: enabled ? 30000 : false,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 }
 

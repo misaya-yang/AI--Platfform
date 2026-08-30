@@ -80,7 +80,12 @@ else
 fi
 
 read -r -a COMPOSE_CMD <<< "$(get_compose_cmd)"
-COMPOSE_FILES=(-f docker-compose.yml)
+TOPOLOGY_MODE="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
+if ! python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" --mode "$TOPOLOGY_MODE" >/dev/null; then
+    log_error "Invalid AI_PLATFORM_TOPOLOGY_MODE=$TOPOLOGY_MODE"
+    exit 2
+fi
+COMPOSE_FILES=(-f docker-compose.yml -f "docker-compose.${TOPOLOGY_MODE}.yml")
 if [ "$BUILD" = true ]; then
     COMPOSE_FILES+=(-f docker-compose.build.yml)
 fi
@@ -103,6 +108,9 @@ fi
 
 INFRA_SERVICES="postgres redis qdrant"
 FULL_APP_SERVICES="migrate gateway frontend knowledge-service knowledge-worker agent-runtime agent-capability-worker"
+if [ "$TOPOLOGY_MODE" = "compact" ]; then
+    FULL_APP_SERVICES="migrate gateway frontend knowledge-service agent-runtime agent-capability-worker"
+fi
 
 assert_compose_owner
 

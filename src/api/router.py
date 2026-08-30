@@ -5,6 +5,7 @@ from .v1.agent_runtime import router as agent_runtime_router
 from .v1.agents import publication_router as agent_publications_router
 from .v1.agents import router as agents_router
 from .v1.api_keys import router as api_keys_router
+from .v1.architecture_status import router as architecture_status_router
 from .v1.artifact_shares import router as artifact_shares_router
 from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
@@ -64,6 +65,7 @@ api_router.include_router(tasks_router)
 api_router.include_router(sessions_router)
 api_router.include_router(services_router)
 api_router.include_router(health_router)
+api_router.include_router(architecture_status_router)
 api_router.include_router(setup_router)  # First-run onboarding state
 api_router.include_router(config_router)
 api_router.include_router(conversations_router)  # 简化的对话 API

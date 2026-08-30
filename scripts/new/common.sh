@@ -107,14 +107,47 @@ pg_password() { echo "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"; }
 pg_database() { echo "${POSTGRES_DB:-gateway}"; }
 
 # Container names (overridable via env vars for dev setup)
+compose_project_name() { echo "${COMPOSE_PROJECT_NAME:-ai-gateway}"; }
+compose_service_containers() {
+    local service="$1"
+    docker ps -a \
+        --filter "label=com.docker.compose.project=$(compose_project_name)" \
+        --filter "label=com.docker.compose.service=$service" \
+        --format '{{.Names}}' 2>/dev/null
+}
+compose_service_container() {
+    local service="$1"
+    local fallback="$2"
+    local discovered
+    discovered="$(compose_service_containers "$service" | head -n 1)"
+    echo "${discovered:-$fallback}"
+}
+topology_service_present() {
+    local service="$1"
+    local mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
+    python3 - "$PROJECT_ROOT/src/core/data/service_topology.json" "$service" "$mode" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+service = next((row for row in payload["services"] if row["service_id"] == sys.argv[2]), None)
+raise SystemExit(0 if service and service["modes"][sys.argv[3]]["present"] else 1)
+PY
+}
 pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-pg}"; }
 redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
 knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
-knowledge_worker_container() { echo "${KNOWLEDGE_WORKER_CONTAINER:-ai-gateway-knowledge-worker}"; }
+knowledge_worker_container() {
+    compose_service_container "knowledge-worker" "${KNOWLEDGE_WORKER_CONTAINER:-ai-gateway-knowledge-worker}"
+}
 gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
 frontend_container()  { echo "${FRONTEND_CONTAINER:-ai-gateway-frontend}"; }
 agent_runtime_container() { echo "${AGENT_RUNTIME_CONTAINER:-ai-gateway-agent-runtime}"; }
+agent_capability_worker_container() {
+    compose_service_container "agent-capability-worker" \
+        "${AGENT_CAPABILITY_WORKER_CONTAINER:-ai-gateway-agent-capability-worker}"
+}
 
 agent_runtime_kernel_revision() {
     python3 - "$PROJECT_ROOT/deploy/agent-runtime-source/source-receipt.json" <<'PY'
@@ -194,13 +227,18 @@ assert_compose_owner() {
         "$(gateway_container)"
         "$(frontend_container)"
         "$(knowledge_container)"
-        "$(knowledge_worker_container)"
         "$(agent_runtime_container)"
         # Legacy/other-checkout names are intentionally not part of this
         # repository's runtime ownership check.
         ai-gateway-knowledge
         islamic-content-service
     )
+    local discovered
+    for discovered in \
+        $(compose_service_containers knowledge-worker) \
+        $(compose_service_containers agent-capability-worker); do
+        inspected_names+=("$discovered")
+    done
     local container owner project service mismatch=false
 
     for container in "${inspected_names[@]}"; do
@@ -449,11 +487,26 @@ check_knowledge_health() {
 }
 
 check_knowledge_worker_health() {
-    docker exec "$(knowledge_worker_container)" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null
+    local containers container
+    containers="$(compose_service_containers knowledge-worker)"
+    [ -n "$containers" ] || return 1
+    while IFS= read -r container; do
+        docker exec "$container" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null \
+            || return 1
+    done <<< "$containers"
 }
 
 check_agent_runtime_health() {
     docker exec "$(agent_runtime_container)" curl -sf "http://127.0.0.1:8094/health/ready" &>/dev/null
+}
+
+check_agent_capability_worker_health() {
+    local containers container
+    containers="$(compose_service_containers agent-capability-worker)"
+    [ -n "$containers" ] || return 1
+    while IFS= read -r container; do
+        docker exec "$container" ai-platform-capability-worker-health &>/dev/null || return 1
+    done <<< "$containers"
 }
 
 # -- Python workspace packages -----------------------------------------------

@@ -528,7 +528,6 @@ services:
   # exposes health only, and discovers queued generations from PostgreSQL.
   knowledge-worker:
     image: "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
-    container_name: ai-gateway-knowledge-worker
     environment:
       <<: *knowledge-service-environment
       KNOWLEDGE_RUNTIME_ROLE: "worker"
@@ -558,7 +557,6 @@ services:
 
   # Rust capability worker. It owns durable tool execution but never a model loop.
   agent-capability-worker:
-    container_name: ai-gateway-agent-capability-worker
     image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-c2f4e4c2ef8e}"
     expose:
       - "8095"

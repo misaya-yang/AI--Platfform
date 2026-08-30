@@ -471,6 +471,7 @@ validate_ports() {
 validate_compose_config() {
     local compose_cmd
     local no_interpolate=false
+    local topology_mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
 
     if [ "$ERRORS" -gt 0 ]; then
         log_warn "Skipping docker compose config validation until earlier configuration errors are fixed."
@@ -478,6 +479,10 @@ validate_compose_config() {
     fi
 
     compose_cmd="$(get_compose_cmd)"
+    if ! python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" --mode "$topology_mode" >/dev/null; then
+        fail "AI_PLATFORM_TOPOLOGY_MODE must resolve one of compact/full/scale."
+        return
+    fi
 
     if [ "${1:-}" = "--no-interpolate" ]; then
         no_interpolate=true
@@ -485,13 +490,16 @@ validate_compose_config() {
     fi
 
     if [ "$no_interpolate" = true ]; then
-        if ! (cd "$PROJECT_ROOT" && $compose_cmd --env-file "$ENV_FILE" config --quiet --no-interpolate "$@"); then
+        if ! (cd "$PROJECT_ROOT" && $compose_cmd -f docker-compose.yml \
+            -f "docker-compose.${topology_mode}.yml" --env-file "$ENV_FILE" \
+            config --quiet --no-interpolate "$@"); then
             fail "docker compose config validation failed."
         fi
         return
     fi
 
-    if ! (cd "$PROJECT_ROOT" && $compose_cmd --env-file "$ENV_FILE" config --quiet "$@"); then
+    if ! (cd "$PROJECT_ROOT" && $compose_cmd -f docker-compose.yml \
+        -f "docker-compose.${topology_mode}.yml" --env-file "$ENV_FILE" config --quiet "$@"); then
         fail "docker compose config validation failed."
     fi
 }

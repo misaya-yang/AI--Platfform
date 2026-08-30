@@ -10,12 +10,14 @@ source "$(dirname "$0")/common.sh"
 load_env
 
 COMPOSE_CMD=$(get_compose_cmd)
+TOPOLOGY_MODE="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
 cd "$PROJECT_ROOT"
 
 echo ""
 echo "=== Docker Compose Services ==="
 # shellcheck disable=SC2086
-if ! $COMPOSE_CMD --env-file "$ENV_FILE" ps 2>/dev/null; then
+if ! $COMPOSE_CMD -f docker-compose.yml -f "docker-compose.${TOPOLOGY_MODE}.yml" \
+    --env-file "$ENV_FILE" ps 2>/dev/null; then
     echo "  (compose metadata unavailable; falling back to known container names)"
     docker ps --filter "name=ai-gateway-" --format "  {{.Names}}\t{{.Status}}" 2>/dev/null || true
 fi
@@ -56,11 +58,16 @@ check_and_report "PostgreSQL" check_postgres_status
 check_and_report "Redis" check_redis_status
 check_and_report "Qdrant" check_qdrant_health
 check_and_report "Knowledge" check_knowledge_health
-check_and_report "Knowledge worker" check_knowledge_worker_health
+if topology_service_present knowledge-worker; then
+    check_and_report "Knowledge worker" check_knowledge_worker_health
+else
+    printf "  %-18s %s\n" "Knowledge worker:" "Integrated (compact mode)"
+fi
 check_and_report "Gateway" check_gateway_health
 check_and_report "Gateway metrics" check_gateway_metrics
 check_and_report "Frontend" check_frontend_health
 check_and_report "Agent Runtime" check_agent_runtime_health
+check_and_report "Capability worker" check_agent_capability_worker_health
 
 echo ""
 

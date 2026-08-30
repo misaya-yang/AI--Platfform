@@ -1,0 +1,15 @@
+services:
+  gateway:
+    environment:
+      AI_PLATFORM_TOPOLOGY_MODE: "scale"
+  knowledge-service:
+    environment:
+      KNOWLEDGE_RUNTIME_ROLE: "api"
+  knowledge-worker:
+    environment:
+      KNOWLEDGE_RUNTIME_ROLE: "worker"
+    deploy:
+      replicas: 2
+  agent-capability-worker:
+    deploy:
+      replicas: 2
