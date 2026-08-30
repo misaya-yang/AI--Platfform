@@ -13,12 +13,13 @@
   "tested_candidate_sha": "9aaa9cabcd9284b001b13f1a0b5b2a90f6de0768",
   "tested_candidate_ahead_main": 127,
   "execution_model": "Single writer in the current checkout. No new worktree. Docker, database, E2E and provider work were serialized; host Cargo is prohibited. No further subagents are planned for closeout.",
-  "last_result": "2026-08-30: core implementation, unit/integration gates and current-stack UI/Qwen/Knowledge/admin journeys passed. All services are healthy under the current checkout. Database baseline 2026_08_post_kb_v1 matches four fingerprints and 251 verification checks. Rollback stopped before mutation because the frozen image bundle is absent; hosted Rust CI/multi-arch and fresh-machine evidence remain unexecuted.",
+  "last_result": "2026-08-30: core implementation, unit/integration gates and current-stack UI/Qwen/Knowledge/admin journeys passed. All services are healthy under the current checkout. Database baseline 2026_08_post_kb_v1 matches four fingerprints and 251 verification checks. The only Agent Studio code/test regression found was repaired and its 48-case route suite passed. Rollback stopped before mutation because the frozen image bundle is absent; hosted Rust CI/multi-arch, fresh-machine and one registry-dependent built-Nginx smoke remain unexecuted.",
   "next_action": "Restore a digest-pinned frozen image bundle and provide hosted Rust CI/multi-arch plus fresh-machine execution, then run ARC-08 rollback/fresh/candidate-manifest gates. Do not mark these PASS until their receipts exist.",
   "blockers": [
     "BLOCKED_EXTERNAL_RUST_CI: no hosted fmt/check/changed-crate or multi-arch receipt for the tested SHA",
     "BLOCKED_EXTERNAL_ARTIFACT: rollback bundle references three frozen image IDs that are absent and have no registry reference",
-    "NOT_RUN_FRESH_MACHINE: no separate fresh-machine registry pull/quickstart receipt was authorized or executed"
+    "NOT_RUN_FRESH_MACHINE: no separate fresh-machine registry pull/quickstart receipt was authorized or executed",
+    "BLOCKED_DOCKER_REGISTRY: built-Nginx smoke could not resolve the public Dockerfile frontend image; config contract and current Web build passed"
   ],
   "confirmation": null,
   "phases": [
@@ -59,6 +60,6 @@
     "document": "deploy/runbooks/platform-architecture-convergence/HANDOFF.md",
     "cross_review_performed": true,
     "blocker_high_code_findings_open": 0,
-    "release_evidence_blockers_open": 3
+    "release_evidence_blockers_open": 4
   }
 }

@@ -9,6 +9,7 @@ commands:
   - {command: "make verify-openapi-contract", exit_code: 0, passed: null, failed: 0, skipped: 0}
   - {command: "make live-openapi-contract-gate", exit_code: 0, passed: 1, failed: 0, skipped: 0}
   - {command: "make gateway-unit-gate", exit_code: 0, passed: 2107, failed: 0, skipped: 0}
+  - {command: "make sdk-sse-contract", exit_code: 0, passed: 13, failed: 0, skipped: 2}
 direct_verdict: PASS
 integration_verdict: PASS
 live_verdict: PASS
@@ -16,4 +17,5 @@ deferred_live_scenarios: []
 review_findings: {blocker: 0, high: 0, medium: 0}
 rollback_class: old-binary-compatible
 live_observations: [Assistant streaming, approval allow/reject, cancellation, recovery, history]
-remaining_risks: []
+remaining_risks:
+  - "Java and Dart SDK SSE checks were not run because Maven and Dart are absent; Python and CLI passed."

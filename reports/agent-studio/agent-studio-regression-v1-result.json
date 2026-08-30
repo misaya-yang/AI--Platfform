@@ -1,16 +1,16 @@
 {
   "schema_version": "agent-studio-regression-result/v1",
   "status": "failed",
-  "started_at": "2026-08-24T14:26:05.141266+00:00",
-  "completed_at": "2026-08-24T14:29:39.362342+00:00",
+  "started_at": "2026-08-30T18:24:55.550527+00:00",
+  "completed_at": "2026-08-30T18:36:01.652207+00:00",
   "manifest": "tests/fixtures/agent-studio/regression_manifest.json",
-  "manifest_sha256": "dc960e831b39672cde65b7c17ffe377040a40ca4809899c5fb0aa098e5299776",
-  "source_sha256": "e1d060c9c5d92953b222045a8888072987d2a7bdc64c3404a5e2fff2465fdcf9",
+  "manifest_sha256": "afedb35a41cf05f887f09415a1d72f7b0b5199ea99d0c0b7799e5b2511bf7f11",
+  "source_sha256": "5f5e317385529fa8cc41530a79795f43c25735c32eedc997fc20827e07c7cb42",
   "source_stable": true,
   "required_gate_count": 40,
-  "executed_gate_count": 24,
-  "passed_gate_count": 23,
-  "failed_gate_count": 1,
+  "executed_gate_count": 40,
+  "passed_gate_count": 37,
+  "failed_gate_count": 3,
   "results": [
     {
       "phase": "AS-00",
@@ -19,11 +19,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:05.141741+00:00",
-      "completed_at": "2026-08-24T14:26:05.190875+00:00",
-      "elapsed_seconds": 0.049,
+      "started_at": "2026-08-30T18:24:55.550895+00:00",
+      "completed_at": "2026-08-30T18:24:55.656041+00:00",
+      "elapsed_seconds": 0.105,
       "log": "reports/agent-studio/regression-v1/as-00-branch-baseline.log",
-      "log_sha256": "249cfb9a3db07c2d03a359fb7b8ce6cddc0cdc422ad32ba3564f1b4b51906f75"
+      "log_sha256": "7a02c1ebf852206786ea3546d1d3de3bc92f2b54490fa96324f73276cf50a839"
     },
     {
       "phase": "AS-00",
@@ -32,11 +32,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:05.191414+00:00",
-      "completed_at": "2026-08-24T14:26:06.768215+00:00",
-      "elapsed_seconds": 1.577,
+      "started_at": "2026-08-30T18:24:55.656298+00:00",
+      "completed_at": "2026-08-30T18:24:56.464081+00:00",
+      "elapsed_seconds": 0.808,
       "log": "reports/agent-studio/regression-v1/as-00-capability-tests.log",
-      "log_sha256": "2742e4499a69d3bdf506c8c75febc05ccbc107cbac7db31d5b998e311d300999"
+      "log_sha256": "e54073b0d9a5eb23ae3a175418ad191b952b63a782dad99fb508e1d32335b026"
     },
     {
       "phase": "AS-00",
@@ -45,11 +45,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:06.768500+00:00",
-      "completed_at": "2026-08-24T14:26:20.129067+00:00",
-      "elapsed_seconds": 13.36,
+      "started_at": "2026-08-30T18:24:56.464321+00:00",
+      "completed_at": "2026-08-30T18:24:57.635950+00:00",
+      "elapsed_seconds": 1.171,
       "log": "reports/agent-studio/regression-v1/as-00-assistant-isolation.log",
-      "log_sha256": "ed2eb0ad68cc352507b591b4a2f482e3dfb3a1a34b2eeb4e9d7b84afff26417f"
+      "log_sha256": "002d4432b495520124ca01211f5d79665084559d8fef672ff6e77f3c70d27bd2"
     },
     {
       "phase": "AS-00",
@@ -58,9 +58,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:20.130046+00:00",
-      "completed_at": "2026-08-24T14:26:20.214434+00:00",
-      "elapsed_seconds": 0.084,
+      "started_at": "2026-08-30T18:24:57.636195+00:00",
+      "completed_at": "2026-08-30T18:24:57.701900+00:00",
+      "elapsed_seconds": 0.066,
       "log": "reports/agent-studio/regression-v1/as-00-lint.log",
       "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
     },
@@ -71,11 +71,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:20.214714+00:00",
-      "completed_at": "2026-08-24T14:26:23.381645+00:00",
-      "elapsed_seconds": 3.167,
+      "started_at": "2026-08-30T18:24:57.702131+00:00",
+      "completed_at": "2026-08-30T18:25:00.799073+00:00",
+      "elapsed_seconds": 3.097,
       "log": "reports/agent-studio/regression-v1/as-01-migration-contract.log",
-      "log_sha256": "b19ca1fb0facb0fd85d2ae53c3d9c7effc0850b3d0b0ccf78f000432fbf44aa1"
+      "log_sha256": "fb200ae9ca0fbe46914e97ab391f57d058637189bebbbc1baf8565fc3f56d97e"
     },
     {
       "phase": "AS-01",
@@ -84,11 +84,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:23.381900+00:00",
-      "completed_at": "2026-08-24T14:26:25.067950+00:00",
-      "elapsed_seconds": 1.686,
+      "started_at": "2026-08-30T18:25:00.799332+00:00",
+      "completed_at": "2026-08-30T18:25:02.334698+00:00",
+      "elapsed_seconds": 1.535,
       "log": "reports/agent-studio/regression-v1/as-01-agent-api.log",
-      "log_sha256": "de2394954b10b816d9f9684c363d32689dac011e9b78589311afb7dd01363ab4"
+      "log_sha256": "921c967605c7bf55293b67e278cc84e5c45747562aa4ab946b8ad5ce3f51c33e"
     },
     {
       "phase": "AS-01",
@@ -97,9 +97,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:25.068210+00:00",
-      "completed_at": "2026-08-24T14:26:25.105410+00:00",
-      "elapsed_seconds": 0.037,
+      "started_at": "2026-08-30T18:25:02.334958+00:00",
+      "completed_at": "2026-08-30T18:25:02.371008+00:00",
+      "elapsed_seconds": 0.036,
       "log": "reports/agent-studio/regression-v1/as-01-lint.log",
       "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
     },
@@ -110,11 +110,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:25.105696+00:00",
-      "completed_at": "2026-08-24T14:26:27.561909+00:00",
-      "elapsed_seconds": 2.456,
+      "started_at": "2026-08-30T18:25:02.371221+00:00",
+      "completed_at": "2026-08-30T18:25:03.599326+00:00",
+      "elapsed_seconds": 1.228,
       "log": "reports/agent-studio/regression-v1/as-01-gateway-regression.log",
-      "log_sha256": "c6087c71c4a11e9c90bf3d044dbd6526a7679fa2222297cbd030aa4915ed27d2"
+      "log_sha256": "cd460acacb2cc355ed71b543f6d00174195925103405e44f5157ad17f6975357"
     },
     {
       "phase": "AS-02",
@@ -123,11 +123,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:27.562155+00:00",
-      "completed_at": "2026-08-24T14:26:28.310953+00:00",
-      "elapsed_seconds": 0.749,
+      "started_at": "2026-08-30T18:25:03.599550+00:00",
+      "completed_at": "2026-08-30T18:25:04.254034+00:00",
+      "elapsed_seconds": 0.654,
       "log": "reports/agent-studio/regression-v1/as-02-gateway-envelope.log",
-      "log_sha256": "6496acb58208a0ef141d8d30c283844622ae577bdea34b754ebc1c9aa306d1de"
+      "log_sha256": "92526c2aaa9461c22fc46cd00254fb97df1912744e735a0238e32c5ef3ac1f4e"
     },
     {
       "phase": "AS-02",
@@ -136,9 +136,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:28.311213+00:00",
-      "completed_at": "2026-08-24T14:26:28.903856+00:00",
-      "elapsed_seconds": 0.592,
+      "started_at": "2026-08-30T18:25:04.254265+00:00",
+      "completed_at": "2026-08-30T18:25:04.761353+00:00",
+      "elapsed_seconds": 0.507,
       "log": "reports/agent-studio/regression-v1/as-02-connector-binding.log",
       "log_sha256": "477184eddce4a8576e82acfd6e50d353842cfe15710cc1f645733dbb051c7c4a"
     },
@@ -149,11 +149,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:28.904129+00:00",
-      "completed_at": "2026-08-24T14:26:30.276866+00:00",
-      "elapsed_seconds": 1.372,
+      "started_at": "2026-08-30T18:25:04.761577+00:00",
+      "completed_at": "2026-08-30T18:25:05.565858+00:00",
+      "elapsed_seconds": 0.804,
       "log": "reports/agent-studio/regression-v1/as-02-resolver-isolation.log",
-      "log_sha256": "ba15e78472d8f3657ca89de6088b0d33984a3f91047f30663aebed664a43a651"
+      "log_sha256": "e18db61f6b258fbe4fc3858fc5cd40c48e3becef0eff017f2d1911ed96cec13d"
     },
     {
       "phase": "AS-02",
@@ -162,11 +162,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:30.277132+00:00",
-      "completed_at": "2026-08-24T14:26:32.200666+00:00",
-      "elapsed_seconds": 1.923,
+      "started_at": "2026-08-30T18:25:05.566094+00:00",
+      "completed_at": "2026-08-30T18:25:06.095803+00:00",
+      "elapsed_seconds": 0.529,
       "log": "reports/agent-studio/regression-v1/as-02-trace-session.log",
-      "log_sha256": "6225b446e2ed05008219c839a4cb57d114cd39cd983debcee56a5cd8852021db"
+      "log_sha256": "5968ef7121c29954f14a48e1cf812af92147c3428c7bfbd550cd10dab03f7368"
     },
     {
       "phase": "AS-02",
@@ -175,11 +175,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:32.201043+00:00",
-      "completed_at": "2026-08-24T14:26:55.796896+00:00",
-      "elapsed_seconds": 23.596,
+      "started_at": "2026-08-30T18:25:06.096026+00:00",
+      "completed_at": "2026-08-30T18:25:13.182352+00:00",
+      "elapsed_seconds": 7.086,
       "log": "reports/agent-studio/regression-v1/as-02-runtime-gate.log",
-      "log_sha256": "cf8d45ad261ae4ac18bf5c685c67a2a6b3ce792c760d1887abf683e5626a77ad"
+      "log_sha256": "f0e553a9506479ac0999faa8cf76c2faad2fef20cbd3e6b0cf4937a650d78c4c"
     },
     {
       "phase": "AS-02",
@@ -188,9 +188,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:55.797510+00:00",
-      "completed_at": "2026-08-24T14:26:55.898762+00:00",
-      "elapsed_seconds": 0.101,
+      "started_at": "2026-08-30T18:25:13.182579+00:00",
+      "completed_at": "2026-08-30T18:25:13.217484+00:00",
+      "elapsed_seconds": 0.035,
       "log": "reports/agent-studio/regression-v1/as-02-lint.log",
       "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
     },
@@ -201,11 +201,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:55.899268+00:00",
-      "completed_at": "2026-08-24T14:26:58.737069+00:00",
-      "elapsed_seconds": 2.838,
+      "started_at": "2026-08-30T18:25:13.217685+00:00",
+      "completed_at": "2026-08-30T18:25:14.158974+00:00",
+      "elapsed_seconds": 0.941,
       "log": "reports/agent-studio/regression-v1/as-03-mcp-api-runtime.log",
-      "log_sha256": "d6ca05af67d45ae15b04062f98f32ba987ce65b9799ebe3ac0589bbdcff20bfc"
+      "log_sha256": "7092c332719e5c04d2042fc07eb6d31f25f9e8510f2ab84d75dca9bb0ff74f02"
     },
     {
       "phase": "AS-03",
@@ -214,11 +214,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:58.737384+00:00",
-      "completed_at": "2026-08-24T14:26:59.709201+00:00",
-      "elapsed_seconds": 0.972,
+      "started_at": "2026-08-30T18:25:14.159196+00:00",
+      "completed_at": "2026-08-30T18:25:14.681426+00:00",
+      "elapsed_seconds": 0.522,
       "log": "reports/agent-studio/regression-v1/as-03-mcp-security.log",
-      "log_sha256": "1e6439c0bd4336f9c26e7edbb50d812c3a16420afdae9befc34a020351745196"
+      "log_sha256": "f1f4e12fc75fcbd0edbae4eac61f1ffcaa53511ec19993c9a57c681298095ddc"
     },
     {
       "phase": "AS-03",
@@ -227,9 +227,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:59.709491+00:00",
-      "completed_at": "2026-08-24T14:26:59.745570+00:00",
-      "elapsed_seconds": 0.036,
+      "started_at": "2026-08-30T18:25:14.681661+00:00",
+      "completed_at": "2026-08-30T18:25:14.715826+00:00",
+      "elapsed_seconds": 0.034,
       "log": "reports/agent-studio/regression-v1/as-03-lint.log",
       "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
     },
@@ -240,11 +240,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:26:59.745810+00:00",
-      "completed_at": "2026-08-24T14:27:23.180398+00:00",
-      "elapsed_seconds": 23.434,
+      "started_at": "2026-08-30T18:25:14.716022+00:00",
+      "completed_at": "2026-08-30T18:25:21.838257+00:00",
+      "elapsed_seconds": 7.122,
       "log": "reports/agent-studio/regression-v1/as-03-assistant-regression.log",
-      "log_sha256": "5bcda5d3c1246e3abd4a9b9cc972352c9542d8edf1f9d2c094f144cae533b1b1"
+      "log_sha256": "e791cbe02d7483538be84087f0e46cd8f85b281da0e57463f6af47ab8d4cef47"
     },
     {
       "phase": "AS-04",
@@ -253,11 +253,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:27:23.180881+00:00",
-      "completed_at": "2026-08-24T14:27:24.122968+00:00",
-      "elapsed_seconds": 0.942,
+      "started_at": "2026-08-30T18:25:21.838500+00:00",
+      "completed_at": "2026-08-30T18:25:22.768558+00:00",
+      "elapsed_seconds": 0.93,
       "log": "reports/agent-studio/regression-v1/as-04-skill-api-isolation.log",
-      "log_sha256": "d1123991e368d2f8c229b88f54385286f0b8e3f77baa038fa7925a104052d442"
+      "log_sha256": "771e0556eb0d19cd5e52e73c50cf2bb9f890c14828e2ee4f27530150afb29c93"
     },
     {
       "phase": "AS-04",
@@ -266,11 +266,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:27:24.123252+00:00",
-      "completed_at": "2026-08-24T14:27:25.047329+00:00",
-      "elapsed_seconds": 0.924,
+      "started_at": "2026-08-30T18:25:22.768779+00:00",
+      "completed_at": "2026-08-30T18:25:23.249085+00:00",
+      "elapsed_seconds": 0.48,
       "log": "reports/agent-studio/regression-v1/as-04-skill-runtime.log",
-      "log_sha256": "9583677bf0df842eb4c2684c720c768a5b31ed3928ecb4146bd47c94853de66f"
+      "log_sha256": "24167c99754bae68fb910d2ee06026510b97a6ec956f1b47864595ecc317c58e"
     },
     {
       "phase": "AS-04",
@@ -279,11 +279,11 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:27:25.047590+00:00",
-      "completed_at": "2026-08-24T14:27:27.757709+00:00",
-      "elapsed_seconds": 2.71,
+      "started_at": "2026-08-30T18:25:23.249319+00:00",
+      "completed_at": "2026-08-30T18:25:24.350354+00:00",
+      "elapsed_seconds": 1.101,
       "log": "reports/agent-studio/regression-v1/as-04-knowledge-binding.log",
-      "log_sha256": "9c9043b7cda3b724f0c800340b4ae50991acfb5ed1636a273cad58e8aff51df1"
+      "log_sha256": "5c3f10b727a2ba635421862b297d3fcecf546076e7b53297e83a014c1a83c2df"
     },
     {
       "phase": "AS-04",
@@ -292,9 +292,9 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:27:27.758077+00:00",
-      "completed_at": "2026-08-24T14:27:27.841014+00:00",
-      "elapsed_seconds": 0.083,
+      "started_at": "2026-08-30T18:25:24.350585+00:00",
+      "completed_at": "2026-08-30T18:25:24.385411+00:00",
+      "elapsed_seconds": 0.035,
       "log": "reports/agent-studio/regression-v1/as-04-lint.log",
       "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
     },
@@ -305,24 +305,232 @@
       "exit_code": 0,
       "skipped_count": 0,
       "failure_reason": null,
-      "started_at": "2026-08-24T14:27:27.841367+00:00",
-      "completed_at": "2026-08-24T14:27:33.795712+00:00",
-      "elapsed_seconds": 5.954,
+      "started_at": "2026-08-30T18:25:24.385629+00:00",
+      "completed_at": "2026-08-30T18:25:37.973949+00:00",
+      "elapsed_seconds": 13.588,
       "log": "reports/agent-studio/regression-v1/as-05-frontend-static.log",
-      "log_sha256": "fb56a1a847b9b65cc7f51ae5c52bef1294268a4a62e16b92453279572c5254a4"
+      "log_sha256": "647098bce8ebf9882961b740dcbf7e7fa965ce0ca586cf2078bed164c74b02d0"
     },
     {
       "phase": "AS-05",
       "id": "agent-studio-e2e",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:25:37.974824+00:00",
+      "completed_at": "2026-08-30T18:26:47.798768+00:00",
+      "elapsed_seconds": 69.824,
+      "log": "reports/agent-studio/regression-v1/as-05-agent-studio-e2e.log",
+      "log_sha256": "bf19645f39c01f32d2b4e86c26e268ed109c44c945e9e3b6fbfaa6a0dd1a8645"
+    },
+    {
+      "phase": "AS-05",
+      "id": "existing-route-e2e",
       "status": "failed",
       "exit_code": 1,
       "skipped_count": 0,
       "failure_reason": "gate command exited with status 1",
-      "started_at": "2026-08-24T14:27:33.796139+00:00",
-      "completed_at": "2026-08-24T14:29:39.285663+00:00",
-      "elapsed_seconds": 125.489,
-      "log": "reports/agent-studio/regression-v1/as-05-agent-studio-e2e.log",
-      "log_sha256": "836dfc917559628f466dcde81cab21c42d71481eb1c0ce25fa5fbe7f4e6b23c8"
+      "started_at": "2026-08-30T18:26:47.799394+00:00",
+      "completed_at": "2026-08-30T18:28:02.541080+00:00",
+      "elapsed_seconds": 74.741,
+      "log": "reports/agent-studio/regression-v1/as-05-existing-route-e2e.log",
+      "log_sha256": "f39b51ad422b5834c821b803ef95eb58559dfecb0f73e2a86ae90a8be7ff8900"
+    },
+    {
+      "phase": "AS-05",
+      "id": "preview-contract",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:28:02.541733+00:00",
+      "completed_at": "2026-08-30T18:28:04.447133+00:00",
+      "elapsed_seconds": 1.905,
+      "log": "reports/agent-studio/regression-v1/as-05-preview-contract.log",
+      "log_sha256": "1cbd0e730e0d96ca87b2af3760cd80ce3ebf58238d78519f5293e86d2123ad15"
+    },
+    {
+      "phase": "AS-06",
+      "id": "publish-api-atomicity",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:28:04.447358+00:00",
+      "completed_at": "2026-08-30T18:28:09.582112+00:00",
+      "elapsed_seconds": 5.135,
+      "log": "reports/agent-studio/regression-v1/as-06-publish-api-atomicity.log",
+      "log_sha256": "9edd310d45976f91783e0e15432e5d5d8415eaf40db12fd4e2d570ee36daf4cd"
+    },
+    {
+      "phase": "AS-06",
+      "id": "agent-eval",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:28:09.582331+00:00",
+      "completed_at": "2026-08-30T18:28:32.581828+00:00",
+      "elapsed_seconds": 22.998,
+      "log": "reports/agent-studio/regression-v1/as-06-agent-eval.log",
+      "log_sha256": "d8531df4a1223d55ecc1af8e58c23c32a5bbfba04c70447a4557edbc6985fd9a"
+    },
+    {
+      "phase": "AS-06",
+      "id": "frontend",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:28:32.582084+00:00",
+      "completed_at": "2026-08-30T18:29:10.939755+00:00",
+      "elapsed_seconds": 38.357,
+      "log": "reports/agent-studio/regression-v1/as-06-frontend.log",
+      "log_sha256": "17882a3263eb6d938abb8a88a739a8f45869a802f83608a6d21b392ca865daed"
+    },
+    {
+      "phase": "AS-06",
+      "id": "runtime-regression",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:29:10.940151+00:00",
+      "completed_at": "2026-08-30T18:29:18.433615+00:00",
+      "elapsed_seconds": 7.493,
+      "log": "reports/agent-studio/regression-v1/as-06-runtime-regression.log",
+      "log_sha256": "60851cbc3c099ce781c2769a5a823b5499854b1342a87d679406c9d3e7924995"
+    },
+    {
+      "phase": "AS-07",
+      "id": "runtime-api",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:29:18.433843+00:00",
+      "completed_at": "2026-08-30T18:29:19.263365+00:00",
+      "elapsed_seconds": 0.829,
+      "log": "reports/agent-studio/regression-v1/as-07-runtime-api.log",
+      "log_sha256": "a7e46befb7df5f89116d967387d2337d53f375d8a0696e9dc9455940772246df"
+    },
+    {
+      "phase": "AS-07",
+      "id": "frontend-build",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:29:19.263592+00:00",
+      "completed_at": "2026-08-30T18:29:31.650292+00:00",
+      "elapsed_seconds": 12.386,
+      "log": "reports/agent-studio/regression-v1/as-07-frontend-build.log",
+      "log_sha256": "8faacf9fa53ed242d57202319ff754d5e34e0194d80fc0d15c89905405c3c33e"
+    },
+    {
+      "phase": "AS-07",
+      "id": "embed-header-contract",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:29:31.650544+00:00",
+      "completed_at": "2026-08-30T18:29:32.114459+00:00",
+      "elapsed_seconds": 0.464,
+      "log": "reports/agent-studio/regression-v1/as-07-embed-header-contract.log",
+      "log_sha256": "72e0bf58b879ec4fb178516e12ef318bf24a0a897f9b2550f4086bf26f9b7439"
+    },
+    {
+      "phase": "AS-07",
+      "id": "built-nginx-header-smoke",
+      "status": "failed",
+      "exit_code": 1,
+      "skipped_count": 0,
+      "failure_reason": "gate command exited with status 1",
+      "started_at": "2026-08-30T18:29:32.114655+00:00",
+      "completed_at": "2026-08-30T18:33:47.342015+00:00",
+      "elapsed_seconds": 255.227,
+      "log": "reports/agent-studio/regression-v1/as-07-built-nginx-header-smoke.log",
+      "log_sha256": "9fbfc4ac6183358de45f82816784feca9a56c9e456d39ed1f7324b902507102b"
+    },
+    {
+      "phase": "AS-07",
+      "id": "channel-browser",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:33:47.342297+00:00",
+      "completed_at": "2026-08-30T18:33:57.970659+00:00",
+      "elapsed_seconds": 10.628,
+      "log": "reports/agent-studio/regression-v1/as-07-channel-browser.log",
+      "log_sha256": "f54fac197ddddc01b05184f65e8a289f18436e533af53a7c17abca66949dc875"
+    },
+    {
+      "phase": "AS-07",
+      "id": "runtime-regression",
+      "status": "failed",
+      "exit_code": 1,
+      "skipped_count": 0,
+      "failure_reason": "gate command exited with status 1",
+      "started_at": "2026-08-30T18:33:57.970952+00:00",
+      "completed_at": "2026-08-30T18:35:19.110059+00:00",
+      "elapsed_seconds": 81.139,
+      "log": "reports/agent-studio/regression-v1/as-07-runtime-regression.log",
+      "log_sha256": "282fb93565825dfbf1fb15de0e9d0e31a241c2c4d402ba75d624d12223e862d2"
+    },
+    {
+      "phase": "AS-08",
+      "id": "operations-governance",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:35:19.110854+00:00",
+      "completed_at": "2026-08-30T18:35:23.397660+00:00",
+      "elapsed_seconds": 4.287,
+      "log": "reports/agent-studio/regression-v1/as-08-operations-governance.log",
+      "log_sha256": "6d2d01eb79c22cb67ba4cd9231f719ec8c9f482f9fcb156bb941b8f1de499fff"
+    },
+    {
+      "phase": "AS-08",
+      "id": "aggregate-manifest",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:35:23.397903+00:00",
+      "completed_at": "2026-08-30T18:35:23.812959+00:00",
+      "elapsed_seconds": 0.415,
+      "log": "reports/agent-studio/regression-v1/as-08-aggregate-manifest.log",
+      "log_sha256": "30facd2a02f90677667c4c7929db49282dbb42667aaa69e8a99fcffcbc3b0344"
+    },
+    {
+      "phase": "AS-08",
+      "id": "analytics-frontend",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:35:23.813185+00:00",
+      "completed_at": "2026-08-30T18:35:53.209812+00:00",
+      "elapsed_seconds": 29.396,
+      "log": "reports/agent-studio/regression-v1/as-08-analytics-frontend.log",
+      "log_sha256": "760d6fc7cf0ad172c691c5c62756cc5ebe7111d1e3a5bf43c1c6e6faef916fbd"
+    },
+    {
+      "phase": "AS-08",
+      "id": "compatibility",
+      "status": "passed",
+      "exit_code": 0,
+      "skipped_count": 0,
+      "failure_reason": null,
+      "started_at": "2026-08-30T18:35:53.210081+00:00",
+      "completed_at": "2026-08-30T18:36:01.585507+00:00",
+      "elapsed_seconds": 8.375,
+      "log": "reports/agent-studio/regression-v1/as-08-compatibility.log",
+      "log_sha256": "9cc30cab63b9bb2bee8069f86424181b89fef207e64397c26d203b08d05ad180"
     }
   ]
 }

@@ -102,6 +102,10 @@ remains as local acceptance data.
    the active authorization.
 4. **Candidate compatibility manifest:** draft validation passes, but it is not promoted to
    `release_candidate` without the missing immutable image and zero-skip receipt set above.
+5. **Optional local toolchains / Docker registry:** SDK SSE passed for Python and CLI; Java and
+   Dart were not run because Maven/Dart are absent. The Agent Studio aggregate reached 37/40 before
+   repair: two failures were the same stale Knowledge route fixture (fixed; 48/48 rerun passed), and
+   the remaining built-Nginx smoke was blocked resolving the public Dockerfile frontend image.
 
 These are release-evidence blockers, not known failures in the current running core product. They
 must remain visible in `loop-state.json`, `work-packages.yml` and the package receipts.
