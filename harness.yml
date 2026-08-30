@@ -145,6 +145,9 @@ commands:
   affected_gates:
     make: affected-gates
     purpose: Map a BASE_SHA diff onto required gates; unmatched changed paths fail closed.
+  ci_gate_enforcement:
+    make: ci-gate-enforcement
+    purpose: Fail closed unless every diff-selected CI-required gate has a successful job result.
   architecture_boundary_gate:
     make: architecture-boundary-gate
     purpose: Static import boundary between gateway/apps/core/contracts zones.
@@ -192,13 +195,13 @@ commands:
 #   resource       : offline | hosted-service | live-stack | provider | docker
 #   skip           : never | live-stack | toolchain   (see docs/harness/repository-quality.md)
 #   timeout        : minutes; CI kills the job after this
-#   evidence       : artifact path pattern the gate must leave behind
-#   ci_job         : CI job name that produces the evidence (checked by the
-#                    final gate-enforcement job; absent = not CI-wired)
+#   evidence       : explicit artifact/report path pattern for the gate
+#   ci_job         : CI job that executes the exact entrypoint; use the explicit
+#                    `manual` sentinel only for non-change release/manual gates
 gates:
   harness:
     make: harness-check
-    triggers: [AGENTS.md, CLAUDE.md, harness.yml, Makefile, "docs/**", "deploy/runbooks/**", "reports/**", ".gitignore", ".editorconfig", ".gitattributes", ".pre-commit-config.yaml", ".claude/**", ".agents/**", README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, DEPLOY.md, CODE_OF_CONDUCT.md, RELEASE.md, SUPPORT.md, LICENSE]
+    triggers: [AGENTS.md, CLAUDE.md, harness.yml, Makefile, scripts/harness/check_harness.py, tests/harness/test_check_harness_gate_schema.py, "docs/**", "deploy/runbooks/**", "reports/**", ".gitignore", ".editorconfig", ".gitattributes", ".pre-commit-config.yaml", ".claude/**", ".agents/**", README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, DEPLOY.md, CODE_OF_CONDUCT.md, RELEASE.md, SUPPORT.md, LICENSE]
     tier: L0
     required_on: [change, release]
     resource: offline
@@ -209,7 +212,7 @@ gates:
   affected_gates:
     make: affected-gates
     purpose: Map the diff onto required gates; unmatched paths fail closed.
-    triggers: [harness.yml, scripts/harness/affected_gates.py, .github/workflows/**]
+    triggers: [harness.yml, scripts/harness/affected_gates.py, scripts/harness/ci_gate_enforcement.py, tests/harness/test_ci_gate_enforcement.py, .github/workflows/**]
     tier: L0
     required_on: [change, release]
     resource: offline
@@ -227,7 +230,7 @@ gates:
     skip: never
     timeout: 5
     evidence: tmp/gate-evidence/architecture-boundary-gate.json
-    ci_job: gate-enforcement
+    ci_job: architecture-gates
   openapi_offline:
     make: verify-openapi-contract
     purpose: In-process offline OpenAPI contract gate; exports from the FastAPI app object, never skips.
@@ -238,7 +241,7 @@ gates:
     skip: never
     timeout: 10
     evidence: tmp/gate-evidence/verify-openapi-contract.json
-    ci_job: gate-enforcement
+    ci_job: architecture-gates
   openapi_live:
     make: live-openapi-contract-gate
     purpose: Live OpenAPI contract check against the running stack; skip means SKIPPED, never PASS.
@@ -249,6 +252,7 @@ gates:
     skip: live-stack
     timeout: 10
     evidence: tmp/gate-evidence/live-openapi-contract-gate.xml
+    ci_job: manual
   gateway_units:
     make: gateway-unit-gate
     purpose: Offline Gateway unit suites (integration-marked and KB/DB suites excluded).
@@ -268,15 +272,18 @@ gates:
     resource: offline
     skip: never
     timeout: 15
-    evidence: tmp/gate-evidence/agent-runtime-source-contract.xml
+    evidence: tmp/gate-evidence/agent-runtime-source-contract.log
+    ci_job: agent-runtime-contracts
   agent_runtime_image:
     make: agent-runtime-contract
     triggers: [deploy/agent-runtime-source/Dockerfile.runtime, scripts/harness/build_agent_runtime_image.sh, scripts/harness/smoke_agent_runtime_image.sh]
-    tier: L2
+    tier: L1
     required_on: [change, release]
-    resource: docker
+    resource: offline
     skip: never
     timeout: 30
+    evidence: tmp/gate-evidence/agent-runtime-contract.log
+    ci_job: agent-runtime-contracts
   agent_runtime_readonly:
     make: agent-runtime-readonly-gate
     triggers: [src/services/agent_runtime/readonly_capabilities.py, tests/services/agent_runtime/test_readonly_capabilities.py, scripts/harness/agent_runtime_readonly_gate.py, tests/harness/test_agent_runtime_readonly_gate.py]
@@ -285,14 +292,18 @@ gates:
     resource: offline
     skip: never
     timeout: 15
+    evidence: tmp/gate-evidence/agent-runtime-readonly-gate.log
+    ci_job: agent-runtime-contracts
   agent_thread_store:
     make: agent-thread-store-contract
     triggers: [database/migrations/089*, database/migrations/090*, database/migrations/092*, database/migrations/093*, database/migrations/094*, database/migrations/095*, tests/database/test_agent_runtime_thread_store_migration.py, scripts/harness/agent_thread_store_contract.sh]
     tier: L2
-    required_on: [change, release]
+    required_on: [release, manual]
     resource: hosted-service
     skip: never
     timeout: 30
+    evidence: tmp/gate-evidence/agent-thread-store-contract.log
+    ci_job: manual
   agent_runtime_single_kernel:
     make: agent-runtime-single-kernel-gate
     triggers: [src/api/v1/assistant.py, src/api/v2/agent.py, src/services/assistant_runtime_assignment.py, database/migrations/095*, docker-compose.yml]
@@ -301,14 +312,18 @@ gates:
     resource: offline
     skip: never
     timeout: 30
+    evidence: tmp/gate-evidence/agent-runtime-single-kernel-gate.log
+    ci_job: agent-runtime-contracts
   service_boundaries:
     make: test-isolation
     triggers: ["src/**", "apps/**", "packages/ai-gateway-core/**"]
     tier: L2
-    required_on: [change]
+    required_on: [release, manual]
     resource: live-stack
     skip: live-stack
     timeout: 20
+    evidence: tmp/gate-evidence/service-boundaries.log
+    ci_job: manual
   assistant_runtime:
     make: runtime-dependency-gate
     triggers: ["scripts/harness/runtime_dependency_gate.py", "scripts/eval_general_agent_failure_recovery.py", "tests/services/eval/**"]
@@ -317,6 +332,8 @@ gates:
     resource: offline
     skip: never
     timeout: 10
+    evidence: tmp/gate-evidence/runtime-dependency-gate.log
+    ci_job: eval-regression-gate
   agent_core:
     make: runtime-dependency-gate
     triggers: ["scripts/**", "tests/**", pyproject.toml, uv.lock, "agent-plugins/**", "skills/**", skills-lock.json]
@@ -325,6 +342,8 @@ gates:
     resource: offline
     skip: never
     timeout: 10
+    evidence: tmp/gate-evidence/runtime-dependency-gate.log
+    ci_job: eval-regression-gate
   eval_contract:
     make: eval-e1-gate
     triggers: ["src/services/eval/**", "packages/ai-gateway-core/src/ai_gateway_core/eval/**", "tests/fixtures/eval/**"]
@@ -333,6 +352,8 @@ gates:
     resource: offline
     skip: never
     timeout: 40
+    evidence: tmp/gate-evidence/eval-e1-gate.log
+    ci_job: eval-regression-gate
   eval_branch:
     make: verify-eval-dev
     triggers: ["src/api/v1/eval.py", "src/api/eval_export.py"]
@@ -341,6 +362,8 @@ gates:
     resource: offline
     skip: never
     timeout: 40
+    evidence: tmp/gate-evidence/verify-eval-dev.log
+    ci_job: eval-regression-gate
   kb:
     make: kb-unit-gate
     purpose: Real Knowledge unit gate — imports knowledge_service, runs offline.
@@ -350,7 +373,7 @@ gates:
     resource: offline
     skip: never
     timeout: 40
-    evidence: tmp/gate-evidence/kb-unit-gate.xml
+    evidence: tmp/gate-evidence/kb-unit-gate.log
     ci_job: eval-regression-gate
   kb_integration_smoke:
     make: kb-integration-smoke
@@ -361,6 +384,8 @@ gates:
     resource: live-stack
     skip: live-stack
     timeout: 20
+    evidence: tmp/gate-evidence/kb-integration-smoke.log
+    ci_job: manual
   gateway_kb_boundary:
     make: gateway-kb-boundary-gate
     triggers: ["packages/ai-gateway-core/src/ai_gateway_core/persistence/**", "src/api/schemas/**", "src/api/v1/knowledge.py", "src/api/v1/kb_tools.py", "src/api/v1/_proxy_utils.py", "src/api/v1/presign.py", "src/services/knowledge_authz.py", "scripts/harness/gateway_kb_boundary_gate.py", "tests/harness/test_gateway_kb_boundary_gate.py"]
@@ -369,6 +394,7 @@ gates:
     resource: offline
     skip: never
     timeout: 10
+    evidence: tmp/gate-evidence/gateway-kb-boundary-gate.log
     ci_job: eval-regression-gate
   kb_migrations:
     make: kb-migration-gate
@@ -379,7 +405,7 @@ gates:
     resource: hosted-service
     skip: never
     timeout: 45
-    evidence: tmp/gate-evidence/kb-migration-gate.xml
+    evidence: tmp/gate-evidence/kb-migration-gate.log
     ci_job: kb-migration-gate
   kb_golden:
     make: kb-golden-gate
@@ -389,16 +415,19 @@ gates:
     resource: offline
     skip: never
     timeout: 15
+    evidence: tmp/gate-evidence/kb-golden-gate.log
     ci_job: eval-regression-gate
   kb_release_evidence:
     make: kb-release-evidence-gate
     purpose: Fail-closed T0 release evidence; distinct from the development golden fixture gate.
     triggers: ["tests/fixtures/eval/rag/golden/**", "reports/kb-eval-baseline/**", "scripts/harness/kb_release_evidence_gate.py", "tests/harness/test_kb_release_evidence_gate.py"]
     tier: L1
-    required_on: [change, release]
+    required_on: [release, manual]
     resource: offline
     skip: never
     timeout: 10
+    evidence: reports/kb-eval-baseline/release-pointer.json
+    ci_job: manual
   rag_fixture:
     make: rag-eval-fixture-contract
     purpose: L1 offline fixture replay — no provider, no live stack.
@@ -408,6 +437,7 @@ gates:
     resource: offline
     skip: never
     timeout: 15
+    evidence: tmp/eval-e1/rag-latest.json
     ci_job: eval-regression-gate
   rag_live_quality:
     make: rag-live-quality-gate
@@ -419,14 +449,17 @@ gates:
     skip: live-stack
     timeout: 45
     evidence: reports/rag-live-quality/latest.json
+    ci_job: manual
   agent_studio:
     make: verify-agent-studio
     triggers: ["web/src/pages/agents/**", "src/api/v1/agents.py", "src/api/v1/agent_runtime.py"]
     tier: L2
-    required_on: [change]
+    required_on: [release, manual]
     resource: live-stack
     skip: live-stack
     timeout: 60
+    evidence: reports/agent-studio/agent-studio-regression-v1-result.json
+    ci_job: manual
   deployment:
     make: validate-example-config
     triggers: ["docker-compose*", ".env.example", "scripts/new/**", Dockerfile, ".dockerignore", "deploy/**", "docker/**", "config/**", "data/**", "examples/**"]
@@ -435,6 +468,8 @@ gates:
     resource: offline
     skip: never
     timeout: 10
+    evidence: tmp/gate-evidence/validate-example-config.log
+    ci_job: compose-and-harness
   frontend:
     shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web test && pnpm -C web build"
     triggers: ["web/**"]
@@ -443,9 +478,10 @@ gates:
     resource: offline
     skip: never
     timeout: 30
+    evidence: tmp/gate-evidence/frontend/*.log
     ci_job: frontend
   web_quality:
-    make: web-quality-gate
+    shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web test && pnpm -C web i18n:check"
     purpose: Web gate without the production build — type-check, lint, node units, i18n.
     triggers: ["web/**"]
     tier: L1
@@ -453,6 +489,7 @@ gates:
     resource: offline
     skip: never
     timeout: 20
+    evidence: tmp/gate-evidence/frontend/*.log
     ci_job: frontend
   rust_changed_crate:
     make: rust-changed-crate-gate
@@ -473,6 +510,8 @@ gates:
     resource: offline
     skip: toolchain
     timeout: 30
+    evidence: tmp/gate-evidence/sdk-sse-contract.log
+    ci_job: sdk-sse
   hygiene:
     make: hygiene-check
     purpose: Empty/self-proving tests, .only/.fixme scan (negative self-test included).
@@ -483,7 +522,7 @@ gates:
     skip: never
     timeout: 5
     evidence: tmp/gate-evidence/hygiene-check.json
-    ci_job: gate-enforcement
+    ci_job: architecture-gates
   loc_no_growth:
     make: loc-no-growth-gate
     purpose: Oversized files never grow; new files stay under threshold; bound to the checked-in ledger.
@@ -494,7 +533,7 @@ gates:
     skip: never
     timeout: 5
     evidence: tmp/gate-evidence/loc-no-growth.json
-    ci_job: gate-enforcement
+    ci_job: architecture-gates
 
 # -- Workspace hygiene --------------------------------------------------------
 # Agents drop test files and screenshots wherever they happen to be standing.

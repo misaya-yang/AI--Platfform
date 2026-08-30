@@ -529,7 +529,7 @@ test-isolation:             ## 运行 Agent Runtime 与 Gateway 隔离契约测�
 
 # -- Repository quality gates (ARC-00B) ---------------------------------------
 
-.PHONY: hygiene-check loc-no-growth-gate web-quality-gate affected-gates rust-changed-crate-gate gateway-unit-gate
+.PHONY: hygiene-check loc-no-growth-gate web-quality-gate affected-gates ci-gate-enforcement ci-gate-enforcement-selftest rust-changed-crate-gate gateway-unit-gate
 
 BASE_SHA ?=
 
@@ -551,23 +551,18 @@ affected-gates:             ## 由 BASE_SHA 的 diff 选择必须运行的门禁
 	@test -n "$(BASE_SHA)" || { echo "usage: make affected-gates BASE_SHA=<base git sha>"; exit 2; }
 	@python3 scripts/harness/affected_gates.py --base "$(BASE_SHA)"
 
+ci-gate-enforcement:        ## CI 最终门禁: diff 所需 job 必须存在且成功（缺失/skip/fail 均失败）
+	@python3 scripts/harness/ci_gate_enforcement.py
+
+ci-gate-enforcement-selftest: ## CI 最终门禁的纯离线负向自测
+	@python3 scripts/harness/ci_gate_enforcement.py --selftest
+
 rust-changed-crate-gate:    ## Rust overlay 门禁: 仅测试被改动路径命中的 crate（无改动 = 不适用）
 	@test -n "$(BASE_SHA)" || { echo "usage: make rust-changed-crate-gate BASE_SHA=<base git sha>"; exit 2; }
 	@python3 scripts/harness/rust_changed_crate_gate.py --base "$(BASE_SHA)"
 
-# Known deselects for gateway-unit-gate (each is a pre-existing defect outside
-# this gate's owned paths, recorded here so the gate stays honest and green):
-#   - test_eval_executes_hierarchical_pipeline_after_viewer_check: fails at HEAD
-#     because FakeHierarchicalKnowledgeService lacks record_external_retrieval_observation;
-#     the fix belongs to the eval source owner (tracked in ARC-00B integration notes).
-#   - test_coding_parallel_fixture.py: skips without the pinned coding sandbox
-#     image; the offline fixture contract is covered by eval-e1-gate.
-GATE_UNIT_DESELECTS := \
-	--deselect tests/api/test_retrieval_evaluate.py::test_eval_executes_hierarchical_pipeline_after_viewer_check \
-	--deselect tests/services/eval/test_coding_parallel_fixture.py
-
 gateway-unit-gate:          ## Gateway 离线单元门禁: 排除 integration 标记与 KB/DB 套件
-	@$(EVAL_UV_RUN) pytest -q --no-cov -m "not integration" $(GATE_UNIT_DESELECTS) $(PYTEST_EXTRA) \
+	@$(EVAL_UV_RUN) pytest -q --no-cov -m "not integration" $(PYTEST_EXTRA) \
 		tests/unit \
 		tests/api \
 		tests/core \

@@ -42,6 +42,7 @@ GATE_TIERS = {"L0", "L1", "L2", "L3"}
 GATE_REQUIRED_ON = {"change", "release", "manual"}
 GATE_RESOURCES = {"offline", "hosted-service", "live-stack", "provider", "docker"}
 GATE_SKIP_POLICIES = {"never", "live-stack", "toolchain"}
+CI_JOB_SENTINELS = {"manual"}
 GATE_FIELDS = {
     "make", "shell", "purpose", "triggers", "tier", "required_on",
     "resource", "skip", "timeout", "evidence", "ci_job",
@@ -346,60 +347,160 @@ def _inline_list(value: str) -> list[str]:
     return [item.strip().strip("\"'") for item in value[1:-1].split(",") if item.strip()]
 
 
-def ci_job_ids() -> set[str]:
-    """Job ids declared in .github/workflows/ci.yml (keys at 2-space indent)."""
-    if not CI_WORKFLOW.is_file():
-        return set()
-    ids: set[str] = set()
-    for line in _block_body(CI_WORKFLOW.read_text(encoding="utf-8").splitlines(), "jobs"):
+def ci_job_bodies(workflow_path: Path = CI_WORKFLOW) -> dict[str, str]:
+    """Return job id -> body for top-level jobs in the CI workflow."""
+    if not workflow_path.is_file():
+        return {}
+    bodies: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in _block_body(workflow_path.read_text(encoding="utf-8").splitlines(), "jobs"):
         match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
         if match:
-            ids.add(match.group(1))
-    return ids
+            current = match.group(1)
+            bodies[current] = []
+            continue
+        if current is not None:
+            bodies[current].append(line)
+    return {name: "\n".join(body) for name, body in bodies.items()}
+
+
+def _job_runs_entrypoint(fields: dict[str, str], body: str) -> bool:
+    run_text = _job_run_text(body)
+    if "make" in fields:
+        target = fields["make"].strip("\"'")
+        return re.search(rf"\bmake\s+{re.escape(target)}(?:\s|$)", run_text) is not None
+    shell = fields.get("shell", "").strip().strip("\"'")
+    commands = [command.strip() for command in shell.split("&&") if command.strip()]
+    return bool(commands) and all(command in run_text for command in commands)
+
+
+def _job_run_text(body: str) -> str:
+    """Extract only shell bodies from workflow ``run`` steps."""
+    lines = body.splitlines()
+    commands: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(r"^(\s*)run:\s*(.*?)\s*$", line)
+        if not match:
+            index += 1
+            continue
+        indent = len(match.group(1))
+        value = match.group(2)
+        if value not in {"|", ">", ">-", "|-"}:
+            commands.append(value)
+            index += 1
+            continue
+        index += 1
+        while index < len(lines):
+            nested = lines[index]
+            if nested.strip() and len(nested) - len(nested.lstrip()) <= indent:
+                break
+            commands.append(nested.strip())
+            index += 1
+    return "\n".join(commands)
+
+
+def gate_schema_violations(
+    lines: list[str],
+    targets: set[str],
+    workflow_path: Path = CI_WORKFLOW,
+    *,
+    gates: dict[str, dict[str, str]] | None = None,
+) -> list[str]:
+    """Return fail-closed schema/CI wiring violations for every declared gate."""
+    violations: list[str] = []
+    gates = gates if gates is not None else gate_blocks(lines)
+    if not gates:
+        return ["harness.yml has no gates block"]
+    jobs = ci_job_bodies(workflow_path)
+
+    for name, fields in gates.items():
+        where = f"gate '{name}'"
+        unknown = set(fields) - GATE_FIELDS
+        if unknown:
+            violations.append(f"{where}: unknown field(s) {sorted(unknown)}")
+        entrypoints = [key for key in ("make", "shell") if key in fields]
+        if len(entrypoints) != 1:
+            violations.append(
+                f"{where}: needs exactly one of make/shell, found {entrypoints or 'none'}"
+            )
+        elif entrypoints[0] == "make" and fields["make"].strip("\"'") not in targets:
+            violations.append(
+                f"{where}: make target '{fields['make']}' does not exist in the Makefile"
+            )
+        triggers = _inline_list(fields.get("triggers", ""))
+        if not triggers:
+            violations.append(f"{where}: triggers must be a non-empty inline list")
+        tier = fields.get("tier", "").strip("\"'")
+        if tier not in GATE_TIERS:
+            violations.append(
+                f"{where}: tier must be one of {sorted(GATE_TIERS)}, found {tier or '(missing)'}"
+            )
+        required_on = _inline_list(fields.get("required_on", ""))
+        if not required_on:
+            violations.append(
+                f"{where}: required_on must be a non-empty subset of {sorted(GATE_REQUIRED_ON)}"
+            )
+        else:
+            bad = set(required_on) - GATE_REQUIRED_ON
+            if bad:
+                violations.append(f"{where}: required_on has invalid value(s) {sorted(bad)}")
+        resource = fields.get("resource", "").strip("\"'")
+        if resource not in GATE_RESOURCES:
+            violations.append(
+                f"{where}: resource must be one of {sorted(GATE_RESOURCES)}, found {resource or '(missing)'}"
+            )
+        skip = fields.get("skip", "").strip("\"'")
+        if skip not in GATE_SKIP_POLICIES:
+            violations.append(
+                f"{where}: skip must be one of {sorted(GATE_SKIP_POLICIES)}, found {skip or '(missing)'}"
+            )
+        timeout = fields.get("timeout", "").strip("\"'")
+        if not (timeout.isdigit() and int(timeout) > 0):
+            violations.append(
+                f"{where}: timeout must be a positive integer (minutes), found {timeout or '(missing)'}"
+            )
+
+        evidence = fields.get("evidence", "").strip().strip("\"'")
+        if not evidence:
+            violations.append(f"{where}: evidence must be explicit and non-empty")
+
+        ci_job = fields.get("ci_job", "").strip().strip("\"'")
+        if not ci_job:
+            violations.append(
+                f"{where}: ci_job must be explicit (use 'manual' only for non-change gates)"
+            )
+        elif ci_job in CI_JOB_SENTINELS:
+            if "change" in required_on:
+                violations.append(
+                    f"{where}: change-required gate cannot use ci_job '{ci_job}'"
+                )
+        elif ci_job not in jobs:
+            violations.append(f"{where}: ci_job '{ci_job}' is not a job in {workflow_path}")
+        elif len(entrypoints) == 1 and not _job_runs_entrypoint(fields, jobs[ci_job]):
+            entrypoint = fields[entrypoints[0]].strip("\"'")
+            violations.append(
+                f"{where}: ci_job '{ci_job}' does not execute its {entrypoints[0]} entrypoint '{entrypoint}'"
+            )
+
+        if (
+            "change" in required_on
+            and resource in {"offline", "hosted-service"}
+            and skip == "never"
+            and ci_job in ({""} | CI_JOB_SENTINELS)
+        ):
+            violations.append(
+                f"{where}: change-required {resource} gate with skip=never needs a real CI job"
+            )
+    return violations
 
 
 def check_gate_schema(lines: list[str], targets: set[str]) -> int:
     """Validate every gate entry against the schema documented in harness.yml."""
     gates = gate_blocks(lines)
-    if not gates:
-        fail("harness.yml has no gates block")
-        return 0
-    jobs = ci_job_ids()
-    for name, fields in gates.items():
-        where = f"gate '{name}'"
-        unknown = set(fields) - GATE_FIELDS
-        if unknown:
-            fail(f"{where}: unknown field(s) {sorted(unknown)}")
-        entrypoints = [key for key in ("make", "shell") if key in fields]
-        if len(entrypoints) != 1:
-            fail(f"{where}: needs exactly one of make/shell, found {entrypoints or 'none'}")
-        elif entrypoints[0] == "make" and fields["make"].strip("\"'") not in targets:
-            fail(f"{where}: make target '{fields['make']}' does not exist in the Makefile")
-        triggers = _inline_list(fields.get("triggers", ""))
-        if not triggers:
-            fail(f"{where}: triggers must be a non-empty inline list")
-        tier = fields.get("tier", "").strip("\"'")
-        if tier not in GATE_TIERS:
-            fail(f"{where}: tier must be one of {sorted(GATE_TIERS)}, found {tier or '(missing)'}")
-        required_on = _inline_list(fields.get("required_on", ""))
-        if not required_on:
-            fail(f"{where}: required_on must be a non-empty subset of {sorted(GATE_REQUIRED_ON)}")
-        else:
-            bad = set(required_on) - GATE_REQUIRED_ON
-            if bad:
-                fail(f"{where}: required_on has invalid value(s) {sorted(bad)}")
-        resource = fields.get("resource", "").strip("\"'")
-        if resource not in GATE_RESOURCES:
-            fail(f"{where}: resource must be one of {sorted(GATE_RESOURCES)}, found {resource or '(missing)'}")
-        skip = fields.get("skip", "").strip("\"'")
-        if skip not in GATE_SKIP_POLICIES:
-            fail(f"{where}: skip must be one of {sorted(GATE_SKIP_POLICIES)}, found {skip or '(missing)'}")
-        timeout = fields.get("timeout", "").strip("\"'")
-        if not (timeout.isdigit() and int(timeout) > 0):
-            fail(f"{where}: timeout must be a positive integer (minutes), found {timeout or '(missing)'}")
-        ci_job = fields.get("ci_job", "").strip("\"'")
-        if ci_job and jobs and ci_job not in jobs:
-            fail(f"{where}: ci_job '{ci_job}' is not a job in .github/workflows/ci.yml")
+    for violation in gate_schema_violations(lines, targets, gates=gates):
+        fail(violation)
     return len(gates)
 
 
