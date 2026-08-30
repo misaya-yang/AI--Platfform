@@ -1063,3 +1063,91 @@ def test_runtime_snapshot_rejects_credential_shaped_configuration() -> None:
             request_body=request_body(),
             spec_hash="sha256:spec",
         )
+
+
+def _unpinned_resolution(capability_ids: list[str]) -> dict[str, Any]:
+    resolution = runtime_resolution()
+    resolution["publication"]["policy"]["high_risk_tools"] = True
+    resolution["capabilities"] = [
+        {"capability_type": "native", "resource_id": capability_id, "risk": "high"}
+        for capability_id in capability_ids
+    ]
+    return resolution
+
+
+@pytest.mark.asyncio
+async def test_unpinned_high_risk_warning_map_stays_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARC-01 deliverable 7: the one-shot-warning map must not grow unbounded.
+
+    Capability ids arrive via publication bindings, so the process-local
+    de-duplication map is bounded FIFO; eviction may repeat a warning but
+    never changes authorization behaviour.
+    """
+    from src.api.v1 import agent_runtime as runtime_module
+    from src.api.v1._agent_runtime_routes import snapshot as snapshot_module
+
+    # ARC-01B: the map's real home is the snapshot use-case module; the facade
+    # re-export is only a copy of the reference and is not what _build_snapshot
+    # reads.
+    monkeypatch.setattr(snapshot_module, "_unpinned_high_risk_platform", {})
+
+    class ModelResolver:
+        def resolve(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"id": "qwen3.7-plus", "provider": "dashscope"}
+
+    overflow = runtime_module._UNPINNED_WARNING_CAP + 20
+    capability_ids = [f"cap-{i}" for i in range(overflow)]
+    request = gateway_request(
+        agent_runtime_model_resolver=ModelResolver(),
+        agent_runtime_capability_resolver=_AuthorizedKnowledgeResolver(),
+        agent_runtime_knowledge_resolver=_AuthorizedKnowledgeResolver(),
+    )
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+
+    snapshot = await _build_snapshot(
+        request,
+        _unpinned_resolution(capability_ids),
+        user,
+        channel="api",
+    )
+
+    tracked = snapshot_module._unpinned_high_risk_platform
+    assert len(tracked) == runtime_module._UNPINNED_WARNING_CAP
+    assert f"cap-{overflow - 1}" in tracked  # newest id kept
+    assert "cap-0" not in tracked  # oldest id evicted first
+    # Authorization surface is unaffected: every bound capability is still
+    # projected into the snapshot.
+    assert len(snapshot["capabilities"]) == overflow
+
+
+@pytest.mark.asyncio
+async def test_unpinned_high_risk_warning_is_recorded_once_per_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.api.v1._agent_runtime_routes import snapshot as snapshot_module
+
+    # ARC-01B: patch the map at its real home (see the bounded-map test above).
+    monkeypatch.setattr(snapshot_module, "_unpinned_high_risk_platform", {})
+
+    class ModelResolver:
+        def resolve(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"id": "qwen3.7-plus", "provider": "dashscope"}
+
+    request = gateway_request(
+        agent_runtime_model_resolver=ModelResolver(),
+        agent_runtime_capability_resolver=_AuthorizedKnowledgeResolver(),
+        agent_runtime_knowledge_resolver=_AuthorizedKnowledgeResolver(),
+    )
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+
+    for _ in range(3):
+        await _build_snapshot(
+            request,
+            _unpinned_resolution(["cap-repeat"]),
+            user,
+            channel="api",
+        )
+
+    assert snapshot_module._unpinned_high_risk_platform == {"cap-repeat": None}
