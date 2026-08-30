@@ -98,6 +98,7 @@ import {
   startChatStreamTrace,
   trackChatHistoryRestored,
 } from "@/features/chat/telemetry";
+import { loadDeadApprovalReconciliation } from "../deadApprovalReconciliation";
 
 function buildTextParts(messageId: string, content: string, createdAt: string) {
   if (!content) return [];
@@ -3494,76 +3495,34 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     }
   }, [activeSessionId, clearCancelFallback, messages, requestTaskCancellation, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
 
-  // Reconcile a run whose approval was decided AFTER its SSE consumer had
-  // already exited mid-park (see the ``finally`` that records
-  // ``deadApprovalMessageIdsRef``). The decision wakes the turn server-side but
-  // no client is streaming it, so poll the run to a terminal state and reload
-  // the authoritative append-only history — the same source the session loader
-  // uses — so the continued answer surfaces without a manual reload. Guarded on
-  // the session still being active so a session switch during the poll cannot
-  // clobber the conversation the user has since opened.
   const reconcileDeadApprovalRun = useCallback(
-    async (
-      runId?: string,
-      runtimeThreadId?: string,
-      sessionIdHint?: string | null,
-    ) => {
-      const terminal = new Set(["succeeded", "failed", "cancelled"]);
-      let sessionId = sessionIdHint || undefined;
-      let terminalConfirmed = !runId;
+    async (runId?: string, runtimeThreadId?: string, sessionIdHint?: string | null) => {
       try {
-        if (runId) {
-          for (let attempt = 0; attempt < 40; attempt += 1) {
-            // Runtime terminal events are durable, but the Gateway run ledger
-            // is finalized while consuming the per-turn cursor. A restored
-            // approval has no live consumer, so reconnect it before polling
-            // the ledger; polling alone would leave the run "running".
-            if (runtimeThreadId) {
-              const { getAgentRuntimeV2RunSnapshot } = await import("@/api/agentThreads");
-              await getAgentRuntimeV2RunSnapshot(runtimeThreadId, runId);
-            }
-            const { run } = await getAssistantRunStatus(runId);
-            sessionId = nonEmptyString(run.session_id) || sessionId;
-            if (terminal.has(run.status || "")) {
-              terminalConfirmed = true;
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1500));
-          }
-        }
-        if (!terminalConfirmed) {
+        const result = await loadDeadApprovalReconciliation(
+          runId,
+          runtimeThreadId,
+          sessionIdHint,
+        );
+        if (!result) {
           console.warn("Approval decision did not reach a terminal run state");
           return;
         }
-        if (!sessionId) return;
-        const [history, sessionArtifacts] = await Promise.all([
-          getAssistantSessionHistory(sessionId, 200),
-          getSessionArtifacts(sessionId).catch(() => []),
-        ]);
-        if (activeSessionIdRef.current !== sessionId) return;
-        const targetSession = sessionId;
-        const restored = hydrateMessageArtifacts(
-          history.messages.map((message, index) =>
-            restoreMessageMetadata(message, index, targetSession),
-          ),
-          sessionArtifacts,
-        );
-        setMessages(restored);
-        setArtifacts(sessionArtifacts.map(toArtifact));
-        void hydrateQuizData(restored, setMessages);
-      } catch {
-        console.warn("Reconcile after dead-stream approval decision failed");
-      } finally {
-        // The approval decision endpoint acknowledges the decision before the
-        // kernel necessarily exits the parked turn. Keep the composer locked
-        // until the authoritative run status is terminal, otherwise a second
-        // turn can race the old one and be rejected by the Runtime.
-        if (
-          terminalConfirmed &&
-          (!sessionId || activeSessionIdRef.current === sessionId)
-        ) {
+        if (result.sessionId && activeSessionIdRef.current === result.sessionId) {
+          const restored = hydrateMessageArtifacts(
+            result.historyMessages.map((message, index) =>
+              restoreMessageMetadata(message, index, result.sessionId as string),
+            ),
+            result.sessionArtifacts,
+          );
+          setMessages(restored);
+          setArtifacts(result.sessionArtifacts.map(toArtifact));
+          void hydrateQuizData(restored, setMessages);
+        }
+        if (!result.sessionId || activeSessionIdRef.current === result.sessionId) {
           setServerRunBlocking(false);
         }
+      } catch {
+        console.warn("Reconcile after dead-stream approval decision failed");
       }
     },
     [],
