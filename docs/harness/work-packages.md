@@ -180,15 +180,46 @@ For Docker, browser, or provider work, the receipt also records Compose owner, e
 actual service/image revision, database revision, model/provider identity, and artifact manifest.
 It never records secrets, prompt contents, raw credentials, DSNs, or sensitive tool arguments.
 
-## 8. Applying this to the queued architecture convergence
+## 8. Applying this to the architecture convergence program
 
 [`platform-architecture-convergence-prd-2026-08.md`](../plans/platform-architecture-convergence-prd-2026-08.md)
-is queued behind the RAG acceptance and merge. When it starts:
+was activated on 2026-08-29 after the KB RAG upgrade merged, on branch
+`platform-arch-convergence-2026-08` from the clean post-RAG base `336851c1`,
+governed by [`ADR-008`](../architecture/ADR-008-bounded-contexts-no-new-services.md)
+(Accepted). Its rules of engagement:
 
-- one primary session creates or adopts exactly one authoritative program;
-- the program uses one architecture worktree based on the clean post-RAG `main`;
-- its ARC packages execute sequentially in that worktree;
+- one primary session owns exactly one authoritative program; all commits are
+  performed by that session;
+- the program executes in the main working directory with mutually exclusive
+  owned paths per package;
 - read-only specialists may review architecture, database, security, tests, and runtime evidence;
 - Docker, Rust builds, migrations, E2E, and provider calls remain globally serialized;
 - no package is called complete until the primary session has integrated it with everything before
   it.
+
+### Registered packages
+
+Truthful per-package fields (owned paths, gates, rollback, stop conditions) live in the durable
+machine location [`deploy/runbooks/platform-architecture-convergence/work-packages.yml`](../../deploy/runbooks/platform-architecture-convergence/work-packages.yml);
+the table below is an index, not a second source of truth.
+
+| Package | Result (short) | State at registration |
+| --- | --- | --- |
+| ARC-00A | Fact + contract freeze, successor ADR, single program, terminal ledgers | in_progress (user-directed parallel) |
+| ARC-00B | Trustworthy gates (type-check, OpenAPI split, import boundary, gate schema/CI, hygiene/LOC) | in_progress (user-directed parallel) |
+| ARC-00C | Rust build/distribution economics; absorbs PPR-01 | in_progress (user-directed parallel) |
+| ARC-01 | Assistant Gateway API modularization | in_progress (user-directed parallel) |
+| ARC-01B | agent_runtime.py split by use case | queued |
+| ARC-02 | Runtime control/model planes, self-HTTP removal, ResolvedAgentLaunchV1, Capability V2 | in_progress (user-directed parallel) |
+| ARC-02B | Runtime/Worker HTTP boundary split, zero wire drift | in_progress (user-directed parallel) |
+| ARC-03 | Single migration authority + per-service PostgreSQL roles | in_progress (user-directed parallel) |
+| ARC-04 | Shrink ai-gateway-core behind I/O-free contracts layer | in_progress (user-directed parallel) |
+| ARC-05 | Durable jobs, health, service identity, trace | queued |
+| ARC-06 | Compact/Scale modes, admin architecture status, topology guards | queued |
+| ARC-07 | Repository quality and evidence governance | queued |
+| ARC-08 | Release compatibility matrix, final regression, rollback, doc retirement | queued |
+
+Execution deviation on record: §1/§6 allow only one `in_progress` package in a single-owner
+architecture program. The user explicitly directed same-directory parallel execution of the
+packages marked above, under mutually exclusive owned paths, with commits reserved to the primary
+session. The sequential rule governs every package not covered by that direction.

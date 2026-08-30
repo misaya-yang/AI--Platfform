@@ -1,0 +1,126 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "active",
+  "goal": "Converge the platform onto the ADR-008 accepted shape — three bounded contexts, polyglot coexistence, no new resident services, same-database role separation — with trustworthy gates, truthful ledgers, frozen facts/contracts, and zero public-contract drift.",
+  "prd": "docs/plans/platform-architecture-convergence-prd-2026-08.md",
+  "adr": "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
+  "cycle": [
+    "observe",
+    "freeze",
+    "act",
+    "verify_direct",
+    "review",
+    "repair",
+    "integrate_direct",
+    "decide"
+  ],
+  "active_phase": "ARC-00A",
+  "active_feature": null,
+  "iteration": 1,
+  "max_iterations": 10,
+  "base_sha": "336851c1",
+  "execution_model": "PRD §8 plans sequential single-owner waves. On 2026-08-29 the user explicitly directed same-directory parallel execution of Wave-1+ packages under mutually exclusive owned paths, with all commits performed by the primary session. Package states below are recorded truthfully under that deviation.",
+  "last_result": "Program activated 2026-08-29. ARC-00A produced the 2026-08-post-rag baseline set, contract freeze, ADR-008 (Accepted), FRC terminal closeout, PPR supersession with per-phase disposition, and this runbook.",
+  "next_action": "Complete ARC-00A final verification (baseline regeneration at settled tree, harness-check, JSON validation) and hand to the primary session for themed commits; parallel packages ARC-00B/00C/01/02/02B/03/04 continue under their own agents.",
+  "blockers": [],
+  "confirmation": null,
+  "phases": [
+    {
+      "id": "ARC-00A",
+      "result": "Fact + contract freeze, successor ADR, single authoritative program, terminal/superseded ledgers.",
+      "status": "in_progress",
+      "owner": "arc-00a-agent",
+      "evidence": [
+        "docs/architecture/baselines/2026-08-post-rag/*.json",
+        "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
+        "deploy/runbooks/agent-runtime-full-rust-cutover/loop-state.json",
+        "deploy/runbooks/platform-plane-restructure/loop-state.json"
+      ]
+    },
+    {
+      "id": "ARC-00B",
+      "result": "Trustworthy gates: real type-check, offline+live OpenAPI split, static import boundary, gate schema/selector/CI, hygiene + LOC no-growth.",
+      "status": "in_progress",
+      "owner": "arc-00b-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-00C",
+      "result": "Rust build/distribution economics: per-crate artifact identity, build/update scripts, shared locks, baseline registration; absorbs PPR-01.",
+      "status": "in_progress",
+      "owner": "arc-00c-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-01",
+      "result": "Assistant Gateway API modularization (src/api/v1/assistant.py split) with OpenAPI/SSE/import/error-contract parity.",
+      "status": "in_progress",
+      "owner": "arc-01-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-01B",
+      "result": "src/services/agent_runtime/agent_runtime.py split by use case.",
+      "status": "queued",
+      "owner": null,
+      "evidence": []
+    },
+    {
+      "id": "ARC-02",
+      "result": "Runtime control/model plane modularization, self-HTTP removal, ResolvedAgentLaunchV1, Capability V2 convergence, Rust HTTP boundary.",
+      "status": "in_progress",
+      "owner": "arc-02-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-02B",
+      "result": "Runtime/Worker HTTP boundary module split with zero wire-protocol drift.",
+      "status": "in_progress",
+      "owner": "arc-02b-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-03",
+      "result": "Single migration authority and per-service PostgreSQL roles (runner/ledger/schema convergence, then roles/grants/adoption).",
+      "status": "in_progress",
+      "owner": "arc-03-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-04",
+      "result": "Shrink ai-gateway-core, establish the I/O-free contracts layer, allowlist gate, inventory report.",
+      "status": "in_progress",
+      "owner": "arc-04-agent",
+      "evidence": []
+    },
+    {
+      "id": "ARC-05",
+      "result": "Durable long jobs, dependency health, service identity, end-to-end trace.",
+      "status": "queued",
+      "owner": null,
+      "evidence": []
+    },
+    {
+      "id": "ARC-06",
+      "result": "Compact/Scale deployment modes, admin architecture-status page, topology ownership.",
+      "status": "queued",
+      "owner": null,
+      "evidence": []
+    },
+    {
+      "id": "ARC-07",
+      "result": "Repository quality and evidence governance (historical backlog cleanup, rule re-verification).",
+      "status": "queued",
+      "owner": null,
+      "evidence": []
+    },
+    {
+      "id": "ARC-08",
+      "result": "Unified release compatibility matrix, final regression, rollback, fresh-environment proof; retires superseded docs.",
+      "status": "queued",
+      "owner": null,
+      "evidence": []
+    }
+  ],
+  "features": []
+}

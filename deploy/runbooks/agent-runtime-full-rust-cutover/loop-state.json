@@ -1,6 +1,6 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
-  "lifecycle": "closeout_only",
+  "lifecycle": "terminal",
   "goal": "Migrate the complete Assistant execution surface to one Rust Agent Runtime plus a Rust capability worker, preserve every public product contract, and delete the Python AgentLoop only after parity evidence passes.",
   "cycle": [
     "observe",
@@ -12,8 +12,8 @@
   "active_feature": null,
   "iteration": 1,
   "max_iterations": 5,
-  "last_result": "Full Rust cutover, authenticated product acceptance, serial release gate, and digest-pinned current-to-frozen-to-current rollback rehearsal passed on main; final evidence commit is pending.",
-  "next_action": "Ledger closeout only: independently reconcile the existing final report, rollback receipt and main/origin SHA, then mark FRC-06 terminal. Do not resume implementation from this program.",
+  "last_result": "Full Rust cutover, authenticated product acceptance, serial release gate, and digest-pinned current-to-frozen-to-current rollback rehearsal passed on main. Closeout reconciliation completed 2026-08-29 by ARC-00A: final report and rollback receipt exist and agree (reports/agent-runtime/full-rust-cutover-final-2026-08-25.md, rollback-rehearsal-latest.json completed_at 2026-08-25T13:06Z); FRC-06 marked done.",
+  "next_action": "Program terminal. Do not resume implementation from this program; architecture follow-ups are owned by the platform-architecture-convergence program (ADR-008).",
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -101,13 +101,13 @@
       "depends_on": [
         "FRC-05"
       ],
-      "status": "working",
+      "status": "done",
       "evidence": [
         "reports/agent-runtime/full-rust-cutover-final-2026-08-25.md",
         "reports/agent-runtime/rollback-rehearsal-latest.json",
         "tests/harness/test_agent_runtime_rollback_rehearsal_contract.py"
       ],
-      "review": "required"
+      "review": "approved"
     }
   ],
   "features": [
@@ -179,7 +179,7 @@
         "Build both locked Rust images serially, run fresh/upgrade/idempotent migrations, all test gates, three live Agent Eval cohorts, and the complete browser/fault matrix.",
         "Deploy new, roll back to the frozen pre-delete bundle without schema downgrade, redeploy new, then verify exact remote SHA and one clean main worktree after merge."
       ],
-      "passes": false
+      "passes": true
     }
   ]
 }
