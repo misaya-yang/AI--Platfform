@@ -124,6 +124,8 @@ def test_runtime_manifests_run_authority_before_applications() -> None:
     assert 'entrypoint: ["python", "-m", "database.authority"]' in compose
     assert 'command: ["migrate"]' in compose
     assert 'GATEWAY_DATABASE__AUTO_INIT: "false"' in compose
+    runtime = compose.split("  agent-runtime:", 1)[1]
+    assert "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL" in runtime
     assert compose.count("condition: service_completed_successfully") >= 6
     assert "profiles:" not in compose.split("  migrate:", 1)[1].split("  tempo:", 1)[0]
     volume_init = compose.split("  gateway-init:", 1)[1].split("  gateway:", 1)[0]
