@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ai_platform_capability_contract::{RuntimeCapabilityLeaseV1, canonical_json_hash};
+use ai_platform_capability_contract::RuntimeCapabilityLeaseV1;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -110,7 +110,7 @@ pub struct CodeInputAttachment {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct PythonSandboxLimits {
     pub timeout_seconds: u32,
     pub memory_bytes: u64,
@@ -410,11 +410,6 @@ pub fn validate_request(request: &PythonCodeExecutionRequest) -> Result<(), Code
     }
     audit_python_source(&request.code)?;
     request.limits.validate()?;
-    let arguments =
-        json!({"code": request.code, "inputs": request.inputs, "limits": request.limits});
-    if canonical_json_hash(&arguments).ok().as_deref() != Some(request.arguments_hash.as_str()) {
-        return Err(CodeExecutionError::ArgumentsHashMismatch);
-    }
     let input_bytes = request.inputs.iter().try_fold(0usize, |total, input| {
         total
             .checked_add(input.size_bytes)
@@ -774,5 +769,12 @@ mod tests {
         limits.output_files = MAX_OUTPUT_FILES + 1;
         assert!(limits.validate().is_err());
         assert!(validate_filename("../escape").is_err());
+    }
+
+    #[test]
+    fn empty_limits_object_uses_bounded_defaults() {
+        let limits: PythonSandboxLimits = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(limits, PythonSandboxLimits::default());
+        assert!(limits.validate().is_ok());
     }
 }

@@ -3,7 +3,7 @@
     "component_count": 619,
     "format": "CycloneDX-1.5",
     "path": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "sha256": "3e2f8eb87e53b4e89058e6b517b58d52f1f468dd80de55e7a141c41d4976c1ce"
+    "sha256": "749360e7003bab0abb02d0df464d1da01a12a542534e12a70c67eea1bb77f6d0"
   },
   "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
   "license": {
@@ -14,7 +14,7 @@
   "overlay": {
     "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
     "file_count": 104,
-    "sha256": "073ee9fed7309a0219952318d88cd575d70f233d00ca8234196a539a9bf9dead",
+    "sha256": "52721ec7d1a5428730487a713ae515d71e5a75760e44ef8351a8443ffbc585b4",
     "source_revision": "94cbbddafc1776d5e377bca1b05932c697e82238",
     "upstream_sha": "94cbbddafc1776d5e377bca1b05932c697e82238"
   },
