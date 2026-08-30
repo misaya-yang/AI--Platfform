@@ -1,0 +1,407 @@
+{
+  "base_git_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
+  "baseline_id": "2026-08-post-rag",
+  "bounded_contexts": {
+    "agent-execution": {
+      "decision": "ADR-006, ADR-007, successor ADR-008",
+      "definition": "Agent Runtime + Capability Worker (Rust); one version unit, two isolated processes."
+    },
+    "gateway-control": {
+      "decision": "successor ADR-008 + PRD platform-architecture-convergence §1",
+      "definition": "Public API, auth, tenant, model routing, quota, billing, admin plane (Python)."
+    },
+    "infrastructure": {
+      "decision": "Shared physical infrastructure with logical namespaces, not ownerless buckets (PRD §5).",
+      "definition": "PostgreSQL, Redis, Qdrant, object storage, observability stores."
+    },
+    "knowledge": {
+      "decision": "successor ADR-008; knowledge schema + Qdrant dataset collection contract",
+      "definition": "Knowledge API + Knowledge Worker (Python); one code unit, two runtime roles."
+    },
+    "product-surface": {
+      "decision": "PRD §5",
+      "definition": "Frontend console; no persistent data of its own."
+    }
+  },
+  "compose_files": {
+    "docker-compose.build.yml": {
+      "exists": true,
+      "role": "override/build overlay — not an additional service set",
+      "services": [
+        "frontend",
+        "gateway",
+        "knowledge-service",
+        "migrate"
+      ]
+    },
+    "docker-compose.capability.yml": {
+      "exists": true,
+      "role": "explicitly empty local-live capability override (opt-in Docker socket trust)",
+      "services": []
+    },
+    "docker-compose.dev.yml": {
+      "exists": true,
+      "role": "override/build overlay — not an additional service set",
+      "services": [
+        "gateway",
+        "knowledge-service",
+        "knowledge-worker"
+      ]
+    },
+    "docker-compose.kbms.yml": {
+      "exists": true,
+      "role": "override/build overlay — not an additional service set",
+      "services": [
+        "postgres",
+        "qdrant",
+        "redis"
+      ]
+    },
+    "docker-compose.yml": {
+      "exists": true,
+      "role": "base runtime topology",
+      "services": [
+        "agent-capability-worker",
+        "agent-runtime",
+        "frontend",
+        "gateway",
+        "gateway-init",
+        "knowledge-service",
+        "knowledge-worker",
+        "migrate",
+        "postgres",
+        "qdrant",
+        "redis",
+        "tempo"
+      ]
+    }
+  },
+  "gateway_routes": {
+    "available": true,
+    "info_version": "2.0.0",
+    "openapi_version": "3.1.0",
+    "operation_count": 392,
+    "operation_id_count": 364,
+    "path_count": 296,
+    "route_authority": "published snapshot; live diff via tests/integration/test_gateway_openapi_contract.py",
+    "sha256": "a202f10e75f9d5afaaaae7476ac65fc07af7e13f7ef9107232e1eee3a0a23ed7",
+    "source": "sdk/openapi.json"
+  },
+  "generator": "scripts/inventory/generate_baselines.py",
+  "knowledge_routes": {
+    "note": "Decorators counted before prefix assembly; knowledge-service mounts its routers under /api/v1 (see apps/knowledge-service/src/knowledge_service/main.py).",
+    "route_decorator_count": 84,
+    "route_file_count": 5,
+    "route_files": [
+      "apps/knowledge-service/src/knowledge_service/api/routes/bm25_v2.py",
+      "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py",
+      "apps/knowledge-service/src/knowledge_service/api/routes/embedding_migration.py",
+      "apps/knowledge-service/src/knowledge_service/api/routes/eval.py",
+      "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py"
+    ],
+    "source": "static AST scan of apps/knowledge-service/src/knowledge_service/api/**"
+  },
+  "methodology": [
+    "Compose services parsed structurally from docker-compose*.yml by scripts/inventory/service_topology.py.",
+    "Gateway route surface taken from the published snapshot sdk/openapi.json; it is the contract authority frozen in contract-freeze.json.",
+    "Knowledge route surface is a static AST decorator scan; it excludes mounted prefixes but is stable for drift comparison.",
+    "scale_support values are current facts per PRD §5.1, not promises."
+  ],
+  "rust_overlay_identity": {
+    "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
+    "file_count": 85,
+    "schema_version": "ai-platform/agent-runtime-overlay/v1",
+    "sha256": "c2f4e4c2ef8e27893b51f6ca758fd97fd25a21a25f256f3c267460777676410c",
+    "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
+    "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
+  },
+  "schema": "ai-gateway/baseline/service-topology/v1",
+  "services": [
+    {
+      "bounded_context": "agent-execution",
+      "container_name": "ai-gateway-agent-capability-worker",
+      "evidence": [
+        "database/migrations/096_agent_capability_executions.sql",
+        "docker-compose.yml:agent-capability-worker",
+        "rust/agent-runtime-overlay/manifest.json"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "readiness checks execution store; per-capability downstream health (ARC-05 target)",
+      "image_artifact": "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-c2f4e4c2ef8e}",
+      "notes": "Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+      "optional_deps": [
+        "gateway brokers",
+        "knowledge-service"
+      ],
+      "process_role": "Rust capability executor (tool workspaces, provider-free execution)",
+      "required_deps": [
+        "agent-runtime",
+        "postgres"
+      ],
+      "scale_support": "conditional: durable claim/recovery/cancel/side-effect-unknown proof required first (PRD §5.1)",
+      "service_id": "agent-capability-worker",
+      "state_owner": "agent_capability_executions + event ledger (migration 096)"
+    },
+    {
+      "bounded_context": "agent-execution",
+      "container_name": "ai-gateway-agent-runtime",
+      "evidence": [
+        "docker-compose.yml:agent-runtime",
+        "docs/architecture/ADR-006-agent-runtime-single-kernel.md",
+        "docs/architecture/ADR-007-agent-runtime-data-boundaries.md",
+        "rust/agent-runtime-overlay/manifest.json"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "Runtime readiness reports kernel+store; optional capability loss must not unready it (ARC-05 target)",
+      "image_artifact": "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-c2f4e4c2ef8e}",
+      "notes": "Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+      "optional_deps": [
+        "agent-capability-worker"
+      ],
+      "process_role": "Rust Agent Runtime kernel (Thread/Turn/Item, leases, snapshots)",
+      "required_deps": [
+        "gateway (private model plane)",
+        "postgres"
+      ],
+      "scale_support": "currently-no: thread affinity and cross-instance event notification unsolved (PRD §5.1)",
+      "service_id": "agent-runtime",
+      "state_owner": "assistant_runtime_threads/items/snapshots/leases (ADR-007)"
+    },
+    {
+      "bounded_context": "product-surface",
+      "container_name": "ai-gateway-frontend",
+      "evidence": [
+        "docker-compose.yml:frontend"
+      ],
+      "exposure": "public",
+      "fixed_container_name": true,
+      "health_contract": "static asset delivery; no readiness probe of its own",
+      "image_artifact": "${FRONTEND_IMAGE:-ghcr.io/misaya-yang/ai-gateway-web:2.0.0}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "static console (nginx)",
+      "required_deps": [
+        "gateway"
+      ],
+      "scale_support": "yes (stateless)",
+      "service_id": "frontend",
+      "state_owner": "none"
+    },
+    {
+      "bounded_context": "gateway-control",
+      "container_name": "ai-gateway-backend",
+      "evidence": [
+        "docker-compose.yml:gateway",
+        "src/api/router.py",
+        "src/main.py"
+      ],
+      "exposure": "public",
+      "fixed_container_name": true,
+      "health_contract": "/health/live + /health/ready (src/api/v1/health.py)",
+      "image_artifact": "${GATEWAY_IMAGE:-ghcr.io/misaya-yang/ai-gateway:2.0.0}",
+      "notes": "Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+      "optional_deps": [
+        "agent-runtime",
+        "knowledge-service",
+        "qdrant (via knowledge proxy)"
+      ],
+      "process_role": "FastAPI application (src/main.py)",
+      "required_deps": [
+        "postgres",
+        "redis"
+      ],
+      "scale_support": "currently-no: background scheduler has no leader lease; in-process SSE/thread ownership (PRD §5.1)",
+      "service_id": "gateway",
+      "state_owner": "gateway schema objects, sessions, quota/billing, assistant facades"
+    },
+    {
+      "bounded_context": "gateway-control",
+      "container_name": "ai-gateway-init",
+      "evidence": [
+        "docker-compose.yml:gateway-init"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "runs to completion before gateway",
+      "image_artifact": "${POSTGRES_IMAGE:-postgres:16-alpine}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "one-shot init job (not a long-running service)",
+      "required_deps": [
+        "postgres"
+      ],
+      "scale_support": "no",
+      "service_id": "gateway-init",
+      "state_owner": "none"
+    },
+    {
+      "bounded_context": "knowledge",
+      "container_name": "ai-gateway-knowledge-service",
+      "evidence": [
+        "apps/knowledge-service/src/knowledge_service/main.py",
+        "docker-compose.yml:knowledge-service"
+      ],
+      "exposure": "private (Gateway-proxied public surface)",
+      "fixed_container_name": true,
+      "health_contract": "/health endpoints in knowledge_service/api",
+      "image_artifact": "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}",
+      "notes": "Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+      "optional_deps": [
+        "object storage",
+        "redis"
+      ],
+      "process_role": "Knowledge API role of knowledge_service (KNOWLEDGE_RUNTIME_ROLE selects api/worker/all)",
+      "required_deps": [
+        "postgres",
+        "qdrant"
+      ],
+      "scale_support": "yes for API role (stateless request handling)",
+      "service_id": "knowledge-service",
+      "state_owner": "knowledge schema objects; Qdrant dataset collection contract"
+    },
+    {
+      "bounded_context": "knowledge",
+      "container_name": "ai-gateway-knowledge-worker",
+      "evidence": [
+        "apps/knowledge-service/src/knowledge_service/services/knowledge/worker.py",
+        "docker-compose.yml:knowledge-worker"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "worker loop liveness; job claim/recovery semantics are ARC-05 targets",
+      "image_artifact": "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}",
+      "notes": "Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+      "optional_deps": [
+        "embedding providers",
+        "object storage"
+      ],
+      "process_role": "Knowledge Worker role of the same knowledge_service code unit (no separate schema)",
+      "required_deps": [
+        "postgres",
+        "qdrant"
+      ],
+      "scale_support": "conditional: durable claim/generation recovery must be proven (PRD §5.1)",
+      "service_id": "knowledge-worker",
+      "state_owner": "same knowledge domain as knowledge-service; no separate schema"
+    },
+    {
+      "bounded_context": "agent-execution",
+      "evidence": [
+        "apps/local-node/",
+        "database/migrations/098_local_node_control_plane.sql"
+      ],
+      "exposure": "host-local (connects outbound to gateway)",
+      "health_contract": "local doctor/identity checks (apps/local-node/src/local_node/doctor.py)",
+      "image_artifact": null,
+      "notes": "Not a Compose service: runs on the user's machine; compose files define no local-node entry.",
+      "optional_deps": [],
+      "process_role": "host-side daemon (apps/local-node), started by the end user, not by Compose",
+      "required_deps": [
+        "gateway"
+      ],
+      "scale_support": "per-user-host by design",
+      "service_id": "local-node",
+      "state_owner": "local ledger/outbox under user control (migration 098)"
+    },
+    {
+      "bounded_context": "infrastructure",
+      "container_name": "ai-gateway-migrate",
+      "evidence": [
+        "database/migrations/",
+        "database/schema.sql",
+        "docker-compose.yml:migrate"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "runs to completion; failure blocks dependent services",
+      "image_artifact": "${MIGRATE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "one-shot migration job (not a long-running service)",
+      "required_deps": [
+        "postgres"
+      ],
+      "scale_support": "no (single migrator authority is an ARC-03 target)",
+      "service_id": "migrate",
+      "state_owner": "database/migrations ledger"
+    },
+    {
+      "bounded_context": "infrastructure",
+      "container_name": "ai-gateway-pg",
+      "evidence": [
+        "database/schema.sql",
+        "docker-compose.yml:postgres"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "pg_isready via compose healthcheck",
+      "image_artifact": "${POSTGRES_IMAGE:-postgres:16-alpine}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "PostgreSQL 16 (single cluster; per-service schema/role split is ARC-03)",
+      "required_deps": [],
+      "scale_support": "vertical only in this program (no physical split planned)",
+      "service_id": "postgres",
+      "state_owner": "all relational state; schema.sql + migrations are the DDL authority"
+    },
+    {
+      "bounded_context": "infrastructure",
+      "container_name": "ai-gateway-qdrant",
+      "evidence": [
+        "docker-compose.yml:qdrant"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "compose healthcheck",
+      "image_artifact": "${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "Qdrant vector store shared by knowledge dataset collections and agent memory vectors",
+      "required_deps": [],
+      "scale_support": "single instance; collection namespaces owned per data-access-inventory.json",
+      "service_id": "qdrant",
+      "state_owner": "dataset vectors (knowledge), agent memory vectors (gateway data governance)"
+    },
+    {
+      "bounded_context": "infrastructure",
+      "container_name": "ai-gateway-redis",
+      "evidence": [
+        "docker-compose.yml:redis"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "compose healthcheck",
+      "image_artifact": "${REDIS_IMAGE:-redis:7-alpine}",
+      "notes": "",
+      "optional_deps": [],
+      "process_role": "Redis 7 (caches, rate-limit counters, session/task caches)",
+      "required_deps": [],
+      "scale_support": "single instance; keyspace namespaced per owner (see data-access-inventory.json)",
+      "service_id": "redis",
+      "state_owner": "cache only: sessions, service/task caches, rate limits; no durable system of record"
+    },
+    {
+      "bounded_context": "infrastructure",
+      "container_name": "ai-gateway-tempo",
+      "evidence": [
+        "docker-compose.yml:tempo"
+      ],
+      "exposure": "private",
+      "fixed_container_name": true,
+      "health_contract": "compose healthcheck",
+      "image_artifact": "${TEMPO_IMAGE:-grafana/tempo:2.5.0}",
+      "notes": "",
+      "optional_deps": [
+        "gateway",
+        "knowledge-service"
+      ],
+      "process_role": "Grafana Tempo trace store (observability)",
+      "required_deps": [],
+      "scale_support": "single instance",
+      "service_id": "tempo",
+      "state_owner": "trace retention only"
+    }
+  ]
+}

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ast
 import re
-from pathlib import Path
 
 from _common import REPO_ROOT, base_envelope, walk_files
 

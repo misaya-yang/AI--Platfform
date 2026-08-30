@@ -18,18 +18,60 @@ from __future__ import annotations
 
 import ast
 import re
-from pathlib import Path
 
 from _common import MODULE_UNITS, REPO_ROOT, base_envelope, unit_for_path, walk_files
 
-UNIT_DIRS = ("src", "apps/knowledge-service", "apps/local-node", "packages/ai-gateway-core", "sdk/python")
+UNIT_DIRS = (
+    "src",
+    "apps/knowledge-service",
+    "apps/local-node",
+    "packages/ai-gateway-core",
+    "packages/ai-gateway-contracts",
+    "sdk/python",
+)
 
+# ai-gateway-contracts is the I/O-free protocol layer created by ARC-04: every
+# Python unit may consume it, and ai-gateway-core may re-export it as shims.
 ALLOWED_EDGES = {
     ("gateway", "ai-gateway-core"),
     ("knowledge-service", "ai-gateway-core"),
     ("local-node", "ai-gateway-core"),
     ("sdk-python", "ai-gateway-core"),
+    ("gateway", "ai-gateway-contracts"),
+    ("knowledge-service", "ai-gateway-contracts"),
+    ("local-node", "ai-gateway-contracts"),
+    ("sdk-python", "ai-gateway-contracts"),
+    ("ai-gateway-core", "ai-gateway-contracts"),
 }
+
+
+def _parse_dependencies(text: str) -> list[str]:
+    """Extract the [project] dependencies list from pyproject.toml text."""
+    deps: list[str] = []
+    in_deps = False
+
+    def add_items(fragment: str) -> None:
+        for part in fragment.split(","):
+            item = part.split("#", 1)[0].strip().strip("\"'")
+            if item:
+                deps.append(item)
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        inline = re.match(r"^dependencies\s*=\s*\[(.*)\]\s*(?:#.*)?$", stripped)
+        if inline:
+            # Single-line form, e.g. `dependencies = []`.
+            add_items(inline.group(1))
+            continue
+        if re.match(r"^dependencies\s*=\s*\[", stripped):
+            in_deps = True
+            continue
+        if in_deps:
+            if stripped.startswith("]"):
+                in_deps = False
+                continue
+            add_items(stripped.strip(", "))
+    return sorted(deps)
 
 
 def declared_dependencies() -> dict[str, dict]:
@@ -38,6 +80,7 @@ def declared_dependencies() -> dict[str, dict]:
     pyprojects = {
         "gateway (root)": REPO_ROOT / "pyproject.toml",
         "ai-gateway-core": REPO_ROOT / "packages" / "ai-gateway-core" / "pyproject.toml",
+        "ai-gateway-contracts": REPO_ROOT / "packages" / "ai-gateway-contracts" / "pyproject.toml",
         "knowledge-service": REPO_ROOT / "apps" / "knowledge-service" / "pyproject.toml",
         "local-node": REPO_ROOT / "apps" / "local-node" / "pyproject.toml",
         "sdk-python": REPO_ROOT / "sdk" / "python" / "pyproject.toml",
@@ -47,20 +90,7 @@ def declared_dependencies() -> dict[str, dict]:
             result[name] = {"pyproject": str(path.relative_to(REPO_ROOT)), "found": False}
             continue
         text = path.read_text(encoding="utf-8")
-        deps: list[str] = []
-        in_deps = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if re.match(r"^dependencies\s*=\s*\[", stripped):
-                in_deps = True
-                continue
-            if in_deps:
-                if stripped.startswith("]"):
-                    in_deps = False
-                    continue
-                item = stripped.strip(", ").strip("\"'")
-                if item and not item.startswith("#"):
-                    deps.append(item)
+        deps = _parse_dependencies(text)
         workspace_sources = sorted(re.findall(r"^([\w\-]+)\s*=\s*\{\s*workspace\s*=\s*true", text, re.MULTILINE))
         result[name] = {
             "pyproject": str(path.relative_to(REPO_ROOT)),
@@ -131,6 +161,7 @@ def build() -> dict:
                 ("knowledge-service", "apps/knowledge-service/", "Knowledge API + worker roles"),
                 ("local-node", "apps/local-node/", "Host-side Local Node daemon"),
                 ("ai-gateway-core", "packages/ai-gateway-core/", "Shared primitives package"),
+                ("ai-gateway-contracts", "packages/ai-gateway-contracts/", "I/O-free cross-service protocol contracts (ARC-04)"),
                 ("sdk-python", "sdk/python/", "Published Python SDK"),
             )
         },

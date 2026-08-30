@@ -56,6 +56,7 @@ PYTHON_UNITS = {
     "apps/knowledge-service": "knowledge-service",
     "apps/local-node": "local-node",
     "packages/ai-gateway-core": "ai-gateway-core",
+    "packages/ai-gateway-contracts": "ai-gateway-contracts",
     "sdk/python": "sdk-python",
     "scripts": "scripts",
     "tests": "tests",
@@ -68,6 +69,7 @@ MODULE_UNITS = {
     "knowledge_service": "knowledge-service",
     "local_node": "local-node",
     "ai_gateway_core": "ai-gateway-core",
+    "ai_gateway_contracts": "ai-gateway-contracts",
 }
 
 
@@ -84,9 +86,13 @@ def git_head_sha() -> str:
 
 
 def walk_files(suffixes: tuple[str, ...], roots: tuple[str, ...] | None = None):
-    """Yield repo-relative paths with the given suffixes, pruned and sorted."""
+    """Yield repo-relative paths with the given suffixes, pruned and sorted.
+
+    Paths are relative to the repository root so baselines are portable and
+    never embed the checkout location or the user name.
+    """
     scan_roots = [REPO_ROOT / r for r in (roots or tuple(PYTHON_UNITS))]
-    found: list[Path] = []
+    found: set[Path] = set()
     for root in scan_roots:
         if not root.is_dir():
             continue
@@ -104,8 +110,8 @@ def walk_files(suffixes: tuple[str, ...], roots: tuple[str, ...] | None = None):
                     if entry.name not in PRUNED_DIRS:
                         stack.append(entry)
                 elif entry.suffix in suffixes:
-                    found.append(entry)
-    return sorted(set(found))
+                    found.add(entry.relative_to(REPO_ROOT))
+    return sorted(found)
 
 
 def unit_for_path(path: Path) -> str:

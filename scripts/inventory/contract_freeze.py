@@ -27,7 +27,6 @@ file claims those checks passed.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from _common import REPO_ROOT, base_envelope, canonical_sha256, sha256_file
 from service_topology import parse_compose_services
