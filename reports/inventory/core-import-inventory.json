@@ -1,8 +1,9 @@
 {
-  "schema_version": "arc04-core-inventory/v1",
-  "generated_at": "2026-08-30T03:07:41Z",
-  "base_sha": "336851c107c659342ec79aa3aa298de77b1edc68",
+  "schema_version": "arc04-core-inventory/v2",
+  "generated_at": "2026-08-30T03:49:39Z",
+  "base_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
   "core_package_dir": "packages/ai-gateway-core/src/ai_gateway_core",
+  "contracts_package_dir": "packages/ai-gateway-contracts/src/ai_gateway_contracts",
   "modules": {
     "ai_gateway_core": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/__init__.py",
@@ -86,6 +87,7 @@
           "src/services/agent_runtime_cleanup.py"
         ],
         "tests": [
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py",
           "tests/api/test_agent_publish_api.py",
           "tests/api/test_agent_runtime_cutover.py",
           "tests/api/test_agent_runtime_envelope.py",
@@ -101,6 +103,10 @@
         ],
         "scripts": [
           "scripts/harness/agent_runtime_text_gate.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/agent_version_candidate.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
         ]
       }
     },
@@ -140,40 +146,27 @@
     "ai_gateway_core.agents.runtime": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime.py",
       "kind": "module",
-      "loc": 524,
+      "loc": 52,
       "direct_imports": [
         "__future__",
-        "ai_gateway_core",
-        "copy",
-        "dataclasses",
-        "hashlib",
-        "hmac",
-        "json",
-        "re",
-        "secrets",
-        "time",
-        "typing"
+        "ai_gateway_contracts"
       ],
       "io_deps": [],
       "io_free": true,
-      "contracts_shim": false,
+      "contracts_shim": true,
       "consumer_owners": {}
     },
     "ai_gateway_core.agents.runtime_lease": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime_lease.py",
       "kind": "module",
-      "loc": 108,
+      "loc": 38,
       "direct_imports": [
         "__future__",
-        "dataclasses",
-        "hashlib",
-        "hmac",
-        "re",
-        "typing"
+        "ai_gateway_contracts"
       ],
       "io_deps": [],
       "io_free": true,
-      "contracts_shim": false,
+      "contracts_shim": true,
       "consumer_owners": {}
     },
     "ai_gateway_core.agents.spec": {
@@ -228,6 +221,9 @@
       "consumer_owners": {
         "gateway": [
           "src/core/auth/user_resolver.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_types.py"
         ]
       }
     },
@@ -247,21 +243,14 @@
     "ai_gateway_core.auth.capability_proof": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/capability_proof.py",
       "kind": "module",
-      "loc": 290,
+      "loc": 51,
       "direct_imports": [
         "__future__",
-        "base64",
-        "collections",
-        "dataclasses",
-        "hashlib",
-        "hmac",
-        "json",
-        "time",
-        "typing"
+        "ai_gateway_contracts"
       ],
       "io_deps": [],
       "io_free": true,
-      "contracts_shim": false,
+      "contracts_shim": true,
       "consumer_owners": {
         "gateway": [
           "src/api/internal/agent_capabilities.py",
@@ -288,9 +277,10 @@
     "ai_gateway_core.auth.gateway_secret": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/gateway_secret.py",
       "kind": "module",
-      "loc": 467,
+      "loc": 432,
       "direct_imports": [
         "__future__",
+        "ai_gateway_contracts",
         "collections",
         "dataclasses",
         "hashlib",
@@ -299,9 +289,7 @@
         "os",
         "redis",
         "secrets",
-        "threading",
-        "time",
-        "typing"
+        "time"
       ],
       "io_deps": [
         "redis"
@@ -318,11 +306,17 @@
           "apps/knowledge-service/src/knowledge_service/main.py"
         ],
         "tests": [
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py",
           "tests/contract/test_gateway_secret.py",
           "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
           "tests/packages/ai_gateway_core/test_internal_service_client.py",
           "tests/services/knowledge/test_ragas_eval_route_security.py",
           "tests/services/test_knowledge_authz.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/agents/__init__.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py"
         ]
       }
     },
@@ -361,7 +355,12 @@
       "io_deps": [],
       "io_free": true,
       "contracts_shim": false,
-      "consumer_owners": {}
+      "consumer_owners": {
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/realtime_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py"
+        ]
+      }
     },
     "ai_gateway_core.billing.pricing_catalog": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/billing/pricing_catalog.py",
@@ -382,6 +381,9 @@
         ],
         "tests": [
           "tests/core/test_spo05_billing_gates.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py"
         ]
       }
     },
@@ -434,6 +436,9 @@
           "tests/packages/ai_gateway_core/test_token_bucket_rate_limiter.py",
           "tests/services/eval/test_kb_ragas_client.py",
           "tests/services/test_knowledge_authz.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py"
         ]
       }
     },
@@ -485,6 +490,10 @@
           "tests/packages/ai_gateway_core/test_internal_service_client.py",
           "tests/packages/ai_gateway_core/test_retry_policy.py",
           "tests/proxy/test_service_proxy.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py"
         ]
       }
     },
@@ -509,6 +518,9 @@
         "tests": [
           "tests/config/test_endpoints_resolver.py",
           "tests/services/llm/test_startup_seeder.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py"
         ]
       }
     },
@@ -600,7 +612,6 @@
           "src/adapters/whisper.py",
           "src/api/schemas/request.py",
           "src/api/schemas/response.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/health.py",
           "src/api/v1/services.py",
           "src/api/v1/setup.py",
@@ -608,6 +619,7 @@
           "src/models/request.py",
           "src/models/response.py",
           "src/models/service.py",
+          "src/services/assistant_entry/model_access.py",
           "src/services/llm/startup_seeder.py",
           "src/services/registry/database_storage.py",
           "src/services/registry/service_registry.py",
@@ -679,6 +691,9 @@
           "tests/database/test_agent_publication_atomicity.py",
           "tests/services/eval/test_agent_publish_gate.py",
           "tests/services/eval/test_agent_version_candidate.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
         ]
       }
     },
@@ -731,6 +746,9 @@
       "consumer_owners": {
         "tests": [
           "tests/packages/ai_gateway_core/test_kb_ragas_sample.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py"
         ]
       }
     },
@@ -810,12 +828,16 @@
           "src/main.py"
         ],
         "tests": [
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py",
           "tests/events/test_bus_publish.py",
           "tests/events/test_bus_publish_consume_e2e.py",
           "tests/events/test_consumer_dlq.py",
           "tests/events/test_consumer_idempotency.py",
           "tests/events/test_envelope.py",
           "tests/services/test_usage_recorder_event_publish.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py"
         ]
       }
     },
@@ -860,17 +882,14 @@
     "ai_gateway_core.events.envelope": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/events/envelope.py",
       "kind": "module",
-      "loc": 200,
+      "loc": 43,
       "direct_imports": [
         "__future__",
-        "datetime",
-        "pydantic",
-        "typing",
-        "uuid"
+        "ai_gateway_contracts"
       ],
       "io_deps": [],
       "io_free": true,
-      "contracts_shim": false,
+      "contracts_shim": true,
       "consumer_owners": {
         "tests": [
           "tests/contract/test_event_schema_evolution.py"
@@ -880,13 +899,14 @@
     "ai_gateway_core.events.errors": {
       "file": "packages/ai-gateway-core/src/ai_gateway_core/events/errors.py",
       "kind": "module",
-      "loc": 43,
+      "loc": 36,
       "direct_imports": [
-        "__future__"
+        "__future__",
+        "ai_gateway_contracts"
       ],
       "io_deps": [],
       "io_free": true,
-      "contracts_shim": false,
+      "contracts_shim": true,
       "consumer_owners": {
         "tests": [
           "tests/events/test_bus_publish.py"
@@ -947,7 +967,6 @@
           "src/adapters/whisper.py",
           "src/api/deps.py",
           "src/api/v1/agent_runtime.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/sessions.py",
           "src/api/v1/stream.py",
           "src/api/v1/tasks.py",
@@ -962,6 +981,7 @@
           "src/core/gateway/rate_limiter.py",
           "src/core/gateway/validator.py",
           "src/main.py",
+          "src/services/assistant_entry/session_binding.py",
           "src/services/registry/service_registry.py",
           "src/services/session/session_manager.py",
           "src/services/task/database_task_storage.py",
@@ -985,6 +1005,9 @@
           "tests/proxy/test_rate_limit.py",
           "tests/services/test_database_session_manager.py",
           "tests/services/test_langgraph_model_override_config.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/session/database_manager.py"
         ]
       }
     },
@@ -1130,7 +1153,7 @@
       "contracts_shim": false,
       "consumer_owners": {
         "gateway": [
-          "src/api/v1/assistant.py",
+          "src/api/v1/_assistant_routes/catalog.py",
           "src/main.py",
           "src/services/eval/kb_ragas_client.py",
           "src/services/knowledge_authz.py"
@@ -1241,8 +1264,10 @@
       "consumer_owners": {
         "gateway": [
           "src/adapters/registry.py",
+          "src/api/v1/_assistant_routes/artifacts.py",
+          "src/api/v1/_assistant_routes/catalog.py",
+          "src/api/v1/_assistant_routes/sessions.py",
           "src/api/v1/agent_runtime.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/config.py",
           "src/api/v1/connectors.py",
           "src/api/v1/conversation_shares.py",
@@ -1272,6 +1297,7 @@
           "src/proxy/langgraph_run_body.py",
           "src/proxy/response_cache.py",
           "src/proxy/transparent_proxy.py",
+          "src/services/assistant_entry/model_access.py",
           "src/services/auth/api_key_service.py",
           "src/services/eval/eval_llm_client.py",
           "src/services/eval/eval_outbox_worker.py",
@@ -1289,6 +1315,24 @@
         "tests": [
           "tests/core/test_observability.py",
           "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/connectors/connector_mcp.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/online_sampling.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/image/watermark.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/mcp/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/memory/service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/skills/executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/storage/file_storage.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/storage/image_storage.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py"
         ]
       }
     },
@@ -1511,7 +1555,7 @@
       "contracts_shim": false,
       "consumer_owners": {
         "gateway": [
-          "src/api/v1/assistant.py"
+          "src/api/v1/_assistant_routes/metrics.py"
         ]
       }
     },
@@ -1644,6 +1688,9 @@
         ],
         "scripts": [
           "scripts/harness/agent_runtime_text_gate.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_grader.py"
         ]
       }
     },
@@ -1715,6 +1762,14 @@
         "gateway": [
           "src/persistence/database.py",
           "src/persistence/redis.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/memory/service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_access_service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/session/database_manager.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py"
         ]
       }
     },
@@ -1894,6 +1949,11 @@
           "tests/services/eval/test_experiment_statistics.py",
           "tests/services/eval/test_kb_ragas_service.py",
           "tests/services/eval/test_outbox_worker.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/online_sampling.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py"
         ]
       }
     },
@@ -2167,6 +2227,9 @@
           "tests/packages/ai_gateway_core/test_internal_service_client.py",
           "tests/packages/ai_gateway_core/test_kb_proxy_client.py",
           "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py"
         ]
       }
     },
@@ -2286,6 +2349,9 @@
       "consumer_owners": {
         "tests": [
           "tests/api/test_quiz_grading.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py"
         ]
       }
     },
@@ -2321,6 +2387,9 @@
           "tests/api/test_connectors_oauth_state.py",
           "tests/services/assistant/test_redaction.py",
           "tests/services/knowledge/test_tenant_embedding_provider.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py"
         ]
       }
     },
@@ -2340,6 +2409,9 @@
         "gateway": [
           "src/api/schemas/agents.py",
           "src/api/v1/agents.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/logging/_exceptions.py"
         ]
       }
     },
@@ -2369,6 +2441,9 @@
       "consumer_owners": {
         "tests": [
           "tests/services/assistant/test_safe_fetch.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py"
         ]
       }
     },
@@ -2533,6 +2608,9 @@
       "consumer_owners": {
         "tests": [
           "tests/packages/core/test_skill_artifact_repository_schema.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
         ]
       }
     },
@@ -2667,6 +2745,7 @@
           "src/api/internal/attachment_capabilities.py",
           "src/api/internal/image_capabilities.py",
           "src/api/internal/office_artifacts.py",
+          "src/api/v1/_assistant_routes/artifacts.py",
           "src/api/v1/agent_images.py",
           "src/api/v1/agent_runtime.py",
           "src/api/v1/agents.py",
@@ -2802,8 +2881,7 @@
       "contracts_shim": false,
       "consumer_owners": {
         "gateway": [
-          "src/api/schemas/assistant.py",
-          "src/api/v1/assistant.py"
+          "src/api/schemas/assistant.py"
         ]
       }
     },
@@ -2877,6 +2955,11 @@
           "tests/services/knowledge/test_startup_routes_fail_closed.py",
           "tests/tracing/test_middleware.py",
           "tests/tracing/test_proxy_propagation.py"
+        ],
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py"
         ]
       }
     },
@@ -2954,7 +3037,113 @@
       "io_deps": [],
       "io_free": true,
       "contracts_shim": false,
-      "consumer_owners": {}
+      "consumer_owners": {
+        "core": [
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py"
+        ]
+      }
+    }
+  },
+  "contracts_modules": {
+    "ai_gateway_contracts": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/__init__.py",
+      "kind": "package",
+      "loc": 15,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.agent_runtime": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/agent_runtime.py",
+      "kind": "module",
+      "loc": 521,
+      "direct_imports": [
+        "__future__",
+        "copy",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "json",
+        "re",
+        "secrets",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.agent_runtime_lease": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/agent_runtime_lease.py",
+      "kind": "module",
+      "loc": 108,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.capability_proof": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/capability_proof.py",
+      "kind": "module",
+      "loc": 290,
+      "direct_imports": [
+        "__future__",
+        "base64",
+        "collections",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "json",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.event_envelope": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/event_envelope.py",
+      "kind": "module",
+      "loc": 200,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "pydantic",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.event_errors": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/event_errors.py",
+      "kind": "module",
+      "loc": 43,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true
+    },
+    "ai_gateway_contracts.replay": {
+      "file": "packages/ai-gateway-contracts/src/ai_gateway_contracts/replay.py",
+      "kind": "module",
+      "loc": 73,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "threading",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true
     }
   },
   "consumption": {
@@ -3059,7 +3248,6 @@
           "src/adapters/whisper.py",
           "src/api/schemas/request.py",
           "src/api/schemas/response.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/health.py",
           "src/api/v1/services.py",
           "src/api/v1/setup.py",
@@ -3067,6 +3255,7 @@
           "src/models/request.py",
           "src/models/response.py",
           "src/models/service.py",
+          "src/services/assistant_entry/model_access.py",
           "src/services/llm/startup_seeder.py",
           "src/services/registry/database_storage.py",
           "src/services/registry/service_registry.py",
@@ -3123,7 +3312,6 @@
           "src/adapters/whisper.py",
           "src/api/deps.py",
           "src/api/v1/agent_runtime.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/sessions.py",
           "src/api/v1/stream.py",
           "src/api/v1/tasks.py",
@@ -3138,6 +3326,7 @@
           "src/core/gateway/rate_limiter.py",
           "src/core/gateway/validator.py",
           "src/main.py",
+          "src/services/assistant_entry/session_binding.py",
           "src/services/registry/service_registry.py",
           "src/services/session/session_manager.py",
           "src/services/task/database_task_storage.py",
@@ -3161,7 +3350,7 @@
       },
       "ai_gateway_core.knowledge": {
         "files": [
-          "src/api/v1/assistant.py",
+          "src/api/v1/_assistant_routes/catalog.py",
           "src/main.py",
           "src/services/eval/kb_ragas_client.py",
           "src/services/knowledge_authz.py"
@@ -3178,8 +3367,10 @@
       "ai_gateway_core.logging": {
         "files": [
           "src/adapters/registry.py",
+          "src/api/v1/_assistant_routes/artifacts.py",
+          "src/api/v1/_assistant_routes/catalog.py",
+          "src/api/v1/_assistant_routes/sessions.py",
           "src/api/v1/agent_runtime.py",
-          "src/api/v1/assistant.py",
           "src/api/v1/config.py",
           "src/api/v1/connectors.py",
           "src/api/v1/conversation_shares.py",
@@ -3209,6 +3400,7 @@
           "src/proxy/langgraph_run_body.py",
           "src/proxy/response_cache.py",
           "src/proxy/transparent_proxy.py",
+          "src/services/assistant_entry/model_access.py",
           "src/services/auth/api_key_service.py",
           "src/services/eval/eval_llm_client.py",
           "src/services/eval/eval_outbox_worker.py",
@@ -3220,7 +3412,7 @@
           "src/services/llm/provider_service.py",
           "src/services/session/guest_session_manager.py"
         ],
-        "count": 42
+        "count": 45
       },
       "ai_gateway_core.mcp.client": {
         "files": [
@@ -3257,7 +3449,7 @@
       },
       "ai_gateway_core.metrics": {
         "files": [
-          "src/api/v1/assistant.py"
+          "src/api/v1/_assistant_routes/metrics.py"
         ],
         "count": 1
       },
@@ -3439,6 +3631,7 @@
           "src/api/internal/attachment_capabilities.py",
           "src/api/internal/image_capabilities.py",
           "src/api/internal/office_artifacts.py",
+          "src/api/v1/_assistant_routes/artifacts.py",
           "src/api/v1/agent_images.py",
           "src/api/v1/agent_runtime.py",
           "src/api/v1/agents.py",
@@ -3447,7 +3640,7 @@
           "src/main.py",
           "src/services/images/service.py"
         ],
-        "count": 11
+        "count": 12
       },
       "ai_gateway_core.storage.artifact_storage": {
         "files": [
@@ -3472,10 +3665,9 @@
       },
       "ai_gateway_core.style_presets": {
         "files": [
-          "src/api/schemas/assistant.py",
-          "src/api/v1/assistant.py"
+          "src/api/schemas/assistant.py"
         ],
-        "count": 2
+        "count": 1
       },
       "ai_gateway_core.tasks": {
         "files": [
@@ -3600,9 +3792,10 @@
           "tests/services/agent_runtime/test_model_plane.py",
           "tests/services/agent_runtime/test_timing.py",
           "tests/services/eval/test_agent_publish_gate.py",
-          "tests/services/eval/test_agent_version_candidate.py"
+          "tests/services/eval/test_agent_version_candidate.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
         ],
-        "count": 12
+        "count": 13
       },
       "ai_gateway_core.agents.spec": {
         "files": [
@@ -3627,9 +3820,10 @@
           "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
           "tests/packages/ai_gateway_core/test_internal_service_client.py",
           "tests/services/knowledge/test_ragas_eval_route_security.py",
-          "tests/services/test_knowledge_authz.py"
+          "tests/services/test_knowledge_authz.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
         ],
-        "count": 5
+        "count": 6
       },
       "ai_gateway_core.auth.gateway_secret_middleware": {
         "files": [
@@ -3736,9 +3930,10 @@
           "tests/events/test_consumer_dlq.py",
           "tests/events/test_consumer_idempotency.py",
           "tests/events/test_envelope.py",
-          "tests/services/test_usage_recorder_event_publish.py"
+          "tests/services/test_usage_recorder_event_publish.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
         ],
-        "count": 6
+        "count": 7
       },
       "ai_gateway_core.events.envelope": {
         "files": [
@@ -4104,6 +4299,269 @@
       }
     },
     "sdk": {},
+    "core": {
+      "ai_gateway_core.agents": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/agent_version_candidate.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.auth": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_types.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth.gateway_secret": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/agents/__init__.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.billing": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/realtime_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.billing.pricing_catalog": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.comm.client": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.comm.retry": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.config": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.agent_version_candidate": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.kb_ragas_sample": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.exceptions": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/session/database_manager.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.logging": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/connectors/connector_mcp.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/online_sampling.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/image/watermark.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/mcp/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/memory/service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/skills/executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/storage/file_storage.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/storage/image_storage.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py"
+        ],
+        "count": 16
+      },
+      "ai_gateway_core.models": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_grader.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/memory/service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_access_service.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/session/database_manager.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.persistence.repositories.agent_trace_repository": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/online_sampling.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.proxy.request_id_middleware": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.quiz.quiz_grader": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.security": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.security.redaction": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/logging/_exceptions.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.security.safe_fetch": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.skills.artifact_repository": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.tracing": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.working_memory": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py"
+        ],
+        "count": 1
+      }
+    },
+    "other": {}
+  },
+  "contracts_consumption": {
+    "gateway": {},
+    "knowledge": {},
+    "tests": {
+      "ai_gateway_contracts.agent_runtime": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_contract_behavior.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_contracts.agent_runtime_lease": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_contract_behavior.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_contracts.capability_proof": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_contract_behavior.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.event_envelope": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_contract_behavior.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_contracts.event_errors": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_contract_behavior.py",
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_contracts.replay": {
+        "files": [
+          "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+        ],
+        "count": 1
+      }
+    },
+    "scripts": {},
+    "sdk": {},
+    "core": {
+      "ai_gateway_contracts.agent_runtime": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.agent_runtime_lease": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime_lease.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.capability_proof": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/auth/capability_proof.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.event_envelope": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/events/envelope.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.event_errors": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/events/errors.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_contracts.replay": {
+        "files": [
+          "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/auth/gateway_secret.py"
+        ],
+        "count": 2
+      }
+    },
     "other": {}
   },
   "knowledge_core_modules": [
@@ -4137,7 +4595,8 @@
         "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/image_write_broker.rs",
         "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/office_artifact_broker.rs",
         "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/read_capabilities.rs"
-      ]
+      ],
+      "in_contracts": true
     }
   ],
   "shared_infra_packages": [
@@ -4406,7 +4865,47 @@
       "read": []
     }
   },
-  "shim_consumers": {},
+  "shim_consumers": {
+    "ai_gateway_core.agents.runtime": {
+      "files": [],
+      "count": 0
+    },
+    "ai_gateway_core.agents.runtime_lease": {
+      "files": [],
+      "count": 0
+    },
+    "ai_gateway_core.auth.capability_proof": {
+      "files": [
+        "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py",
+        "src/api/internal/agent_capabilities.py",
+        "src/api/internal/attachment_capabilities.py",
+        "src/api/internal/confluence_capabilities.py",
+        "src/api/internal/image_capabilities.py",
+        "src/api/internal/office_artifacts.py",
+        "src/api/internal_mcp_broker.py",
+        "src/api/v1/agent_local_nodes.py",
+        "tests/api/test_confluence_capability_broker.py",
+        "tests/api/test_image_capability_broker.py",
+        "tests/api/test_internal_agent_capabilities.py",
+        "tests/api/test_internal_mcp_broker.py",
+        "tests/packages/ai_gateway_core/test_capability_proof.py",
+        "tests/services/knowledge/test_capability_plane.py"
+      ],
+      "count": 14
+    },
+    "ai_gateway_core.events.envelope": {
+      "files": [
+        "tests/contract/test_event_schema_evolution.py"
+      ],
+      "count": 1
+    },
+    "ai_gateway_core.events.errors": {
+      "files": [
+        "tests/events/test_bus_publish.py"
+      ],
+      "count": 1
+    }
+  },
   "core_import_paths_seen": [
     "ai_gateway_core.agent_plugins",
     "ai_gateway_core.agents",
@@ -4416,6 +4915,7 @@
     "ai_gateway_core.auth.capability_proof",
     "ai_gateway_core.auth.gateway_secret",
     "ai_gateway_core.auth.gateway_secret_middleware",
+    "ai_gateway_core.billing",
     "ai_gateway_core.billing.pricing_catalog",
     "ai_gateway_core.comm",
     "ai_gateway_core.comm.client",
@@ -4491,6 +4991,15 @@
     "ai_gateway_core.style_presets",
     "ai_gateway_core.tasks",
     "ai_gateway_core.tracing",
-    "ai_gateway_core.tracing.init"
+    "ai_gateway_core.tracing.init",
+    "ai_gateway_core.working_memory"
+  ],
+  "contracts_import_paths_seen": [
+    "ai_gateway_contracts.agent_runtime",
+    "ai_gateway_contracts.agent_runtime_lease",
+    "ai_gateway_contracts.capability_proof",
+    "ai_gateway_contracts.event_envelope",
+    "ai_gateway_contracts.event_errors",
+    "ai_gateway_contracts.replay"
   ]
 }

@@ -31,13 +31,20 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = "arc04-core-inventory/v1"
+SCHEMA_VERSION = "arc04-core-inventory/v2"
 
 CORE_PKG_DIR = Path("packages/ai-gateway-core/src/ai_gateway_core")
 CONTRACTS_PKG_DIR = Path("packages/ai-gateway-contracts/src/ai_gateway_contracts")
 
+# Docstring marker every ARC-04 compatibility shim carries.  The inventory
+# and the boundary gate use it to tell true shims apart from core modules
+# that merely import a contracts helper (e.g. auth/gateway_secret.py).
+SHIM_MARKER = "Compatibility shim — implementation moved to ``ai_gateway_contracts``"
+
 # Directories scanned for consumers, mapped to an owner label.  Order matters:
-# first match wins (e.g. packages/*/tests before packages/**).
+# first match wins (e.g. packages/*/tests before packages/**).  ``core``
+# tracks intra-package imports so the boundary gate can see exactly which
+# core modules still reach into ai_gateway_contracts (shims + helpers).
 CONSUMER_SCOPES: tuple[tuple[str, str], ...] = (
     ("src", "gateway"),
     ("apps/knowledge-service", "knowledge"),
@@ -46,6 +53,7 @@ CONSUMER_SCOPES: tuple[tuple[str, str], ...] = (
     ("packages/ai-gateway-contracts/tests", "tests"),
     ("scripts", "scripts"),
     ("sdk/python", "sdk"),
+    ("packages/ai-gateway-core/src", "core"),
 )
 
 # Third-party imports that prove a module performs I/O or embeds service
@@ -172,11 +180,11 @@ def parse_imports(path: Path) -> tuple[set[str], set[str]]:
     return plain, from_modules
 
 
-def core_modules(root: Path) -> dict[str, Path]:
-    """Dotted module path -> file for every ai_gateway_core module."""
+def package_modules(root: Path, pkg_dir: Path) -> dict[str, Path]:
+    """Dotted module path -> file for every module of a workspace package."""
     modules: dict[str, Path] = {}
-    src_root = root / CORE_PKG_DIR.parent
-    for path in iter_python_files(root, CORE_PKG_DIR.as_posix()):
+    src_root = root / pkg_dir.parent
+    for path in iter_python_files(root, pkg_dir.as_posix()):
         rel = path.relative_to(src_root)
         parts = list(rel.with_suffix("").parts)
         if parts[-1] == "__init__":
@@ -185,6 +193,11 @@ def core_modules(root: Path) -> dict[str, Path]:
             continue
         modules[".".join(parts)] = path
     return modules
+
+
+def core_modules(root: Path) -> dict[str, Path]:
+    """Dotted module path -> file for every ai_gateway_core module."""
+    return package_modules(root, CORE_PKG_DIR)
 
 
 def direct_imports(path: Path) -> set[str]:
@@ -197,9 +210,8 @@ def direct_imports(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             tops.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            if node.level == 0 and node.module:
-                tops.add(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            tops.add(node.module.split(".")[0])
     return tops
 
 
@@ -230,21 +242,38 @@ def sql_tables(path: Path) -> dict[str, list[str]]:
 def build_inventory(root: Path) -> dict:
     modules = core_modules(root)
     known_submodules = set(modules)
+    contracts = package_modules(root, CONTRACTS_PKG_DIR)
+    known_contracts_submodules = set(contracts)
 
     consumption: dict[str, dict[str, dict[str, object]]] = {
         owner: {} for _, owner in CONSUMER_SCOPES
     }
     consumption.setdefault("other", {})
+    contracts_consumption: dict[str, dict[str, dict[str, object]]] = {
+        owner: {} for _, owner in CONSUMER_SCOPES
+    }
+    contracts_consumption.setdefault("other", {})
     core_import_paths: set[str] = set()
+    contracts_import_paths: set[str] = set()
 
-    def reduce(dotted: str) -> str | None:
-        """Reduce a dotted path to the longest known core submodule."""
+    def reduce(dotted: str, catalog: set[str]) -> str | None:
+        """Reduce a dotted path to the longest known submodule in ``catalog``."""
         parts = dotted.split(".")
         for depth in range(len(parts), 0, -1):
             candidate = ".".join(parts[:depth])
-            if candidate in known_submodules:
+            if candidate in catalog:
                 return candidate
         return None
+
+    def record(
+        bucket_map: dict[str, dict[str, object]], owner: str, target: str, rel_posix: str
+    ) -> None:
+        bucket = bucket_map.setdefault(target, {"files": [], "count": 0})
+        files = bucket["files"]
+        assert isinstance(files, list)
+        if rel_posix not in files:
+            files.append(rel_posix)
+            bucket["count"] = len(files)
 
     scan_dirs = [prefix for prefix, _ in CONSUMER_SCOPES] + ["database"]
     for rel_dir in scan_dirs:
@@ -253,14 +282,28 @@ def build_inventory(root: Path) -> dict:
             owner = owner_for(rel) or "other"
             plain, from_modules = parse_imports(path)
             targets: set[str] = set()
+            contracts_targets: set[str] = set()
             for dotted in plain:
                 if dotted.startswith("ai_gateway_core"):
-                    target = reduce(dotted)
+                    target = reduce(dotted, known_submodules)
                     if target:
                         targets.add(target)
                         core_import_paths.add(dotted)
+                elif dotted.startswith("ai_gateway_contracts"):
+                    target = reduce(dotted, known_contracts_submodules)
+                    if target:
+                        contracts_targets.add(target)
+                        contracts_import_paths.add(dotted)
             for dotted in from_modules:
-                target = reduce(dotted)
+                if dotted.startswith("ai_gateway_contracts"):
+                    target = reduce(dotted, known_contracts_submodules)
+                    if target is not None:
+                        if target == "ai_gateway_contracts" and dotted != "ai_gateway_contracts":
+                            continue
+                        contracts_targets.add(target)
+                        contracts_import_paths.add(dotted)
+                    continue
+                target = reduce(dotted, known_submodules)
                 if target is None:
                     continue
                 # `from ai_gateway_core import symbol` where symbol is not a
@@ -272,12 +315,9 @@ def build_inventory(root: Path) -> dict:
                 core_import_paths.add(dotted)
             rel_posix = rel.as_posix()
             for target in targets:
-                bucket = consumption[owner].setdefault(target, {"files": [], "count": 0})
-                files = bucket["files"]
-                assert isinstance(files, list)
-                if rel_posix not in files:
-                    files.append(rel_posix)
-                    bucket["count"] = len(files)
+                record(consumption[owner], owner, target, rel_posix)
+            for target in contracts_targets:
+                record(contracts_consumption[owner], owner, target, rel_posix)
 
     # Also catch bare `import ai_gateway_core` consumers.
     module_info: dict[str, dict] = {}
@@ -286,7 +326,7 @@ def build_inventory(root: Path) -> dict:
         tops = direct_imports(path)
         io_deps = sorted(tops & IO_MARKER_IMPORTS)
         text = path.read_text(encoding="utf-8")
-        is_shim = "ai_gateway_contracts" in text
+        is_shim = SHIM_MARKER in text
         owners = {
             owner: sorted(data[dotted]["files"])
             for owner, data in consumption.items()
@@ -310,6 +350,22 @@ def build_inventory(root: Path) -> dict:
             tables = sql_tables(path)
             if tables["write"] or tables["read"]:
                 table_access[dotted] = tables
+
+    # Contracts package module info — the allowlist gate compares against this.
+    contracts_info: dict[str, dict] = {}
+    for dotted in sorted(contracts):
+        path = contracts[dotted]
+        tops = direct_imports(path)
+        io_deps = sorted(tops & IO_MARKER_IMPORTS)
+        text = path.read_text(encoding="utf-8")
+        contracts_info[dotted] = {
+            "file": path.relative_to(root).as_posix(),
+            "kind": "package" if path.name == "__init__.py" else "module",
+            "loc": text.count("\n") + (0 if text.endswith("\n") else 1),
+            "direct_imports": sorted(tops),
+            "io_deps": io_deps,
+            "io_free": not io_deps,
+        }
 
     knowledge_modules = sorted(consumption["knowledge"])
     rust_markers = {marker: sorted(_rust_marker_files(root, marker)) for marker in RUST_MARKERS}
@@ -336,6 +392,7 @@ def build_inventory(root: Path) -> dict:
                 "service_owners": service_owners,
                 "rust_marker": marker if rust_files else None,
                 "rust_files": rust_files,
+                "in_contracts": bool(core_to_contracts(dotted)),
             }
         )
 
@@ -346,7 +403,7 @@ def build_inventory(root: Path) -> dict:
         m: {
             "files": sorted(
                 f
-                for owner in ("gateway", "knowledge", "tests", "scripts", "sdk", "other")
+                for owner in ("gateway", "knowledge", "tests", "scripts", "sdk", "core", "other")
                 for f in module_info[m]["consumer_owners"].get(owner, [])
             )
         }
@@ -360,10 +417,18 @@ def build_inventory(root: Path) -> dict:
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "base_sha": base_sha(root),
         "core_package_dir": CORE_PKG_DIR.as_posix(),
+        "contracts_package_dir": CONTRACTS_PKG_DIR.as_posix(),
         "modules": module_info,
+        "contracts_modules": contracts_info,
         "consumption": {
             owner: {m: consumption[owner][m] for m in sorted(consumption[owner])}
             for owner in consumption
+        },
+        "contracts_consumption": {
+            owner: {
+                m: contracts_consumption[owner][m] for m in sorted(contracts_consumption[owner])
+            }
+            for owner in contracts_consumption
         },
         "knowledge_core_modules": knowledge_modules,
         "knowledge_core_module_count": len(knowledge_modules),
@@ -374,6 +439,7 @@ def build_inventory(root: Path) -> dict:
         "table_access": table_access,
         "shim_consumers": shim_consumers,
         "core_import_paths_seen": sorted(core_import_paths),
+        "contracts_import_paths_seen": sorted(contracts_import_paths),
     }
 
 
@@ -386,6 +452,23 @@ def dotted_to_marker(dotted: str) -> str | None:
         "ai_gateway_core.events.envelope": "usage.recorded.v1",
     }
     return mapping.get(dotted)
+
+
+# Core shim module -> contracts module owning the implementation.  Keep in
+# sync with check_core_boundary.CONTRACTS_ALLOWLIST: the gate uses this map
+# as the authoritative shim list.
+CORE_TO_CONTRACTS: dict[str, str] = {
+    "ai_gateway_core.auth.capability_proof": "ai_gateway_contracts.capability_proof",
+    "ai_gateway_core.agents.runtime": "ai_gateway_contracts.agent_runtime",
+    "ai_gateway_core.agents.runtime_lease": "ai_gateway_contracts.agent_runtime_lease",
+    "ai_gateway_core.events.envelope": "ai_gateway_contracts.event_envelope",
+    "ai_gateway_core.events.errors": "ai_gateway_contracts.event_errors",
+}
+
+
+def core_to_contracts(dotted: str) -> str | None:
+    """Return the contracts module a migrated core shim re-exports, if any."""
+    return CORE_TO_CONTRACTS.get(dotted)
 
 
 def _rust_marker_files(root: Path, marker: str) -> Iterable[str]:
@@ -419,10 +502,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"wrote {out_path.relative_to(root)}: "
         f"{len(inventory['modules'])} core modules, "
+        f"{len(inventory['contracts_modules'])} contracts modules, "
         f"gateway consumes {inventory['gateway_core_module_count']}, "
         f"knowledge consumes {inventory['knowledge_core_module_count']}, "
         f"cross-boundary candidates: "
-        f"{len(inventory['cross_boundary_protocol_candidates'])}"
+        f"{len(inventory['cross_boundary_protocol_candidates'])}, "
+        f"shims: {len(inventory['shim_consumers'])}"
     )
     return 0
 
