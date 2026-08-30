@@ -626,6 +626,7 @@ fn collect_output_files(
 ) -> Result<Vec<CodeOutputArtifact>, CodeExecutionError> {
     let mut files = Vec::new();
     let mut total = 0usize;
+    let mut names = BTreeSet::new();
     for entry in fs::read_dir(workspace).map_err(|_| CodeExecutionError::MalformedResult)? {
         let entry = entry.map_err(|_| CodeExecutionError::MalformedResult)?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -634,32 +635,75 @@ fn collect_output_files(
         }
         let metadata =
             fs::symlink_metadata(entry.path()).map_err(|_| CodeExecutionError::MalformedResult)?;
+        if name == "output" && metadata.is_dir() {
+            for output in
+                fs::read_dir(entry.path()).map_err(|_| CodeExecutionError::MalformedResult)?
+            {
+                let output = output.map_err(|_| CodeExecutionError::MalformedResult)?;
+                let output_name = output.file_name().to_string_lossy().into_owned();
+                if output_name.starts_with('.') {
+                    continue;
+                }
+                collect_output_file(
+                    output.path(),
+                    output_name,
+                    limits,
+                    &mut files,
+                    &mut total,
+                    &mut names,
+                )?;
+            }
+            continue;
+        }
         if !metadata.is_file() {
             return Err(CodeExecutionError::MalformedResult);
         }
-        validate_filename(&name)?;
-        let size =
-            usize::try_from(metadata.len()).map_err(|_| CodeExecutionError::OutputLimitExceeded)?;
-        total = total
-            .checked_add(size)
-            .ok_or(CodeExecutionError::OutputLimitExceeded)?;
-        if files.len() >= limits.output_files || total > limits.output_bytes {
-            return Err(CodeExecutionError::OutputLimitExceeded);
-        }
-        let mut content = Vec::with_capacity(size);
-        File::open(entry.path())
-            .map_err(|_| CodeExecutionError::MalformedResult)?
-            .read_to_end(&mut content)
-            .map_err(|_| CodeExecutionError::MalformedResult)?;
-        files.push(CodeOutputArtifact {
-            filename: name,
-            mime_type: None,
-            content_base64: STANDARD.encode(&content),
-            size_bytes: content.len(),
-            sha256: hex::encode(Sha256::digest(&content)),
-        });
+        collect_output_file(
+            entry.path(),
+            name,
+            limits,
+            &mut files,
+            &mut total,
+            &mut names,
+        )?;
     }
     Ok(files)
+}
+
+fn collect_output_file(
+    path: PathBuf,
+    name: String,
+    limits: &PythonSandboxLimits,
+    files: &mut Vec<CodeOutputArtifact>,
+    total: &mut usize,
+    names: &mut BTreeSet<String>,
+) -> Result<(), CodeExecutionError> {
+    validate_filename(&name)?;
+    let metadata = fs::symlink_metadata(&path).map_err(|_| CodeExecutionError::MalformedResult)?;
+    if !metadata.is_file() || !names.insert(name.clone()) {
+        return Err(CodeExecutionError::MalformedResult);
+    }
+    let size =
+        usize::try_from(metadata.len()).map_err(|_| CodeExecutionError::OutputLimitExceeded)?;
+    *total = (*total)
+        .checked_add(size)
+        .ok_or(CodeExecutionError::OutputLimitExceeded)?;
+    if files.len() >= limits.output_files || *total > limits.output_bytes {
+        return Err(CodeExecutionError::OutputLimitExceeded);
+    }
+    let mut content = Vec::with_capacity(size);
+    File::open(path)
+        .map_err(|_| CodeExecutionError::MalformedResult)?
+        .read_to_end(&mut content)
+        .map_err(|_| CodeExecutionError::MalformedResult)?;
+    files.push(CodeOutputArtifact {
+        filename: name,
+        mime_type: None,
+        content_base64: STANDARD.encode(&content),
+        size_bytes: content.len(),
+        sha256: hex::encode(Sha256::digest(&content)),
+    });
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -736,7 +780,12 @@ fn python_command(config: &LocalPythonSandboxConfig) -> Command {
             .arg("--user")
             .arg("--map-root-user")
             .arg("--net")
+            .arg("--mount")
             .arg("--")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("mount --bind \"$PWD\" /workspace && exec \"$@\"")
+            .arg("python-sandbox")
             .arg(&config.python_binary);
         return command;
     }
@@ -805,10 +854,31 @@ mod tests {
                     "--user",
                     "--map-root-user",
                     "--net",
+                    "--mount",
                     "--",
+                    "/bin/sh",
+                    "-c",
+                    "mount --bind \"$PWD\" /workspace && exec \"$@\"",
+                    "python-sandbox",
                     "/usr/local/bin/python3",
                 ]
             );
         }
+    }
+
+    #[test]
+    fn collects_files_from_the_compatibility_output_directory() {
+        let workspace = create_workspace(&std::env::temp_dir()).unwrap();
+        let output = workspace.join("output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("result.txt"), b"result").unwrap();
+        let files = collect_output_files(&workspace, &PythonSandboxLimits::default()).unwrap();
+        fs::remove_dir_all(&workspace).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "result.txt");
+        assert_eq!(
+            STANDARD.decode(&files[0].content_base64).unwrap(),
+            b"result"
+        );
     }
 }

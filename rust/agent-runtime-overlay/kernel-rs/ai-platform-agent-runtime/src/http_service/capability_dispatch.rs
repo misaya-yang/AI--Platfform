@@ -594,6 +594,40 @@ fn capability_projection_event(
             }),
         ));
     }
+    if params.tool == "execute_python_code" {
+        let status = result
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed");
+        let stdout = result
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let stderr = result
+            .get("stderr")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return Some(crate::AssistantTurnEventV1::new(
+            "code_execution_result",
+            serde_json::json!({
+                "run_id": params.turn_id,
+                "session_id": identity.session_id,
+                "thread_id": identity.runtime_thread_id.to_string(),
+                "tool_call_id": params.call_id,
+                "success": status == "succeeded",
+                "status": status,
+                "exit_code": result.get("exit_code"),
+                "duration_ms": result.get("duration_ms"),
+                "output": stdout,
+                "result": stdout,
+                "stderr": stderr,
+                "error": result.get("error_message"),
+                // The Gateway replaces raw base64 output with durable artifact
+                // identities before this result reaches the Runtime.
+                "output_files": result.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!([])),
+            }),
+        ));
+    }
     let artifact_id = result
         .get("artifact_id")
         .and_then(serde_json::Value::as_str)?;
@@ -953,5 +987,32 @@ mod tests {
         assert_eq!(event.data["artifact_id"], "art_12345678");
         assert_eq!(event.data["format"], "docx");
         assert_eq!(event.data["filename"], "report.docx");
+    }
+
+    #[test]
+    fn code_result_projects_stdout_and_durable_artifacts() {
+        let (params, identity) = request("execute_python_code");
+        let event = capability_projection_event(
+            &params,
+            &identity,
+            Some(&serde_json::json!({
+                "status": "succeeded",
+                "stdout": "CODE-OK\n",
+                "stderr": "",
+                "exit_code": 0,
+                "duration_ms": 12,
+                "artifacts": [{
+                    "artifact_id": "art_12345678",
+                    "filename": "result.txt",
+                    "download_url": "/api/v1/assistant/artifacts/art_12345678/download"
+                }]
+            })),
+        )
+        .expect("code result should project");
+        assert_eq!(event.event_type, "code_execution_result");
+        assert_eq!(event.data["success"], true);
+        assert_eq!(event.data["result"], "CODE-OK\n");
+        assert_eq!(event.data["exit_code"], 0);
+        assert_eq!(event.data["output_files"][0]["artifact_id"], "art_12345678");
     }
 }
