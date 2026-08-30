@@ -143,7 +143,7 @@ SELECT EXISTS (
 """
 
 _ROUTINE_ACL_HARDENING_SQL = """
-/* arc03-fresh-extension-acl-hardening */
+/* arc03-admin-extension-acl-hardening */
 REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public, gateway, assistant, knowledge FROM PUBLIC
 """
 
@@ -561,10 +561,6 @@ async def fresh_install(
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
         for file_name in ("init.sql", "reference_data.sql"):
             await run_baseline_sql_file(conn, baseline_dir / file_name)
-        # Extension scripts and restored routines can retain built-in PUBLIC
-        # EXECUTE independently of the owner's default ACL. Fresh objects are
-        # owner-controlled, so close all four schemas before exact grants.
-        await conn.execute(_ROUTINE_ACL_HARDENING_SQL)
         await run_baseline_sql_file(
             conn,
             baseline_dir / "grants.sql",
