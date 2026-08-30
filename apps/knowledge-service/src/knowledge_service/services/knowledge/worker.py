@@ -700,10 +700,7 @@ class KnowledgeWorker:
                         )
                         if not current or str(current.get("status") or "") != "completed":
                             reason = str((current or {}).get("error") or "").strip()
-                            raise RuntimeError(
-                                reason[:1_000]
-                                or "document processor returned without a completed generation"
-                            )
+                            raise RuntimeError(reason[:1_000] or "document processor returned without a completed generation")
                         await self._finish_pipeline_execution(
                             execution_id,
                             status="completed",
