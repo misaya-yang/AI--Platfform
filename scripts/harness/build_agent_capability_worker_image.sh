@@ -6,7 +6,7 @@ source_root="${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}"
 overlay_root="$repo_root/rust/agent-runtime-overlay"
 build_memory="${AI_PLATFORM_CAPABILITY_WORKER_BUILD_MEMORY:-2g}"
 build_cpu_quota="${AI_PLATFORM_CAPABILITY_WORKER_BUILD_CPU_QUOTA:-100000}"
-cargo_jobs="${AI_PLATFORM_CAPABILITY_WORKER_CARGO_JOBS:-1}"
+cargo_jobs="${AI_PLATFORM_CAPABILITY_WORKER_CARGO_JOBS:-${CARGO_BUILD_JOBS:-1}}"
 minimum_host_free_percent="${AI_PLATFORM_CAPABILITY_WORKER_MIN_HOST_FREE_PERCENT:-20}"
 
 if [[ -z "$source_root" || ! -e "$source_root/.git" ]]; then

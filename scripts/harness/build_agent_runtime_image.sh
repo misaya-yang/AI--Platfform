@@ -5,7 +5,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 fork_root="${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}"
 build_memory="${AI_PLATFORM_AGENT_RUNTIME_BUILD_MEMORY:-4g}"
 build_cpu_quota="${AI_PLATFORM_AGENT_RUNTIME_BUILD_CPU_QUOTA:-200000}"
-cargo_jobs="${AI_PLATFORM_AGENT_RUNTIME_CARGO_JOBS:-2}"
+cargo_jobs="${AI_PLATFORM_AGENT_RUNTIME_CARGO_JOBS:-${CARGO_BUILD_JOBS:-1}}"
 minimum_host_free_percent="${AI_PLATFORM_AGENT_RUNTIME_MIN_HOST_FREE_PERCENT:-20}"
 
 if [[ -z "$fork_root" || ! -e "$fork_root/.git" ]]; then

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -119,6 +120,22 @@ def plan(repo_root: Path, changed: list[str]) -> tuple[dict[str, list[str]], lis
     return crates, unmapped
 
 
+def cargo_test_command(cargo: str, crate: str, workspace_manifest: Path) -> list[str]:
+    command = [cargo, "test", "--locked"]
+    if crate == "@workspace":
+        command.append("--workspace")
+    else:
+        command.extend(("-p", crate))
+    command.extend(("--manifest-path", str(workspace_manifest)))
+    return command
+
+
+def cargo_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["CARGO_BUILD_JOBS"] = "1"
+    return environment
+
+
 def _selftest() -> int:
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +169,14 @@ def _selftest() -> int:
         check("rust paths without a manifest are unmapped", unmapped, ["rust/unknown/notes.txt"])
         check("package_name parses [package]", package_name(root / "rust" / "ws" / "crate-a" / "Cargo.toml"), "crate-a")
         check("package_name on virtual manifest", package_name(root / "rust" / "ws" / "Cargo.toml"), None)
+        command = cargo_test_command("cargo", "crate-a", root / "rust" / "ws" / "Cargo.toml")
+        check("changed crate uses Cargo --locked", command[2], "--locked")
+        check("changed crate selects one package", command[3:5], ["-p", "crate-a"])
+        workspace_command = cargo_test_command(
+            "cargo", "@workspace", root / "rust" / "ws" / "Cargo.toml"
+        )
+        check("workspace change remains locked", workspace_command[2:4], ["--locked", "--workspace"])
+        check("Cargo jobs are forced to one", cargo_environment()["CARGO_BUILD_JOBS"], "1")
 
     if failures:
         print(f"SELFTEST FAILED: {failures} check(s)", file=sys.stderr)
@@ -211,20 +236,29 @@ def main(argv: list[str] | None = None) -> int:
     for crate in sorted(crates):
         if crate == "@workspace":
             manifest = ROOT / RUST_ROOT / "agent-runtime-overlay" / "kernel-rs" / "Cargo.toml"
-            cmd = [cargo, "test", "--workspace", "--manifest-path", str(manifest)]
             label = "@workspace (manifest change tests the whole workspace)"
         else:
             _name, crate_manifest = crate_for_path(ROOT, crates[crate][0])
-            ws_manifest = workspace_root_for(crate_manifest)
-            cmd = [cargo, "test", "-p", crate, "--manifest-path", str(ws_manifest)]
+            manifest = workspace_root_for(crate_manifest)
             label = crate
+        cmd = cargo_test_command(cargo, crate, manifest)
         print(f"running: {' '.join(cmd)}  [{label}]")
         try:
-            proc = subprocess.run(cmd, cwd=ROOT, timeout=PER_CRATE_TIMEOUT_S)
+            proc = subprocess.run(
+                cmd,
+                cwd=ROOT,
+                timeout=PER_CRATE_TIMEOUT_S,
+                env=cargo_environment(),
+            )
             status = "pass" if proc.returncode == 0 else "fail"
         except subprocess.TimeoutExpired:
             status = "timeout"
-        results[crate] = {"status": status, "paths": crates[crate]}
+        results[crate] = {
+            "status": status,
+            "paths": crates[crate],
+            "command": cmd,
+            "cargo_build_jobs": "1",
+        }
         print(f"  {crate}: {status}")
         if status != "pass":
             exit_code = 1
