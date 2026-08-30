@@ -217,6 +217,13 @@ async def test_structural_queries_filter_temporary_schemas() -> None:
     )
     assert "a.attgenerated AS generated" in column_query
     assert "a.attcompression AS compression" in column_query
+    assert "pg_collation AS coll" in column_query
+    assert "pg_collation AS collation" not in column_query
+    type_query = next(
+        query for query, _args in conn.queries if "t.typbasetype = 0" in query
+    )
+    assert "pg_collation AS coll" in type_query
+    assert "pg_collation AS collation" not in type_query
     trigger_query = next(query for query, _args in conn.queries if "pg_get_triggerdef" in query)
     assert "trigger.tgenabled AS enabled" in trigger_query
     for query, _args in conn.queries:

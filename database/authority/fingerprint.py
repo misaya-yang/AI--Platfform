@@ -200,15 +200,15 @@ async def structural_lines(conn: Any) -> list[str]:
                a.attnum AS position, a.attidentity AS identity,
                a.attgenerated AS generated, a.attstorage AS storage,
                a.attcompression AS compression,
-               COALESCE(collation_namespace.nspname || '.' || collation.collname, '')
+               COALESCE(collation_namespace.nspname || '.' || coll.collname, '')
                    AS collation
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         JOIN pg_attribute AS a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
         LEFT JOIN pg_attrdef AS d ON d.adrelid = c.oid AND d.adnum = a.attnum
-        LEFT JOIN pg_collation AS collation ON collation.oid = a.attcollation
+        LEFT JOIN pg_collation AS coll ON coll.oid = a.attcollation
         LEFT JOIN pg_namespace AS collation_namespace
-          ON collation_namespace.oid = collation.collnamespace
+          ON collation_namespace.oid = coll.collnamespace
         WHERE c.relkind IN ('r', 'p', 'f', 'm', 'v')
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
@@ -361,7 +361,7 @@ async def structural_lines(conn: Any) -> list[str]:
                CASE WHEN t.typbasetype = 0 THEN ''
                     ELSE format_type(t.typbasetype, t.typtypmod) END AS base_type,
                t.typnotnull AS not_null, COALESCE(t.typdefault, '') AS default_expr,
-               COALESCE(collation_namespace.nspname || '.' || collation.collname, '')
+               COALESCE(collation_namespace.nspname || '.' || coll.collname, '')
                    AS collation,
                CASE WHEN range_definition.rngsubtype IS NULL THEN ''
                     ELSE format_type(range_definition.rngsubtype, NULL) END AS range_subtype,
@@ -372,9 +372,9 @@ async def structural_lines(conn: Any) -> list[str]:
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
         LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
-        LEFT JOIN pg_collation AS collation ON collation.oid = t.typcollation
+        LEFT JOIN pg_collation AS coll ON coll.oid = t.typcollation
         LEFT JOIN pg_namespace AS collation_namespace
-          ON collation_namespace.oid = collation.collnamespace
+          ON collation_namespace.oid = coll.collnamespace
         LEFT JOIN pg_range AS range_definition
           ON range_definition.rngtypid = t.oid OR range_definition.rngmultitypid = t.oid
         WHERE TRUE
