@@ -22,23 +22,22 @@ export async function loadDeadApprovalReconciliation(
   sessionIdHint?: string | null,
 ): Promise<DeadApprovalReconciliation | null> {
   let sessionId = sessionIdHint || undefined;
-  let terminalConfirmed = !runId;
-  if (runId) {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      // Finalizing the Gateway run ledger is coupled to consuming the durable
-      // per-turn cursor. A restored approval no longer has a live consumer.
-      if (runtimeThreadId) {
-        await getAgentRuntimeV2RunSnapshot(runtimeThreadId, runId);
-      }
-      const { run } = await getAssistantRunStatus(runId);
-      const reportedSessionId = String(run.session_id || "").trim();
-      sessionId = reportedSessionId || sessionId;
-      if (TERMINAL_RUN_STATUSES.has(run.status || "")) {
-        terminalConfirmed = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+  if (!runId) return null;
+  let terminalConfirmed = false;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    // Finalizing the Gateway run ledger is coupled to consuming the durable
+    // per-turn cursor. A restored approval no longer has a live consumer.
+    if (runtimeThreadId) {
+      await getAgentRuntimeV2RunSnapshot(runtimeThreadId, runId);
     }
+    const { run } = await getAssistantRunStatus(runId);
+    const reportedSessionId = String(run.session_id || "").trim();
+    sessionId = reportedSessionId || sessionId;
+    if (TERMINAL_RUN_STATUSES.has(run.status || "")) {
+      terminalConfirmed = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
   }
   if (!terminalConfirmed) return null;
   if (!sessionId) {

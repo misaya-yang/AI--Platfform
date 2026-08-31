@@ -2253,7 +2253,6 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   page.on("requestfailed", (request) => {
     requestFailures.push(`${request.method()} ${new URL(request.url()).pathname}`);
   });
-
   await installAssistantHarness(
     page,
     async (route) => {
@@ -2324,7 +2323,7 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Reject" }).first()).toBeVisible();
   runStatusFails = true;
   await page.getByRole("button", { name: "Approve" }).first().click();
-  await expect(page.locator(`#${ASSISTANT_COMPOSER_ID}`)).toBeEnabled();
+  await expect(page.locator(`#${ASSISTANT_COMPOSER_ID}`)).toBeDisabled();
   runStatusFails = false;
   runSucceeded = true;
   const hitsBeforeTerminalRefresh = runStatusHits;
@@ -2334,6 +2333,7 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Reject" })).toHaveCount(0);
   await expect(page.getByText(/^completed ·/)).toBeVisible();
+  await expect(page.locator(`#${ASSISTANT_COMPOSER_ID}`)).toBeEnabled();
   expect(consoleErrors).toEqual([]);
   expect(requestFailures).toEqual([]);
 });

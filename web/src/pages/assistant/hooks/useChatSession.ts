@@ -3468,19 +3468,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (!streamTraceClosed) {
         closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
       }
-      // The consumer is gone by the time ``finally`` runs, so the send locks
-      // must be released even when an approval hold is still active. A live
-      // stream clears ``approvalHoldOpen`` on APPROVAL_RESULT before reaching
-      // here, so ``approvalHoldActive()`` at this point means the stream died
-      // mid-park — the exact case the old guard turned into a permanent
-      // composer lock (Approve POSTed server-side while the UI stayed stuck on
-      // "Stop generating", recoverable only by session switch). Release the
-      // locks; the pending card and its runtimeThreadId/approvalId persist in
-      // message state so the decision stays actionable, and flag the id so the
-      // decision handler reconciles from history rather than a dead stream.
+      // The consumer is gone by the time ``finally`` runs, so its transport
+      // locks must be released. A live stream clears ``approvalHoldOpen`` on
+      // APPROVAL_RESULT before reaching here; an active hold therefore means
+      // the stream died mid-park. Keep the server-run lock closed so another
+      // turn cannot race the pending decision, while releasing the dead
+      // AbortController/send task. The pending card and its
+      // runtimeThreadId/approvalId remain actionable, and the message id tells
+      // the decision handler to reconcile from durable history. Only a
+      // confirmed terminal projection releases the server-run lock.
       if (isCurrentStream()) {
         if (approvalHoldActive()) {
           deadApprovalMessageIdsRef.current.add(assistantMessage.id);
+          setServerRunBlocking(true);
         }
         setIsStreaming(false);
         clearCancelFallback();
@@ -3517,13 +3517,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           setMessages(restored);
           setArtifacts(result.sessionArtifacts.map(toArtifact));
           void hydrateQuizData(restored, setMessages);
+          setServerRunBlocking(false);
         }
       } catch {
         console.warn("Reconcile after dead-stream approval decision failed");
-      } finally {
-        if (!sessionIdHint || activeSessionIdRef.current === sessionIdHint) {
-          setServerRunBlocking(false);
-        }
       }
     },
     [],
@@ -3573,9 +3570,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         console.warn("Assistant tool approval submission failed");
         return;
       }
+      const wasDeadApproval = deadApprovalMessageIdsRef.current.delete(messageId);
       const runtimeNeedsReconciliation = Boolean(
-        runtimeThreadId &&
-        (!abortControllerRef.current || deadApprovalMessageIdsRef.current.delete(messageId)),
+        runtimeThreadId && (!abortControllerRef.current || wasDeadApproval),
       );
       setServerRunBlocking(runtimeNeedsReconciliation);
 
