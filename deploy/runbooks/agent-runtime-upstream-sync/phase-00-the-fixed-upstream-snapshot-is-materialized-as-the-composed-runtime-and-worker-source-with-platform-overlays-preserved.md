@@ -22,9 +22,9 @@ Out:
 
 ## Done when
 
-- [ ] Selected upstream, composed Cargo workspace, overlay manifest, receipt, SBOM, and source lock identify the same source unit.
-- [ ] No merge markers remain and all Runtime/Worker build-closure files come from the complete selected upstream snapshot plus the declared overlay.
-- [ ] Existing affected behavior still passes its smallest relevant regression check.
+- [x] Selected upstream, composed Cargo workspace, overlay manifest, receipt, SBOM, and source lock identify the same source unit.
+- [x] No merge markers remain and all Runtime/Worker build-closure files come from the complete selected upstream snapshot plus the declared overlay.
+- [x] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Verify
 

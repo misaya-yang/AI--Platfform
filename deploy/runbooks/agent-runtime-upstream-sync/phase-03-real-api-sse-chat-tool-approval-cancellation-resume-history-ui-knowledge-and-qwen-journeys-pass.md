@@ -21,9 +21,9 @@ Out:
 
 ## Done when
 
-- [ ] Backend API/SSE, tool approval allow/deny/failure/idempotency, cancellation/resume/history, Agent preview/Eval/version rollback, negative tenant/auth, Knowledge, UI clicks, CLI, and Qwen streaming/tool journeys pass against the candidate.
-- [ ] Browser console/network state has no blocking failure.
-- [ ] Existing affected behavior still passes its smallest relevant regression check.
+- [x] Backend API/SSE, tool approval allow/deny/failure/idempotency, cancellation/resume/history, Agent preview/Eval/version rollback, negative tenant/auth, Knowledge, UI clicks, CLI, and Qwen streaming/tool journeys pass against the candidate.
+- [x] Browser console/network state has no blocking failure.
+- [x] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Verify
 

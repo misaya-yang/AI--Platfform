@@ -21,9 +21,9 @@ Out:
 
 ## Done when
 
-- [ ] Cross-module APIs and platform extension seams are internally consistent with no public contract drift.
-- [ ] Agent preview, versioned configuration, candidate trace persistence, evaluation, publish, and rollback retain their existing platform ownership.
-- [ ] Existing affected behavior still passes its smallest relevant regression check.
+- [x] Cross-module APIs and platform extension seams are internally consistent with no public contract drift.
+- [x] Agent preview, versioned configuration, candidate trace persistence, evaluation, publish, and rollback retain their existing platform ownership.
+- [x] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Verify
 

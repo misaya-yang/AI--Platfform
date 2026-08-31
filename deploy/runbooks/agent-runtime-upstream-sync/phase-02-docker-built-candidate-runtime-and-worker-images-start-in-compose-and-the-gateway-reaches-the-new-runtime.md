@@ -21,9 +21,9 @@ Out:
 
 ## Done when
 
-- [ ] Runtime and Worker images were compiled only inside Docker with matching source/image labels and no repository `target` output.
-- [ ] Candidate containers are owned by this checkout, healthy, and reachable from Gateway.
-- [ ] Existing affected behavior still passes its smallest relevant regression check.
+- [x] Runtime and Worker images were compiled only inside Docker with matching source/image labels and no repository `target` output.
+- [x] Candidate containers are owned by this checkout, healthy, and reachable from Gateway.
+- [x] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Verify
 

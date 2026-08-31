@@ -11,7 +11,7 @@
   "active_feature": "CLI-F006",
   "iteration": 3,
   "max_iterations": 3,
-  "last_result": "CLI-02 and CLI-04 are complete: 43 source tests and required gates passed; Docker built and receipted Linux arm64 codex-cli from upstream 94cbbdd plus overlay 46158add; npm pack preview passed; real Direct Responses, Chat-only reasoning/text, tool auto-approval, resume, and SIGINT recovery journeys passed.",
+  "last_result": "CLI-02 and CLI-04 are complete: 44 source tests and required gates passed; Docker built and receipted Linux arm64 codex-cli from upstream 94cbbdd plus overlay 46158add; npm pack preview passed from the package directory; real Direct Responses, Chat-only reasoning/text, tool auto-approval, resume, and SIGINT recovery journeys passed. Hosted tools now fail closed while Chat-only Runtime config disables unsupported web search at source.",
   "next_action": "Build and verify Darwin arm64 packaging and an explicit interactive denial journey before declaring cross-platform CANDIDATE_80; retain Darwin/Windows matrix work for RELEASE_100.",
   "blockers": [],
   "confirmation": null,
@@ -39,7 +39,7 @@
       "status": "done",
       "evidence": [
         "npm --prefix sdk/cli run typecheck -> exit 0",
-        "npm --prefix sdk/cli test -> 6 files, 43 tests passed",
+        "npm --prefix sdk/cli test -> 6 files, 44 tests passed",
         "npm --prefix sdk/cli run build -> Built dist/cli.js",
         "dist launcher smoke -> isolated 0700/0600 runtime config and explicit legacy Gateway compatibility exit",
         "make gateway-unit-gate -> 2111 passed, 3 deselected"
@@ -84,7 +84,7 @@
       ],
       "status": "done",
       "evidence": [
-        "make independent-cli-gate -> 6 files, 43 tests passed and bundle built",
+        "make independent-cli-gate -> 6 files, 44 tests passed and bundle built",
         "package verifier source/target/hash tamper fixtures -> pass",
         "native missing-bwrap preflight, signal forwarding, Chat reasoning ordering, abort, retry, and tool identity regressions -> pass"
       ],

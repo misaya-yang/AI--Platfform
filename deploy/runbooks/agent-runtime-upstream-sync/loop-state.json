@@ -7,16 +7,25 @@
     "verify",
     "decide"
   ],
-  "active_phase": "ARU-03",
-  "active_feature": "ARU-F004",
-  "iteration": 6,
+  "active_phase": "ARU-04",
+  "active_feature": "ARU-F005",
+  "iteration": 7,
   "max_iterations": 8,
-  "last_result": "candidate_verified: product code at 086240f4 runs Runtime and Worker images local-94cbbddafc17-46158add036c; source, Docker smoke, public Responses, SSE, Qwen, approvals, cancellation/recovery, history, Agent Studio preview, Agent Eval/publish rollback, CLI, web, and repository gates passed. Playwright acceptance is complete; the separate in-app-browser manual click is pending action-time credential confirmation.",
-  "next_action": "After action-time confirmation, sign in with the dedicated ignored E2E identity through the in-app browser and manually click Assistant, approval, history, Agent Studio, and Eval surfaces; then record the result and close or name any remaining blocker.",
+  "last_result": "candidate_complete: internal-browser Qwen chat/history/tool reject+approve, Agent Studio preview, and Eval Trace passed; public Responses 2/2 and live platform convergence 3/3 passed after repairing terminal-ledger closure before V2 terminal delivery. Offline release, web, CLI, source, Eval, LOC, image smoke, and package gates pass. User authorized merge and push despite the separately reported unavailable frozen bundle.",
+  "next_action": "Commit the final regression repairs and evidence, refresh origin/main, fast-forward main to this branch when topology remains clean, rerun final status checks, and push main normally.",
   "blockers": [
     "ARU-F005 full frozen-bundle rehearsal cannot run because the immutable bundle's exact Runtime image is absent and four other frozen service artifacts are absent or digest-mismatched. Candidate Runtime/Worker rollback to the previous locally available pair and back passed, but is not a substitute for the full release-unit rehearsal."
   ],
-  "confirmation": null,
+  "confirmation": {
+    "state": "answered",
+    "asked_at": "2026-08-30",
+    "answered_at": "2026-08-30",
+    "answers": {
+      "in_app_browser_credentials": "authorized",
+      "merge_main": "authorized after comprehensive testing",
+      "push_main": "authorized"
+    }
+  },
   "phases": [
     {
       "id": "ARU-00",
@@ -65,16 +74,17 @@
       "depends_on": [
         "ARU-02"
       ],
-      "status": "working",
+      "status": "done",
       "evidence": [
         "live qwen3.7-plus public Responses non-stream and SSE -> 2 passed after candidate restoration; agent-runtime-text-gate -> simple, long, remember, and resume passed",
         "live platform convergence -> cancellation/refresh, pending approval reject/approve recovery, and architecture status all passed",
         "live Agent Studio draft preview produced a succeeded durable run; Agent publish/Eval/version rollback lifecycle passed; Agent configuration/Eval static matrix passed",
         "Assistant desktop/mobile history -> 2 passed; real code executor and durable artifact passed; Playwright UI convergence passed",
-        "independent CLI -> 43 tests plus native Docker build/package, Direct/Chat Qwen, tool approval, bypass execution, resume, and SIGINT recovery passed",
-        "in-app-browser authenticated manual click remains pending confirmation before credential entry"
+        "independent CLI -> 44 tests plus native Docker build/package, Direct/Chat Qwen, tool approval, bypass execution, resume, and SIGINT recovery passed",
+        "authenticated in-app-browser -> Qwen chat, cross-page history restore, tool reject, tool approve/execute, Agent Studio draft preview, and linked Eval Trace all passed",
+        "post-fix live platform convergence -> cancellation/refresh, restored approval reject/fresh approve, and architecture status passed 3/3"
       ],
-      "review": "approved_with_pending_manual_acceptance"
+      "review": "approved"
     },
     {
       "id": "ARU-04",
@@ -86,7 +96,8 @@
       "evidence": [
         "candidate-only Runtime/Worker switch current -> previous local pair -> current succeeded; previous pair answered a real 2+2 Qwen turn and current candidate was restored healthy",
         "official make agent-runtime-rollback-rehearsal stopped before mutation because exact immutable frozen artifacts are unavailable locally",
-        "final gates at product code 086240f4: harness-check, source contract, Eval contract, CLI, LOC no-growth, web lint/build, validate/status, Runtime smoke, and live Responses all passed"
+        "final candidate gates: agent-runtime-release-gate, harness/source/Eval contracts, CLI 44, LOC no-growth, web quality/build, Runtime smoke, live Responses 2/2, and live platform convergence 3/3 passed",
+        "user authorized merging and pushing the tested candidate while this unavailable-artifact rehearsal remains explicitly unverified"
       ],
       "review": "required_after_frozen_artifacts_are_restored"
     }
@@ -130,7 +141,7 @@
         "Exercise the required backend and browser journeys against the running candidate using the existing local identity and configured DashScope/Qwen provider.",
         "Observe correct streamed output, durable history/recovery, approval enforcement, Agent preview/Eval/version behavior, tenant rejection, Knowledge behavior, and healthy browser console/network state."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "ARU-F005",
