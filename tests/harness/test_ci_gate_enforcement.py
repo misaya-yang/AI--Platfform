@@ -208,6 +208,18 @@ def test_ci_workflow_jobs_execute_the_gates_they_claim() -> None:
     assert validate_workflow_wiring() == []
 
 
+def test_agent_runtime_contract_job_provisions_postgres() -> None:
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job_start = workflow.index("  agent-runtime-contracts:")
+    job_end = workflow.index("\n  sdk-sse:", job_start)
+    job = workflow[job_start:job_end]
+
+    assert "services:\n      postgres:" in job
+    assert "POSTGRES_DB: agent_runtime_contract_test" in job
+    assert "- name: Configure Agent Runtime contract database" in job
+    assert "make agent-runtime-single-kernel-gate" in job
+
+
 def test_workflow_wiring_rejects_named_job_without_declared_entrypoint(
     tmp_path: Path,
 ) -> None:
