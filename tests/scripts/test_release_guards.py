@@ -286,9 +286,16 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
 
 def test_cli_publish_packs_from_the_package_directory() -> None:
     publish = _read(".github/workflows/publish-sdk.yml")
+    package = json.loads(_read("sdk/cli/package.json"))
 
     assert "cd sdk/cli\n          npm pack --dry-run" in publish
     assert "npm --prefix sdk/cli pack --dry-run" not in publish
+    prepare = "node sdk/cli/scripts/prepare-native-vendor.mjs linux-x64"
+    build = "scripts/harness/build_agent_runtime_cli_package.sh"
+    assert prepare in publish
+    assert publish.index(prepare) < publish.index(build)
+    assert package["os"] == ["linux"]
+    assert package["cpu"] == ["x64"]
 
 
 def test_common_load_env_preserves_explicit_runtime_image_and_reads_defaults(tmp_path: Path) -> None:

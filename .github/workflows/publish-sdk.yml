@@ -86,6 +86,7 @@ jobs:
         env:
           AI_GATEWAY_CLI_PACKAGE_TARGETS: linux-x64
         run: |
+          node sdk/cli/scripts/prepare-native-vendor.mjs linux-x64
           scripts/harness/build_agent_runtime_cli_package.sh
           npm --prefix sdk/cli run verify:native
           cd sdk/cli

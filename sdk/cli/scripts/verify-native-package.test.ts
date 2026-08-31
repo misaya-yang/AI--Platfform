@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(cliRoot, "../..");
-const target = "test-x64";
+const target = "linux-arm64";
 let vendorRoot = "";
 
 afterEach(() => {
@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("native package verifier", () => {
-  it("accepts a source-matched receipt and rejects binary tampering", () => {
+  it("accepts a source-matched local Linux arm64 receipt and rejects binary tampering", () => {
     const source = JSON.parse(readFileSync(join(repositoryRoot, "deploy/agent-runtime-source/source-receipt.json"), "utf8"));
     const overlay = JSON.parse(readFileSync(join(repositoryRoot, "rust/agent-runtime-overlay/manifest.json"), "utf8"));
     const binary = Buffer.from("synthetic-native-cli");
@@ -36,8 +36,8 @@ describe("native package verifier", () => {
       schema_version: "ai-gateway-cli/native-artifact/v1",
       upstream_sha: source.source.upstream_sha,
       overlay_sha256: overlay.sha256,
-      target_system: "test",
-      target_arch: "x64",
+      target_system: "linux",
+      target_arch: "arm64",
       binary: "codex",
       sha256: createHash("sha256").update(binary).digest("hex"),
     }));
