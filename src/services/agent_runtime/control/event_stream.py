@@ -250,10 +250,12 @@ async def stream_thread_events(
                     envelope = projected
                     event_data = envelope.get("data")
                 event_type = str(envelope.get("event_type") or "")
-                if event_type in {"run_finished", "run_error"}:
+                # A stream without a turn filter is a durable whole-thread
+                # cursor. An older turn reaching terminal state must not hide
+                # later turns from backlog replay or close the live stream.
+                if turn_id and event_type in {"run_finished", "run_error"}:
                     terminal_status = str((event_data or {}).get("status") or "failed")
-                    if turn_id:
-                        await plane._complete_run(uuid.UUID(turn_id), terminal_status)
+                    await plane._complete_run(uuid.UUID(turn_id), terminal_status)
                 yield envelope
                 if terminal_status:
                     break
