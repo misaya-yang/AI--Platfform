@@ -325,6 +325,7 @@ export function renderRuntimeConfig(
     `model_provider = ${toml(providerId)}`,
     `approval_policy = ${toml(config.approval_policy ?? "on-request")}`,
     `sandbox_mode = ${toml(config.sandbox_mode ?? "workspace-write")}`,
+    ...(override ? ['web_search = "disabled"'] : []),
     "",
     "[shell_environment_policy]",
     'inherit = "core"',

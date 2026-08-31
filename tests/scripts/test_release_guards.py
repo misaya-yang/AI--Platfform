@@ -284,6 +284,13 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
     assert f"AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION={expected_revision}" in example
 
 
+def test_cli_publish_packs_from_the_package_directory() -> None:
+    publish = _read(".github/workflows/publish-sdk.yml")
+
+    assert "cd sdk/cli\n          npm pack --dry-run" in publish
+    assert "npm --prefix sdk/cli pack --dry-run" not in publish
+
+
 def test_common_load_env_preserves_explicit_runtime_image_and_reads_defaults(tmp_path: Path) -> None:
     env_file = tmp_path / "runtime.env"
     env_file.write_text(

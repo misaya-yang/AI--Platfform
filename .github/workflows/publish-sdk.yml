@@ -88,7 +88,8 @@ jobs:
         run: |
           scripts/harness/build_agent_runtime_cli_package.sh
           npm --prefix sdk/cli run verify:native
-          npm --prefix sdk/cli pack --dry-run
+          cd sdk/cli
+          npm pack --dry-run
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

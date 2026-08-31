@@ -158,13 +158,12 @@ describe("Responses to Chat Completions compatibility", () => {
     })).toThrow(/responses_function_output_unsupported/);
   });
 
-  it("flattens Runtime namespaces and omits native web search for Chat providers", () => {
+  it("flattens Runtime namespaces for Chat providers", () => {
     const result = responsesToChat({
       model: "chat-model",
       stream: true,
       input: "hello",
       tools: [
-        { type: "web_search" },
         {
           type: "namespace",
           name: "mcp",
@@ -181,6 +180,15 @@ describe("Responses to Chat Completions compatibility", () => {
     });
 
     expect((result.tools as any[]).map((tool) => tool.function.name)).toEqual(["write"]);
+  });
+
+  it("fails closed for hosted tools that Chat providers cannot represent", () => {
+    expect(() => responsesToChat({
+      model: "chat-model",
+      stream: true,
+      input: "search the web",
+      tools: [{ type: "web_search" }],
+    })).toThrow(/responses_tool_unsupported/);
   });
 
   it("fails closed for image input instead of silently dropping it", () => {

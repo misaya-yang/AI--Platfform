@@ -51,6 +51,7 @@ describe("independent CLI provider config", () => {
     expect(rendered).toContain('inherit = "core"');
     expect(rendered).toContain("ignore_default_excludes = false");
     expect(rendered).toContain('env_key = "THIRD_PARTY_API_KEY"');
+    expect(rendered).not.toContain('web_search = "disabled"');
     expect(rendered).toContain('"X-Organization" = "THIRD_PARTY_ORG"');
     expect(rendered).toContain('"api-version" = "2026-08-01"');
     expect(rendered).toContain('"*KEY*"');
@@ -170,6 +171,7 @@ describe("independent CLI provider config", () => {
     });
     expect(rendered).toContain('base_url = "http://127.0.0.1:43123/v1"');
     expect(rendered).toContain('env_key = "AI_GATEWAY_LOCAL_PROXY_TOKEN"');
+    expect(rendered).toContain('web_search = "disabled"');
     expect(rendered).not.toContain("THIRD_PARTY_API_KEY");
     expect(rendered).not.toContain("provider.example");
   });

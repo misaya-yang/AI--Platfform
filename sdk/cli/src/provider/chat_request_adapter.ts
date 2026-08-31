@@ -75,7 +75,6 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
     for (const tool of body.tools) {
       const value = record(tool, "responses_tool_unsupported");
       if (value.type === "function") appendFunction(value);
-      else if (value.type === "web_search") continue;
       else if (value.type === "namespace") {
         if (!Array.isArray(value.tools)) throw new CompatibilityError("responses_tool_unsupported");
         for (const child of value.tools) {
