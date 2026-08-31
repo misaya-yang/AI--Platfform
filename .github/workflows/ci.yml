@@ -40,6 +40,7 @@ jobs:
       - name: Run focused Python lint
         run: |
           uv run --extra dev ruff check \
+            tests/scripts/test_runtime_script_topology_contract.py \
             tests/scripts/test_validate_env_quickstart.py \
             tests/scripts/test_web_runtime_config_entrypoint.py \
             tests/scripts/test_seed_demo_data.py
@@ -47,6 +48,7 @@ jobs:
       - name: Run focused script tests
         run: |
           uv run --extra dev --extra test pytest -q --no-cov \
+            tests/scripts/test_runtime_script_topology_contract.py \
             tests/scripts/test_validate_env_quickstart.py \
             tests/scripts/test_web_runtime_config_entrypoint.py \
             tests/scripts/test_seed_demo_data.py
