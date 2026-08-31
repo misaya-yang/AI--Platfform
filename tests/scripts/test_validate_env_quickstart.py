@@ -1024,11 +1024,21 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
     status = Path("scripts/new/status.sh").read_text()
 
     assert "knowledge_worker_container()" in common
-    assert '"$(knowledge_worker_container)"' in common
+    assert "compose_running_service_containers knowledge-worker" in common
     assert "check_knowledge_worker_health()" in common
-    assert "knowledge-worker" in re.search(
-        r'FULL_APP_SERVICES="([^"]+)"', deploy
-    ).group(1).split()
+    assert 'FULL_APP_SERVICES="$(topology_service_ids app)"' in deploy
+    full_app_services = subprocess.check_output(
+        [
+            "python3",
+            "scripts/deploy/topology_modes.py",
+            "--mode",
+            "full",
+            "--service-ids",
+            "app",
+        ],
+        text=True,
+    ).split()
+    assert "knowledge-worker" in full_app_services
     assert 'SERVICES="$FULL_APP_SERVICES"' in deploy
     assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in deploy
     assert (
@@ -1556,8 +1566,15 @@ def test_migrate_rejects_missing_explicit_env_file_before_db_access(
 def test_make_deploy_targets_forward_args() -> None:
     makefile = Path("Makefile").read_text()
     for target in ["deploy", "deploy-build", "deploy-cn", "deploy-infra", "deploy-app"]:
-        pattern = rf"^{target}:.*\n\t@bash \$\(SCRIPTS\)/deploy\.sh[^\n]*\$\(ARGS\)"
-        assert re.search(pattern, makefile, re.MULTILINE), f"{target} does not pass ARGS"
+        block = re.search(
+            rf"^{re.escape(target)}:.*?(?=^[A-Za-z0-9_.%-]+:|\Z)",
+            makefile,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert block, f"{target} target is missing"
+        logical_recipe = block.group(0).replace("\\\n", " ")
+        deploy = re.search(r"bash \$\(SCRIPTS\)/deploy\.sh[^\n]*", logical_recipe)
+        assert deploy and "$(ARGS)" in deploy.group(0), f"{target} does not pass ARGS"
 
 
 def test_make_targets_forward_env_file() -> None:
@@ -1618,10 +1635,17 @@ def test_status_script_uses_selected_env_file_for_compose_ps(tmp_path: Path) -> 
         'printf \'%s\\n\' "$*" >> "$DOCKER_CALL_LOG"\n'
         'if [ "$1" = "compose" ]; then\n'
         '  if [ "$2" = "version" ]; then exit 0; fi\n'
-        '  if [ "$2" = "--env-file" ] && [ "$3" = "$EXPECTED_ENV_FILE" ] && [ "$4" = "ps" ]; then\n'
-        '    echo "compose ps used selected env file"\n'
-        "    exit 0\n"
-        "  fi\n"
+        '  case " $* " in *" --env-file $EXPECTED_ENV_FILE ps ") '
+        '    echo "compose ps used selected env file"; exit 0 ;; esac\n'
+        "fi\n"
+        'if [ "$1" = "ps" ]; then\n'
+        '  case "$*" in\n'
+        '    *"com.docker.compose.service=gateway"*) echo gateway-1 ;;\n'
+        '    *"com.docker.compose.service=agent-runtime"*) echo agent-runtime-1 ;;\n'
+        '    *"com.docker.compose.service=knowledge-worker"*) echo knowledge-worker-1 ;;\n'
+        '    *"com.docker.compose.service=agent-capability-worker"*) echo capability-worker-1 ;;\n'
+        "  esac\n"
+        "  exit 0\n"
         "fi\n"
         'if [ "$1" = "exec" ]; then exit 0; fi\n'
         'if [ "$1" = "inspect" ]; then echo healthy; exit 0; fi\n'
@@ -1658,7 +1682,7 @@ def test_status_script_uses_selected_env_file_for_compose_ps(tmp_path: Path) -> 
     assert result.returncode == 0, output
     assert "compose ps used selected env file" in output
     assert "Gateway metrics:" in output
-    assert f"compose --env-file {env_file} ps" in call_log.read_text()
+    assert f"--env-file {env_file} ps" in call_log.read_text()
 
 
 def test_status_script_exits_nonzero_when_health_checks_fail(tmp_path: Path) -> None:
