@@ -80,7 +80,7 @@
         "live platform convergence -> cancellation/refresh, pending approval reject/approve recovery, and architecture status all passed",
         "live Agent Studio draft preview produced a succeeded durable run; Agent publish/Eval/version rollback lifecycle passed; Agent configuration/Eval static matrix passed",
         "Assistant desktop/mobile history -> 2 passed; real code executor and durable artifact passed; Playwright UI convergence passed",
-        "independent CLI -> 44 tests plus native Docker build/package, Direct/Chat Qwen, tool approval, bypass execution, resume, and SIGINT recovery passed",
+        "independent CLI -> 46 tests plus native Docker build/package, Direct/Chat Qwen, tool approval, bypass execution, resume, and SIGINT recovery passed",
         "authenticated in-app-browser -> Qwen chat, cross-page history restore, tool reject, tool approve/execute, Agent Studio draft preview, and linked Eval Trace all passed",
         "post-fix live platform convergence -> cancellation/refresh, restored approval reject/fresh approve, and architecture status passed 3/3"
       ],
@@ -96,7 +96,7 @@
       "evidence": [
         "candidate-only Runtime/Worker switch current -> previous local pair -> current succeeded; previous pair answered a real 2+2 Qwen turn and current candidate was restored healthy",
         "official make agent-runtime-rollback-rehearsal stopped before mutation because exact immutable frozen artifacts are unavailable locally",
-        "final candidate gates: agent-runtime-release-gate, harness/source/Eval contracts, CLI 44, LOC no-growth, web quality/build, Runtime smoke, live Responses 2/2, and live platform convergence 3/3 passed",
+        "final candidate gates: agent-runtime-release-gate, harness/source/Eval contracts, CLI 46, LOC no-growth, web quality/build, Runtime smoke, live Responses 2/2, and live platform convergence 3/3 passed",
         "user authorized merging and pushing the tested candidate while this unavailable-artifact rehearsal remains explicitly unverified"
       ],
       "review": "required_after_frozen_artifacts_are_restored"
