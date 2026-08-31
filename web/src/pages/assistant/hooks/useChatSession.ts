@@ -3518,11 +3518,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           setArtifacts(result.sessionArtifacts.map(toArtifact));
           void hydrateQuizData(restored, setMessages);
         }
-        if (!result.sessionId || activeSessionIdRef.current === result.sessionId) {
-          setServerRunBlocking(false);
-        }
       } catch {
         console.warn("Reconcile after dead-stream approval decision failed");
+      } finally {
+        if (!sessionIdHint || activeSessionIdRef.current === sessionIdHint) {
+          setServerRunBlocking(false);
+        }
       }
     },
     [],

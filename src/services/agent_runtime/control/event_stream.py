@@ -250,12 +250,13 @@ async def stream_thread_events(
                     envelope = projected
                     event_data = envelope.get("data")
                 event_type = str(envelope.get("event_type") or "")
-                yield envelope
                 if event_type in {"run_finished", "run_error"}:
                     terminal_status = str((event_data or {}).get("status") or "failed")
+                    if turn_id:
+                        await plane._complete_run(uuid.UUID(turn_id), terminal_status)
+                yield envelope
+                if terminal_status:
                     break
-    if terminal_status and turn_id:
-        await plane._complete_run(uuid.UUID(turn_id), terminal_status)
 
 
 __all__ = [

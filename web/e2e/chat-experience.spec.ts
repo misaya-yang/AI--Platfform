@@ -2245,7 +2245,7 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   const consoleErrors: string[] = [];
   const requestFailures: string[] = [];
   let runStatusHits = 0;
-  let runSucceeded = false;
+  let runStatusFails = false, runSucceeded = false;
 
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -2292,11 +2292,12 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   );
   await page.route(`**/api/v1/assistant/runs/${runId}`, async (route) => {
     runStatusHits += 1;
+    if (runStatusFails) return route.fulfill(jsonResponse({}));
     await route.fulfill(
       jsonResponse({
         run: {
           run_id: runId,
-          session_id: sessionId,
+          session_id: sessionId, harness_thread_id: "e2e-runtime-thread",
           status: runSucceeded ? "succeeded" : "running",
           checkpoint: runSucceeded
             ? { phase: "completed" }
@@ -2319,13 +2320,12 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   await expect.poll(() => runStatusHits).toBeGreaterThan(hitsBeforeRefresh);
   await page.getByRole("button", { name: /Activity/ }).last().click();
   await expect(page.getByText("Approval required: shell")).toBeVisible();
-  // The decision is offered on two surfaces now: the inline approval card in
-  // the message and the Activity panel row. Assert presence without pinning
-  // the test to one of them; the terminal assertion below still requires both
-  // to clear.
   await expect(page.getByRole("button", { name: "Approve" }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Reject" }).first()).toBeVisible();
-
+  runStatusFails = true;
+  await page.getByRole("button", { name: "Approve" }).first().click();
+  await expect(page.locator(`#${ASSISTANT_COMPOSER_ID}`)).toBeEnabled();
+  runStatusFails = false;
   runSucceeded = true;
   const hitsBeforeTerminalRefresh = runStatusHits;
   await page.reload();
