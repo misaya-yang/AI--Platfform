@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...core.auth.user_resolver import UserContext
+from ...services.llm.provider_health import provider_probe_status
 from ...services.llm.provider_setup import configured_providers
 from ...services.registry.health_monitor import HealthMonitor
 from ...services.registry.service_registry import ServiceRegistry
@@ -224,7 +223,10 @@ async def all_providers_health(
 
     model_meta = getattr(request.app.state, "model_meta", None)
     if not model_meta:
-        return {}
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "PROVIDER_HEALTH_COLLECTION_UNAVAILABLE"},
+        )
 
     # Per-provider display names. Keyed by the ``ModelProvider`` enum
     # value (which matches ``llm_providers.provider_id`` in the DB).
@@ -238,19 +240,21 @@ async def all_providers_health(
     }
 
     tenant_id = user.tenant_id or "default"
-    configured = set(await configured_providers(model_meta, tenant_id))
-    model_counts = await model_meta.count_enabled_models_by_provider(tenant_id)
+    try:
+        configured = set(await configured_providers(model_meta, tenant_id))
+        model_counts = await model_meta.count_enabled_models_by_provider(tenant_id)
+    except Exception as exc:
+        logger.warning("Provider health collection failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail={"code": "PROVIDER_HEALTH_COLLECTION_UNAVAILABLE"}) from None
 
     providers_status = {}
-    for provider in ModelProvider:
-        pid = provider.value
+    for pid in sorted(set(provider_names) | configured | set(model_counts)):
         is_configured = pid in configured
         providers_status[pid] = {
             "name": provider_names.get(pid, pid),
-            "status": "configured" if is_configured else "not_configured",
+            **provider_probe_status(request, tenant_id, pid, configured=is_configured),
             "configured": is_configured,
             "model_count": model_counts.get(pid, 0) if is_configured else 0,
-            "last_check": datetime.utcnow().isoformat(),
         }
 
     return providers_status

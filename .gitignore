@@ -109,9 +109,8 @@ temp/
 claude/
 outputs/
 node_modules/
-sdk/cli/vendor/*/codex
-sdk/cli/vendor/*/codex.exe
-sdk/cli/vendor/*/artifact.json
+# Native bundles (binary, provenance, SBOM and license copies) are build outputs.
+sdk/cli/vendor/*/
 sdk/cli/vendor/source.json
 
 # ======================== OS Generated ========================

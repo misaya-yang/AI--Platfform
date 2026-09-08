@@ -13,6 +13,7 @@ import json
 import math
 import uuid
 import weakref
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -38,6 +39,7 @@ from .common import ensure_dict as _ensure_dict
 from .common import maybe_await
 from .common import permission_rank as _permission_rank
 from .lexical_config import LEXICAL_V1, LexicalConfig, LexicalConfigError
+from .parsing.config_validation import resolve_parsing_config
 from .query_observability import (
     QueryObservationConflictError,
     decode_query_cursor,
@@ -677,6 +679,41 @@ class DatasetService:
         datasets = await self.db.list_datasets(
             tenant_id=user.tenant_id, include_public=True, limit=200, offset=0
         )
+        return await self._visible_dataset_rows(user, datasets)
+
+    async def list_datasets_page(
+        self, user: UserContext, *, limit: int = 200, cursor: str | None = None,
+    ) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValidationFailedError("dataset page limit must be in 1..200")
+        kwargs: dict[str, Any] = {}
+        if cursor is not None:
+            try:
+                if len(cursor) > 1024:
+                    raise ValueError
+                created_at, dataset_id = decode_query_cursor(cursor)
+                if len(dataset_id) > 255:
+                    raise ValueError
+                kwargs = {"before_created_at": created_at, "before_dataset_id": dataset_id}
+            except (ValueError, RecursionError) as exc:
+                raise ValidationFailedError("invalid dataset pagination cursor") from exc
+        rows = await self.db.list_datasets(
+            tenant_id=user.tenant_id, include_public=True, limit=limit + 1, offset=0, **kwargs,
+        )
+        page = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            created_at = last["created_at"]
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            next_cursor = encode_query_cursor(created_at, str(last["dataset_id"]))
+        # Advance on the scanned row, including pages whose rows ACL filters out.
+        return {"items": await self._visible_dataset_rows(user, page), "next_cursor": next_cursor}
+
+    async def _visible_dataset_rows(
+        self, user: UserContext, datasets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         visible: list[dict[str, Any]] = []
         for ds in datasets:
             perm = await self._effective_dataset_permission(ds, user)
@@ -766,6 +803,7 @@ class DatasetService:
         _require_server_owned_dataset_rerank_config(data.get("index_config"))
         _require_bounded_persisted_retrieval_config(data.get("index_config"))
         _require_safe_persisted_chunking_config(data.get("index_config"))
+        resolve_parsing_config(_ensure_dict(data.get("index_config")))
         _require_multimodal_dataset_disabled(data)
 
         dataset_id = str(data.get("dataset_id") or "").strip()
@@ -894,6 +932,7 @@ class DatasetService:
             _require_server_owned_dataset_rerank_config(patch.get("index_config"))
             _require_bounded_persisted_retrieval_config(patch.get("index_config"))
             _require_safe_persisted_chunking_config(patch.get("index_config"))
+            resolve_parsing_config(_ensure_dict(patch.get("index_config")))
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
         try:
             deletion_fence = dataset_index_deletion_fence(dataset)
@@ -1217,11 +1256,9 @@ class DatasetService:
         user: UserContext,
         dataset_id: str,
         *,
-        password: str,
+        deletion_confirmed: bool = False,
         reason: str | None = None,
     ) -> bool:
-        from ...core.auth.password import verify_password
-
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
         deletion_target = make_dataset_index_deletion_fence(
             "dataset_delete",
@@ -1239,12 +1276,8 @@ class DatasetService:
         if not user.is_authenticated:
             raise PermissionDeniedError("Authentication required")
 
-        account = await self.db.get_user(user.user_id)
-        account_password_hash = str((account or {}).get("password_hash") or "")
-        if not account_password_hash:
-            raise PermissionDeniedError("Password confirmation requires account login")
-        if not verify_password(password, account_password_hash):
-            raise ValidationFailedError("Invalid password")
+        if deletion_confirmed is not True:
+            raise PermissionDeniedError("Verified Gateway deletion confirmation required")
 
         lease_factory = getattr(self.db, "dataset_index_delete_lease", None)
         set_fence = getattr(self.db, "set_dataset_index_deletion_fence", None)
@@ -1541,7 +1574,7 @@ class DatasetService:
         rec = await self.db.get_dataset_permission(dataset.get("dataset_id"), "user", user.user_id)
         best = str(rec.get("permission")) if rec else None
 
-        for role in user.roles or []:
+        for role in (user.roles or []) if same_tenant else []:
             r = await self.db.get_dataset_permission(dataset.get("dataset_id"), "role", role)
             p = str(r.get("permission")) if r else None
             if _permission_rank(p) > _permission_rank(best):

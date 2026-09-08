@@ -3,7 +3,7 @@
 Everything an agent or a new engineer needs is reachable from this page. If knowledge is not in
 this repository, it does not exist — see [`harness/README.md`](harness/README.md) §1.
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
 
 ---
 
@@ -67,6 +67,8 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | [`ADR-006`](architecture/ADR-006-agent-runtime-single-kernel.md) | Agent Runtime as the single target Agent kernel |
 | [`ADR-007`](architecture/ADR-007-agent-runtime-data-boundaries.md) | Gateway model plane, ThreadStore, and capability-service boundaries |
 | [`ADR-009`](architecture/ADR-009-independent-cli-local-runtime.md) | Independent CLI local Runtime and provider ownership |
+| [`ADR-010`](architecture/ADR-010-phase1-tenant-identity-and-knowledge-authorization.md) | Authenticated tenant preconditions, epoch 001 Knowledge ACL/privileges, Gateway actor/deletion confirmation and epoch 2 compatibility |
+| [`ADR-011`](architecture/ADR-011-phase1-shared-contracts-and-metrics-ownership.md) | Reviewed pure pricing/schema-revision/retrieval contracts; metrics collector remains Gateway-owned with explicit core transport injection |
 
 Write a new ADR when a change alters a dependency boundary, adds a service, or changes a contract
 listed in [`harness/architecture.md`](harness/architecture.md) §6.
@@ -75,6 +77,7 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 
 | Plan | Subject |
 | --- | --- |
+| [`plans/agent-platform-vnext-2026-09/README.md`](plans/agent-platform-vnext-2026-09/README.md) | **active / 一期实现** — 三期升级PRD；一期已在 `codex/agent-platform-vnext-phase1` 启动，P1-01首批租户边界代码与验证见执行receipt；二/三期仍为计划。 |
 | [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md) | **superseded as execution instruction** — 证据保留；现行 provider/stability blocker 在 `sota-performance-dual-gate`。 |
 | [`plans/sota-performance-claude-handoff.md`](plans/sota-performance-claude-handoff.md) | **archived intent, pending move** — 已消费的一次性交接提示词，不得再次执行。 |
 | [`plans/assistant-upgrade-plan-2026-08.md`](plans/assistant-upgrade-plan-2026-08.md) | **superseded** — Assistant runtime upgrade snapshot retained for measured evidence; current direction is the lighten plan below. |
@@ -84,7 +87,8 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 | [`plans/knowledge-bm25-v2-shadow-rollout.md`](plans/knowledge-bm25-v2-shadow-rollout.md) | **active design contract, pending move to `docs/design/`** — BM25 v2 safety/rollout，不是程序状态。 |
 | [`plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md`](plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md) | **archived evidence, pending move** — 已完成的 Rust 0828 验收计划，不得重新执行。 |
 | [`plans/platform-architecture-convergence-prd-2026-08.md`](plans/platform-architecture-convergence-prd-2026-08.md) | **active closeout** — 核心候选 `9aaa9cab` 当前栈实机已通过；托管 Rust CI、多架构、fresh-machine 与冻结镜像回切证据仍未完成。 |
-| [`plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md`](plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md) | **queued behind architecture convergence** — 固定 upstream 快照整体同步；单一主 Session 顺序实现；以 Runtime/Worker 编译、真实 API、UI 点击、Qwen 与回切通过作为完成标准。 |
+| [`plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md`](plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md) | **implemented; retained as upgrade contract** — upstream `94cbbdda` 已同步并进入 `main`；后续修复由下列计划接管。 |
+| [`plans/agent-runtime-post-upgrade-core-fixes-2026-08.md`](plans/agent-runtime-post-upgrade-core-fixes-2026-08.md) | **queued** — 四路源码审查确认的工具授权、租户隔离、终态恢复、Python sandbox、Runtime/Worker 制品与 CLI 流式边界修复。 |
 
 ## Research
 
@@ -117,12 +121,15 @@ state authority; lifecycle conflicts in older ledgers are a named ARC-00 cleanup
 
 Standalone runbooks in the same directory:
 
+- [`agent-platform-vnext/`](../deploy/runbooks/agent-platform-vnext/README.md) — 一期唯一执行owner；`loop-state.json`与工作包receipt记录当前进度，前序执行owner已移交，历史证据及未完义务保留。
 - `assistant-runtime-operating-model.md` — runtime health, failure categories, no-go thresholds, rollback.
 - `assistant-runtime-trust-hardening.md` — trust boundary hardening.
 - `assistant-local-os-product-contract.md` — local OS agent product contract.
 - `open-source-env-readiness-todo.md` — open-source release readiness (checked by CI).
 
 ## Reports
+
+Latest architecture requirements evidence: [`../reports/architecture/agent-platform-vnext-2026-09-07.md`](../reports/architecture/agent-platform-vnext-2026-09-07.md) — 当前源码发现、真实静态门禁、有限内置浏览器验收及版本限制；不是软件升级完成或SOTA证明。
 
 `../reports/` holds evidence, organised by area: `code-review/`, `benchmark/`, `eval-regression/`,
 `agent-studio/`, `assistant-runtime-regression/`, `assistant-local-os/`, `performance/`,

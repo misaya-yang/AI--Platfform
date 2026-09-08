@@ -372,11 +372,13 @@ async def run_baseline_sql_file(
             await conn.execute("RESET ROLE")
 
 
-async def verify_baseline_sql_file(conn: Any, path: Path) -> list[dict[str, Any]]:
+async def verify_baseline_sql_file(
+    conn: Any, path: Path, *, role_prefix: str = DEFAULT_ROLE_PREFIX,
+) -> list[dict[str, Any]]:
     """Execute the frozen single-SELECT verification contract and fail closed."""
     if not path.exists():
         raise AuthorityError(f"required baseline verify file missing: {path}")
-    sql = path.read_text(encoding="utf-8")
+    sql = render_role_sql(path.read_text(encoding="utf-8"), role_prefix)
     without_line_comments = re.sub(r"(?m)^\s*--[^\n]*(?:\n|$)", "", sql).strip()
     if without_line_comments.endswith(";"):
         without_line_comments = without_line_comments[:-1].rstrip()
@@ -535,13 +537,18 @@ async def fresh_install(
                     "refusing to guess whether a partial or foreign schema is safe"
                 )
             validate_existing_adoption_marker(existing, baseline, manifest_sha256=manifest_sha256)
+            from .epoch_verification import expected_epoch_fingerprints
+
+            applied_rows = await conn.fetch(ledger.SELECT_APPLIED_CHANGES, baseline.baseline_id)
+            applied = {int(row["sequence"]): str(row["checksum_sha256"]) for row in applied_rows}
+            expected = expected_epoch_fingerprints(paths, baseline, applied)
             computed = await compute_fingerprints(
                 conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
             )
             drift = [
-                f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
+                f"{name}: expected {expected[name]}, computed {computed[name]}"
                 for name in ("structural", "acl", "extensions", "reference_data")
-                if baseline.fingerprints[name] != computed[name]
+                if expected[name] != computed[name]
             ]
             if drift:
                 raise AuthorityError(
@@ -572,7 +579,7 @@ async def fresh_install(
         # grants.sql runs in an owner savepoint and resets role on return.
         # Re-enter owner for verification, fingerprints, and ledger creation.
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
-        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
+        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql", role_prefix=role_prefix)
 
         computed = await compute_fingerprints(
             conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
@@ -609,6 +616,7 @@ async def startup_schema_check(
     supported_baselines: frozenset[str],
     *,
     max_epoch_sequence: int,
+    min_epoch_sequence: int = 0,
 ) -> dict[str, Any]:
     """Read-only application startup validation.
 
@@ -632,8 +640,9 @@ async def startup_schema_check(
         "SELECT to_regclass($1) IS NOT NULL", f"public.{ledger.BASELINES_TABLE}"
     )
     if not ledger_present:
-        if result["missing_objects"]:
+        if result["missing_objects"] or min_epoch_sequence > 0:
             result["ok"] = False
+            result["reason"] = "schema authority migration required before application startup"
         else:
             result["epoch"] = "legacy"
         return result
@@ -660,11 +669,11 @@ async def startup_schema_check(
         "WHERE baseline_id = $1",
         baseline_id,
     )
-    if int(max_sequence) > max_epoch_sequence:
+    if not min_epoch_sequence <= int(max_sequence) <= max_epoch_sequence:
         result["ok"] = False
         result["reason"] = (
-            f"database schema revision {baseline_id}:{max_sequence} is newer "
-            f"than this application supports (max {max_epoch_sequence}); "
+            f"database schema revision {baseline_id}:{max_sequence} is outside "
+            f"the application window ({min_epoch_sequence}..{max_epoch_sequence}); "
             "refusing to start"
         )
         return result

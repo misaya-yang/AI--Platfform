@@ -103,7 +103,7 @@ class RunMetrics(BaseModel):
     """LangGraph run metrics"""
 
     total: int
-    success_rate: float
+    success_rate: float | None
     avg_duration_ms: int
 
 
@@ -172,7 +172,7 @@ class UserDashboard(BaseModel):
     active_threads: int
     requests_today: int
     avg_latency_ms: int
-    error_rate: float
+    error_rate: float | None
     timestamp: str
 
 
@@ -477,7 +477,7 @@ async def get_realtime_dashboard(
         ),
         runs=RunMetrics(
             total=snapshot.total_runs,
-            success_rate=snapshot.run_success_rate,
+            success_rate=snapshot.run_success_rate if snapshot.total_runs > 0 else None,
             avg_duration_ms=snapshot.avg_run_duration_ms,
         ),
         timestamp=snapshot.timestamp,
@@ -532,6 +532,8 @@ async def websocket_dashboard(
             # Get latest snapshot
             snapshot = await realtime.get_realtime_snapshot()
             data = snapshot.to_dict()
+            if snapshot.total_runs == 0:
+                data["runs"]["success_rate"] = None
             data["type"] = "metrics"
 
             # Add tenant context to response
@@ -828,7 +830,7 @@ async def get_user_dashboard(
 
     requests_today = 0
     avg_latency = 0
-    error_rate = 0.0
+    error_rate = None
     cost_usd = 0.0
 
     if usage_recorder and usage_recorder.database:
@@ -841,7 +843,8 @@ async def get_user_dashboard(
             )
             requests_today = summary.get("total_requests", 0)
             avg_latency = summary.get("avg_latency_ms", 0)
-            error_rate = 100 - summary.get("success_rate", 100)
+            success_rate = summary.get("success_rate")
+            error_rate = 100 - success_rate if requests_today > 0 and success_rate is not None else None
             cost_usd = summary.get("total_cost_usd", 0.0)
         except Exception as e:
             logger.warning(f"Failed to get user dashboard from UsageRecorder: {e}")
@@ -896,7 +899,7 @@ async def get_dashboard_summary(
             )
             summary_data = {
                 "total_requests": summary.get("total_requests", 0),
-                "success_rate": summary.get("success_rate", 100),
+                "success_rate": summary.get("success_rate"),
                 "avg_latency_ms": summary.get("avg_latency_ms", 0),
                 "total_tokens": summary.get("total_tokens", 0),
                 "estimated_cost_usd": summary.get("total_cost_usd", 0),
@@ -912,6 +915,8 @@ async def get_dashboard_summary(
                 last_ingested_at,
                 total_requests=summary_data["total_requests"],
             )
+            if summary.get("data_status") in {"collection_error", "unavailable"}:
+                data_status = summary["data_status"]
             summary_data.update(
                 {
                     "data_status": data_status,
@@ -930,7 +935,7 @@ async def get_dashboard_summary(
         today_summary = await recorder.get_today_summary()
         summary_data = {
             "total_requests": today_summary.get("total_requests", 0),
-            "success_rate": today_summary.get("success_rate", 100),
+            "success_rate": today_summary.get("success_rate"),
             "avg_latency_ms": today_summary.get("avg_latency_ms", 0),
             "total_tokens": today_summary.get("total_tokens", 0),
             "estimated_cost_usd": today_summary.get("estimated_cost_usd", 0),
@@ -945,7 +950,7 @@ async def get_dashboard_summary(
     if not summary_data:
         summary_data = {
             "total_requests": 0,
-            "success_rate": 100,
+            "success_rate": None,
             "avg_latency_ms": 0,
             "total_tokens": 0,
             "estimated_cost_usd": 0,
@@ -956,6 +961,8 @@ async def get_dashboard_summary(
             "data_source": "none",
         }
 
+    if not summary_data.get("total_requests"):
+        summary_data["success_rate"] = None
     # Get real-time snapshot for non-historical data
     snapshot = await realtime.get_realtime_snapshot()
 
@@ -970,7 +977,7 @@ async def get_dashboard_summary(
         "period": period,
         "overview": {
             "total_requests": summary_data.get("total_requests", 0),
-            "success_rate": summary_data.get("success_rate", 100),
+            "success_rate": summary_data.get("success_rate"),
             "avg_latency_ms": summary_data.get("avg_latency_ms", 0),
             "total_tokens": summary_data.get("total_tokens", 0),
             "estimated_cost_usd": summary_data.get("estimated_cost_usd", 0),

@@ -47,13 +47,16 @@ class GatewayModelMeta:
         )
 
     async def get_access_level(
-        self, tenant_id: str, model_id: str
+        self, tenant_id: str, model_id: str, provider_id: str | None = None,
     ) -> str | None:
         """Return the model's access_level (public / premium / admin)
         or ``None`` if the model isn't in the DB. Used by
         ``_check_model_permission`` to authorize chat requests at the
         edge before starting a Runtime turn."""
-        row = await self.model_service.get_model(tenant_id, model_id)
+        row = (
+            await self.model_service.get_model(tenant_id, model_id, provider_id=provider_id)
+            if provider_id else await self.model_service.get_model(tenant_id, model_id)
+        )
         if not row:
             return None
         return row.get("access_level")

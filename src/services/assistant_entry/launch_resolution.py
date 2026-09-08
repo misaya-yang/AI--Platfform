@@ -15,6 +15,8 @@ from ai_gateway_contracts.agent_launch import (
 from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.agents.system_prompt import GENERIC_AGENT_INSTRUCTIONS
 
+from ..llm.model_service import ModelProviderAmbiguous
+
 
 class AgentLaunchResolutionError(RuntimeError):
     def __init__(self, code: str, *, status_code: int = 503) -> None:
@@ -30,6 +32,7 @@ async def _model_binding(
     model_service: Any | None,
     provider_id: str | None,
     model_profile: Mapping[str, Any] | None,
+    expected_model_ref: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Resolve the exact enabled model/profile without knowing an HTTP request."""
 
@@ -37,8 +40,13 @@ async def _model_binding(
     profile = dict(model_profile or {})
     if model_service is not None and callable(getattr(model_service, "get_model", None)):
         try:
-            result = model_service.get_model(tenant_id, model_id)
+            result = (
+                model_service.get_model(tenant_id, model_id, provider_id=provider)
+                if provider else model_service.get_model(tenant_id, model_id)
+            )
             row = await result if inspect.isawaitable(result) else result
+        except ModelProviderAmbiguous as exc:
+            raise AgentLaunchResolutionError("MODEL_PROVIDER_REQUIRED", status_code=409) from exc
         except Exception as exc:  # noqa: BLE001 - policy uncertainty is deny
             raise AgentLaunchResolutionError("AGENT_RUNTIME_MODEL_UNAVAILABLE") from exc
         if not isinstance(row, dict) or not bool(row.get("is_enabled", True)):
@@ -56,6 +64,14 @@ async def _model_binding(
             raise AgentLaunchResolutionError(
                 "AGENT_RUNTIME_MODEL_MISMATCH", status_code=409
             )
+        if expected_model_ref is not None:
+            receipt = row.get("pricing_snapshot") or {}
+            if any(expected_model_ref.get(key) != value for key, value in (
+                ("tenant_id", tenant_id), ("model_id", resolved_id), ("provider_id", resolved_provider),
+                ("capability_revision", int(row.get("capability_revision") or 1)),
+                ("price_version", receipt.get("version")),
+            )):
+                raise AgentLaunchResolutionError("EVAL_MODEL_REF_CHANGED", status_code=409)
         provider = resolved_provider
         profile = dict(resolved_profile)
     if not provider:
@@ -117,6 +133,8 @@ async def resolve_agent_launch(
     session_id: str,
     model_id: str,
     model_service: Any | None,
+    provider_id: str | None = None,
+    expected_model_ref: Mapping[str, Any] | None = None,
     readonly_capabilities: Mapping[str, Any] | None = None,
     reasoning_option: str | None = None,
     legacy_thinking_level: str | None = None,
@@ -193,8 +211,9 @@ async def resolve_agent_launch(
         tenant_id=tenant_id,
         model_id=model_id,
         model_service=model_service,
-        provider_id=None,
+        provider_id=provider_id,
         model_profile=None,
+        expected_model_ref=expected_model_ref,
     )
     instructions = str(developer_instructions or GENERIC_AGENT_INSTRUCTIONS).strip()
     if style_guidance:

@@ -5,7 +5,7 @@ import json
 import math
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ai_gateway_core.billing.pricing_catalog import resolve_pricing_with_status
@@ -37,6 +37,8 @@ class LlmCompleteContext:
     tenant_id: str
     trace_family: str = "assistant"
     trace_id: str | None = None
+    provider_id: str | None = None
+    model_ref: dict[str, Any] | None = None
 
 
 _DEFAULT_RAG_RUBRIC = (
@@ -116,10 +118,18 @@ def _target_metrics(target: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _precise_cost_cents(model_id: str, input_tokens: int, output_tokens: int) -> float | None:
+def _precise_cost_cents(
+    model_id: str, input_tokens: int, output_tokens: int,
+    pricing_snapshot: dict[str, Any] | None = None,
+) -> float | None:
     if not model_id:
         return None
-    pricing, pricing_status = resolve_pricing_with_status(model_id)
+    if pricing_snapshot is not None:
+        pricing = {"input": pricing_snapshot["input_price_per_1k"],
+                   "output": pricing_snapshot["output_price_per_1k"]}
+        pricing_status = str(pricing_snapshot.get("pricing_status") or "tenant_model")
+    else:
+        pricing, pricing_status = resolve_pricing_with_status(model_id)
     if pricing_status == "unknown":
         return None
     input_rate = float(pricing.get("input") or 0)
@@ -516,6 +526,7 @@ def _heuristic_llm_score(evaluator: dict[str, Any], target: dict[str, Any]) -> d
         "confidence": 0.0,
         "target_type": "trace",
         "target_id": target.get("trace_id"),
+        "metadata": {"failure_kind": "infrastructure", "reason_code": "judge_unavailable_or_invalid"},
     }
 
 
@@ -586,10 +597,12 @@ class EvaluatorExecutor:
                 error_message=error_message,
             )
 
-        evaluator = await self.repository.get_evaluator(
-            tenant_id=tenant_id,
-            evaluator_id=evaluator_id,
-        )
+        evaluator = job_payload.get("evaluator_snapshot")
+        if not isinstance(evaluator, dict):
+            evaluator = await self.repository.get_evaluator(tenant_id=tenant_id, evaluator_id=evaluator_id)
+            pin = getattr(self.repository, "pin_outbox_evaluator", None)
+            if evaluator and callable(pin):
+                evaluator = await pin(tenant_id=tenant_id, evaluator=evaluator)
         if not evaluator:
             await self.repository.update_experiment_run(
                 tenant_id=tenant_id,
@@ -745,7 +758,8 @@ class EvaluatorExecutor:
         }
         error_message: str | None = None
         if infrastructure_review_persisted:
-            error_message = "KB RAGAS infrastructure failure requires retry"
+            error_message = ("KB RAGAS infrastructure failure requires retry" if evaluator_type == "ragas"
+                             else "Evaluator infrastructure failure requires retry")
         elif skipped_count:
             error_message = f"{skipped_count} evaluation target(s) had incomplete score persistence"
         if error_message:
@@ -891,6 +905,7 @@ class EvaluatorExecutor:
                         str(target.get("model_id") or ""),
                         input_tokens,
                         output_tokens,
+                        pricing_snapshot=(execution_config.get("model_ref") or {}).get("pricing_snapshot"),
                     )
                 else:
                     target["input_tokens"] = None
@@ -979,6 +994,8 @@ class EvaluatorExecutor:
                             payload=payload,
                             trace_family="assistant",
                         )
+                        if metadata.get("failure_kind") == "infrastructure":
+                            raise RuntimeError("eval_judge_infrastructure_failure")
                         if created:
                             scores_written += 1
                             label = str(created.get("label") or "")
@@ -1853,12 +1870,15 @@ class EvaluatorExecutor:
         metadata = evaluator.get("metadata") or {}
         judge_model_id = str(metadata.get("judge_model_id") or "qwen3.7-plus")
         context = llm_context or LlmCompleteContext(tenant_id="default")
+        model_ref = metadata.get("judge_model_ref")
+        model_ref = dict(model_ref) if isinstance(model_ref, dict) else None
+        context = replace(context, provider_id=str(metadata.get("judge_provider_id") or "") or None,
+                          model_ref=model_ref)
         rubric = self._resolve_llm_rubric(
             evaluator,
             target,
             trace_family=context.trace_family,
         )
-        temperature = float(metadata.get("temperature") or 0)
         trajectory = build_trajectory_summary(target)
         expected_output = _bounded_reference_json(target.get("expected_output") or {})
         expected_trajectory = _bounded_reference_json(target.get("expected_trajectory") or {})
@@ -1907,7 +1927,12 @@ class EvaluatorExecutor:
                         "confidence": confidence,
                         "target_type": "trace",
                         "target_id": target.get("trace_id"),
-                        "metadata": {"judge_model_id": judge_model_id, "temperature": temperature},
+                        "metadata": {
+                            "judge_model_id": judge_model_id, "judge_provider_id": context.provider_id,
+                            "temperature": 0, "execution_profile": "evaluator",
+                            "judge_model_ref": model_ref,
+                            "tools": [], "tool_choice": "none", "max_output_tokens": 512,
+                        },
                     }
             except Exception as exc:  # noqa: BLE001 - evaluator must degrade gracefully
                 logger.warning("LLM judge failed, marking review required: %s", exc)
@@ -1930,6 +1955,7 @@ class EvaluatorExecutor:
         total_weight = 0.0
         weighted_score = 0.0
         hard_failed = False
+        infrastructure_failed = False
         breakdown: list[dict[str, Any]] = []
         for index, component in enumerate(components, start=1):
             if not isinstance(component, dict):
@@ -1953,6 +1979,7 @@ class EvaluatorExecutor:
                 )
             else:
                 score_payload = _score_with_rules(component_evaluator, target)
+            infrastructure_failed |= (score_payload.get("metadata") or {}).get("failure_kind") == "infrastructure"
             score = _score_number(score_payload)
             threshold = float(component.get("threshold") or 0.8)
             if component.get("hard_blocker") and score < threshold:
@@ -1976,7 +2003,7 @@ class EvaluatorExecutor:
             "score_name": evaluator.get("name") or "composite",
             "score_type": "numeric",
             "numeric_value": round(final_score, 4),
-            "label": "pass"
+            "label": "review" if infrastructure_failed else "pass"
             if final_score >= float(filter_config.get("pass_threshold", 0.8))
             else "fail",
             "explanation": "Composite evaluator score from rule, trajectory, and judge components.",
@@ -1988,5 +2015,6 @@ class EvaluatorExecutor:
             "confidence": min(1.0, max((item["score"] for item in breakdown), default=0.0)),
             "target_type": "trace",
             "target_id": target.get("trace_id"),
-            "metadata": {"components": breakdown, "hard_failed": hard_failed},
+            "metadata": {"components": breakdown, "hard_failed": hard_failed,
+                         "failure_kind": "infrastructure" if infrastructure_failed else None},
         }

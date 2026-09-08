@@ -18,7 +18,7 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
-from knowledge_service.services.eval.retrieval_metrics import (
+from ai_gateway_contracts.retrieval_metrics import (
     QueryRetrievalJudgement,
     evaluate_retrieval,
 )

@@ -9,7 +9,7 @@ import { api } from "@/lib/api";
 
 export interface UsageSummary {
   total_requests: number;
-  success_rate: number;
+  success_rate: number | null;
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;

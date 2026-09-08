@@ -29,11 +29,13 @@ from ...services.agent_runtime.capability_catalog import (
     project_runtime_descriptor,
     user_has_permissions,
 )
+from .knowledge_actor import resolve_knowledge_actor
 
 router = APIRouter(
     prefix="/internal/v2/agent-capabilities",
     tags=["internal-agent-capabilities"],
 )
+router.add_api_route("/knowledge-actor", resolve_knowledge_actor, methods=["POST"], include_in_schema=False)
 
 _ARTIFACT_ID = re.compile(r"^art_[A-Za-z0-9]{8,64}$")
 _MAX_BYTES = 2_000_000

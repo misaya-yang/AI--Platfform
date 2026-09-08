@@ -95,28 +95,28 @@ export async function getAgentRuntimeV2RunSnapshot(
   turnId: string,
 ): Promise<RuntimeV2RunSnapshot> {
   const controller = new AbortController();
-  let idleTimer = window.setTimeout(() => controller.abort(), 3_000);
+  const deadline = window.setTimeout(() => controller.abort(), 5_000);
   let snapshot = createRuntimeV2RunSnapshot();
-  const resetIdleTimer = () => {
-    window.clearTimeout(idleTimer);
-    idleTimer = window.setTimeout(() => controller.abort(), 100);
-  };
   try {
-    const path = `/api/v2/agent/threads/${encodeURIComponent(threadId)}/events?after_sequence=0&turn_id=${encodeURIComponent(turnId)}`;
-    for await (const event of sseFetch<AgentV2Event>(path, {
-      method: "GET",
-      headers: { Accept: "text/event-stream" },
-      signal: controller.signal,
-      timeoutMs: 0,
-    })) {
-      snapshot = reduceRuntimeV2RunSnapshot(snapshot, event);
-      resetIdleTimer();
-      if (snapshot.terminalStatus) break;
+    while (!controller.signal.aborted && !snapshot.terminalStatus) {
+      const path = `/api/v2/agent/threads/${encodeURIComponent(threadId)}/events?after_sequence=${snapshot.lastSequence}&limit=1000&turn_id=${encodeURIComponent(turnId)}`;
+      try {
+        for await (const event of sseFetch<AgentV2Event>(path, {
+          method: "GET",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+          timeoutMs: 0,
+        })) {
+          snapshot = reduceRuntimeV2RunSnapshot(snapshot, event);
+          if (snapshot.terminalStatus) break;
+        }
+      } catch (error) {
+        if (!controller.signal.aborted && !shouldReconnectRuntimeV2Stream(error)) throw error;
+      }
+      if (!snapshot.terminalStatus) await waitForReconnect(controller.signal);
     }
-  } catch (error) {
-    if (!controller.signal.aborted) throw error;
   } finally {
-    window.clearTimeout(idleTimer);
+    window.clearTimeout(deadline);
     controller.abort();
   }
   return snapshot;

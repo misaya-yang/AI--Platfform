@@ -776,7 +776,8 @@ async def test_llm_judge_invalid_response_marks_review_not_pass() -> None:
         },
     )
 
-    assert result.status == "succeeded"
+    assert result.status == "failed"
+    assert result.error_message == "Evaluator infrastructure failure requires retry"
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     payload = score_calls[0][1]["payload"]
     assert payload["label"] == "review"

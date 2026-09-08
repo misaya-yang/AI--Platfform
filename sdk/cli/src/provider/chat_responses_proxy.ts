@@ -5,6 +5,7 @@ import type { ProviderProfile } from "./config.js";
 import {
   CompatibilityError,
   responsesToChat,
+  namespaceBindings,
   type ResponsesRequest,
 } from "./chat_request_adapter.js";
 import { projectChatStream } from "./chat_stream_projector.js";
@@ -108,6 +109,8 @@ async function handleProxyRequest(
       String(chatBody.model),
       provider.stream_idle_timeout_ms ?? 300_000,
       clientAbort.signal,
+      namespaceBindings(body),
+      new Set((chatBody.tools as Array<{ function: { name: string } }> | undefined)?.map((tool) => tool.function.name) ?? []),
     );
   } catch (error) {
     if (response.writableEnded || response.destroyed) return;

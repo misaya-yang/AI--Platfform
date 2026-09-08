@@ -35,6 +35,7 @@ export interface PasswordChangeRequest {
 
 export interface CurrentUserResponse {
   user_id: string;
+  tenant_id: string;
   email: string | null;
   display_name: string | null;
   department: string | null;

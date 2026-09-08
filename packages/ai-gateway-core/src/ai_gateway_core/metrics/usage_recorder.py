@@ -30,8 +30,10 @@ import contextlib
 
 from ai_gateway_core.billing import (
     DEFAULT_TOKEN_PRICING_PER_1K_USD,
+    build_pricing_snapshot,
     resolve_pricing_with_status,
     usd_to_microcents,
+    validate_pricing_snapshot,
 )
 
 from .observability import KNOWN_ERROR_TYPES, should_sample_trace
@@ -235,12 +237,12 @@ class UsageRecorder:
         ("gpt", "openai"),
     ]
 
-    async def _get_provider_for_model(self, model: str) -> str:
+    async def _get_provider_for_model(self, model: str, tenant_id: str | None = None) -> str:
         normalized_model = str(model or "").strip()
         if not normalized_model:
             return ""
         # 1. Try exact match from model_pricing table
-        pricing = await self._get_model_pricing(normalized_model)
+        pricing = await self._get_model_pricing(normalized_model, tenant_id=tenant_id)
         if pricing:
             provider = pricing.get("provider")
             if provider:
@@ -268,7 +270,7 @@ class UsageRecorder:
             "",
         )
         if not provider:
-            provider = await self._get_provider_for_model(record.model)
+            provider = await self._get_provider_for_model(record.model, tenant_id=record.tenant_id)
 
         record.provider = provider or UNATTRIBUTED_PROVIDER
         metadata.setdefault("provider", record.provider)
@@ -315,10 +317,13 @@ class UsageRecorder:
         existing.output_cost_cents = max(
             existing.output_cost_cents, incoming.output_cost_cents
         )
+        original_pricing = existing.metadata.get("pricing_snapshot")
         existing.metadata = {
             **(existing.metadata if isinstance(existing.metadata, dict) else {}),
             **(incoming.metadata if isinstance(incoming.metadata, dict) else {}),
         }
+        if original_pricing is not None:
+            existing.metadata["pricing_snapshot"] = original_pricing
         if existing.status in {"running", "pending"} and incoming.status == "success":
             existing.status = "success"
             existing.error_type = incoming.error_type
@@ -604,7 +609,35 @@ class UsageRecorder:
 
     async def _calculate_cost(self, record: UsageRecord) -> None:
         """Calculate cost based on model pricing."""
-        pricing = await self._get_model_pricing(record.model)
+        metadata = dict(record.metadata) if isinstance(record.metadata, dict) else {}
+        snapshot = metadata.get("pricing_snapshot")
+        identity = self._request_identity(record)
+        prior = self._flushed_observations.get(identity)
+        if prior is None and record.request_id:
+            prior = next((item for item in self._buffer if self._request_identity(item) == identity), None)
+        if prior is not None:
+            snapshot = prior.metadata.get("pricing_snapshot") or snapshot
+        if snapshot is not None:
+            # Invalid receipts must not silently settle using a current price.
+            receipt = validate_pricing_snapshot(
+                snapshot, tenant_id=record.tenant_id, provider_id=record.provider, model_id=record.model,
+            )
+            pricing = {
+                "input": receipt["input_price_per_1k"], "output": receipt["output_price_per_1k"],
+                "provider": receipt["provider_id"], "pricing_status": receipt["pricing_status"],
+            }
+        else:
+            pricing = await self._get_model_pricing(
+                record.model, tenant_id=record.tenant_id, provider_id=record.provider,
+            )
+            receipt = build_pricing_snapshot(
+                tenant_id=record.tenant_id, provider_id=record.provider, model_id=record.model,
+                input_price_per_1k=(pricing or {}).get("input", 0),
+                output_price_per_1k=(pricing or {}).get("output", 0),
+                pricing_status=str((pricing or {}).get("pricing_status") or "unknown"),
+            )
+        metadata["pricing_snapshot"] = receipt
+        record.metadata = metadata
         if pricing:
             input_price = Decimal(str(pricing.get("input", Decimal("0.001"))))
             output_price = Decimal(str(pricing.get("output", Decimal("0.002"))))
@@ -625,8 +658,34 @@ class UsageRecorder:
             metadata["pricing_status"] = str(pricing.get("pricing_status") or "unknown")
             record.metadata = metadata
 
-    async def _get_model_pricing(self, model: str) -> dict[str, Any] | None:
+    async def _get_model_pricing(
+        self, model: str, *, tenant_id: str | None = None, provider_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Get pricing for a model from cache or database."""
+        if tenant_id is not None:
+            if self.database and self.database._pool:
+                async with self.database._pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """SELECT provider_id, input_price_per_1k, output_price_per_1k
+                           FROM llm_models WHERE tenant_id = $1 AND model_id = $2
+                           AND ($3::text IS NULL OR provider_id = $3) LIMIT 2""",
+                        tenant_id, model,
+                        None if provider_id in (None, "", UNATTRIBUTED_PROVIDER) else provider_id,
+                    )
+                if len(rows) > 1:
+                    return {"input": 0, "output": 0, "provider": UNATTRIBUTED_PROVIDER,
+                            "pricing_status": "ambiguous_provider"}
+                if rows and "provider_id" in rows[0]:
+                    row = rows[0]
+                    return {
+                        "input": row["input_price_per_1k"], "output": row["output_price_per_1k"],
+                        "provider": row["provider_id"], "pricing_status": "tenant_model",
+                    }
+            # The global mutable table may contain historical tenant mirrors.
+            # Only the immutable catalog is an explicit scoped-miss fallback.
+            pricing, status = resolve_pricing_with_status(model)
+            return {**pricing, "pricing_status": status}
+
         # Check cache
         now = time.time()
         if now - self._pricing_cache_time > self._pricing_cache_ttl:
@@ -1526,7 +1585,7 @@ class UsageRecorder:
     ) -> dict[str, Any]:
         """Get aggregated usage summary."""
         if not self.database or not self.database._pool:
-            return self._empty_summary()
+            return self._empty_summary(data_status="unavailable")
 
         if not start_date:
             start_date = date.today()
@@ -1614,7 +1673,7 @@ class UsageRecorder:
                     "total_requests": total_requests,
                     "success_rate": round(success_count / total_requests * 100, 2)
                     if total_requests > 0
-                    else 100.0,
+                    else None,
                     "total_input_tokens": int(row["total_input_tokens"]),
                     "total_output_tokens": int(row["total_output_tokens"]),
                     "total_tokens": int(row["total_input_tokens"])
@@ -1629,7 +1688,7 @@ class UsageRecorder:
 
         except Exception as e:
             logger.error(f"Failed to get usage summary: {e}")
-            return self._empty_summary()
+            return self._empty_summary(data_status="collection_error")
 
     async def get_usage_breakdown(
         self,
@@ -2228,11 +2287,12 @@ class UsageRecorder:
             granularity=granularity,
         )
 
-    def _empty_summary(self) -> dict[str, Any]:
+    def _empty_summary(self, *, data_status: str = "empty") -> dict[str, Any]:
         """Return empty summary."""
         return {
             "total_requests": 0,
-            "success_rate": 100.0,
+            "success_rate": None,
+            "data_status": data_status,
             "total_input_tokens": 0,
             "total_output_tokens": 0,
             "total_tokens": 0,

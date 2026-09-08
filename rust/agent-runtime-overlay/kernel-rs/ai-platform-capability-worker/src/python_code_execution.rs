@@ -11,8 +11,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
+
+#[path = "python_supervisor.rs"]
+mod supervisor;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use supervisor::supervisor_main;
 
 use ai_platform_capability_contract::RuntimeCapabilityLeaseV1;
 use async_trait::async_trait;
@@ -71,7 +79,7 @@ const DANGEROUS_ATTRIBUTES: &[&str] = &[
     "__class__",
 ];
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodeExecutionError {
     #[error("code is empty")]
     EmptyCode,
@@ -143,8 +151,11 @@ impl PythonSandboxLimits {
         if self.timeout_seconds == 0
             || self.timeout_seconds > MAX_TIMEOUT_SECONDS
             || self.memory_bytes == 0
+            || self.memory_bytes > 512 * 1024 * 1024
             || self.cpu_millis == 0
+            || self.cpu_millis > 300_000
             || self.pids == 0
+            || self.pids > 32
             || self.stdout_bytes == 0
             || self.stdout_bytes > MAX_STREAM_BYTES
             || self.stderr_bytes == 0
@@ -249,11 +260,31 @@ impl PythonSandboxBroker for LocalPythonSandboxBroker {
         &self,
         request: PythonCodeExecutionRequest,
     ) -> Result<PythonCodeExecutionResult, CodeExecutionError> {
-        validate_request(&request)?;
-        let config = self.config.clone();
-        tokio::task::spawn_blocking(move || run_python_process(&config, &request))
+        self.execute_cancellable(request, Arc::new(AtomicBool::new(false)))
             .await
-            .map_err(|_| CodeExecutionError::SideEffectUnknown)?
+    }
+}
+
+impl LocalPythonSandboxBroker {
+    pub async fn execute_cancellable(
+        &self,
+        request: PythonCodeExecutionRequest,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<PythonCodeExecutionResult, CodeExecutionError> {
+        validate_request(&request)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err(CodeExecutionError::Cancelled);
+        }
+        let config = self.config.clone();
+        tokio::task::spawn_blocking(move || {
+            if config.require_network_isolation {
+                supervisor::run_isolated(&config, &request, &cancelled)
+            } else {
+                run_python_process(&config, &request, &cancelled)
+            }
+        })
+        .await
+        .map_err(|_| CodeExecutionError::SideEffectUnknown)?
     }
 }
 
@@ -457,6 +488,7 @@ fn validate_filename(filename: &str) -> Result<(), CodeExecutionError> {
 fn run_python_process(
     config: &LocalPythonSandboxConfig,
     request: &PythonCodeExecutionRequest,
+    cancelled: &AtomicBool,
 ) -> Result<PythonCodeExecutionResult, CodeExecutionError> {
     let workspace = create_workspace(&config.workspace_root)?;
     let started = Instant::now();
@@ -464,8 +496,9 @@ fn run_python_process(
         fs::create_dir(workspace.join(".proc")).map_err(|_| CodeExecutionError::ProcessStart)?;
         fs::create_dir(workspace.join(".mask")).map_err(|_| CodeExecutionError::ProcessStart)?;
         fs::create_dir(workspace.join("output")).map_err(|_| CodeExecutionError::ProcessStart)?;
+        fs::create_dir(workspace.join("input")).map_err(|_| CodeExecutionError::ProcessStart)?;
         for input in &request.inputs {
-            let path = workspace.join(&input.filename);
+            let path = workspace.join("input").join(&input.filename);
             let bytes = STANDARD
                 .decode(&input.content_base64)
                 .map_err(|_| CodeExecutionError::InputsTooLarge)?;
@@ -477,6 +510,7 @@ fn run_python_process(
             file.write_all(&bytes)
                 .map_err(|_| CodeExecutionError::ProcessStart)?;
         }
+        supervisor::read_only_input(&workspace.join("input"))?;
         let script = workspace.join(SCRIPT_NAME);
         let mut script_file = OpenOptions::new()
             .write(true)
@@ -531,11 +565,13 @@ fn run_python_process(
         let err_thread = thread::spawn(move || read_capped(stderr, stderr_limit));
         let timeout = Duration::from_secs(u64::from(request.limits.timeout_seconds));
         let mut timed_out = false;
+        let mut was_cancelled = false;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= timeout => {
-                    timed_out = true;
+                Ok(None) if cancelled.load(Ordering::Acquire) || started.elapsed() >= timeout => {
+                    was_cancelled = cancelled.load(Ordering::Acquire);
+                    timed_out = !was_cancelled;
                     kill_process_group(&mut child);
                     break child
                         .wait()
@@ -554,6 +590,9 @@ fn run_python_process(
         let (stderr, stderr_limited) = err_thread
             .join()
             .map_err(|_| CodeExecutionError::SideEffectUnknown)?;
+        if was_cancelled {
+            return Err(CodeExecutionError::Cancelled);
+        }
         if timed_out {
             return Err(CodeExecutionError::TimedOut);
         }
@@ -630,36 +669,13 @@ fn collect_output_files(
     let mut files = Vec::new();
     let mut total = 0usize;
     let mut names = BTreeSet::new();
-    for entry in fs::read_dir(workspace).map_err(|_| CodeExecutionError::MalformedResult)? {
+    for entry in
+        fs::read_dir(workspace.join("output")).map_err(|_| CodeExecutionError::MalformedResult)?
+    {
         let entry = entry.map_err(|_| CodeExecutionError::MalformedResult)?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == SCRIPT_NAME || name.starts_with('.') {
+        if name.starts_with('.') {
             continue;
-        }
-        let metadata =
-            fs::symlink_metadata(entry.path()).map_err(|_| CodeExecutionError::MalformedResult)?;
-        if name == "output" && metadata.is_dir() {
-            for output in
-                fs::read_dir(entry.path()).map_err(|_| CodeExecutionError::MalformedResult)?
-            {
-                let output = output.map_err(|_| CodeExecutionError::MalformedResult)?;
-                let output_name = output.file_name().to_string_lossy().into_owned();
-                if output_name.starts_with('.') {
-                    continue;
-                }
-                collect_output_file(
-                    output.path(),
-                    output_name,
-                    limits,
-                    &mut files,
-                    &mut total,
-                    &mut names,
-                )?;
-            }
-            continue;
-        }
-        if !metadata.is_file() {
-            return Err(CodeExecutionError::MalformedResult);
         }
         collect_output_file(
             entry.path(),
@@ -670,6 +686,7 @@ fn collect_output_files(
             &mut names,
         )?;
     }
+
     Ok(files)
 }
 
@@ -769,6 +786,7 @@ fn configure_child(
             }
             #[cfg(target_os = "linux")]
             {
+                supervisor::restrict_python_process()?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }

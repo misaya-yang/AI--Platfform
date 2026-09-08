@@ -115,6 +115,13 @@ embedding pipeline resolve the saved encrypted provider key for that tenant on
 the next operation; no service restart is required. Then open
 `http://localhost:8081/assistant`.
 
+Provider status separates configuration from observation. `/api/v1/health/providers` reports
+`unverified` until an explicit connection test completes, then `healthy` or `unhealthy` with
+the actual `last_check`; after 5 minutes it reports `stale`. Receipts are tenant scoped and
+process local: saving provider configuration or restarting Gateway requires a new test.
+Usage summaries return a null success rate when no requests were observed. The console
+distinguishes empty data from collection failures and unavailable collectors.
+
 Optional local demo data is available after the stack is running:
 
 ```bash
@@ -173,7 +180,14 @@ The validator intentionally does not print secret values. It fails fast on missi
 `make quickstart-build` once when working on this checkout. After that, backend
 code changes do not need a full image rebuild during development.
 
-Use source-mounted app services instead:
+For an existing local deployment, `make hot-update ARGS="--all"` copies Gateway,
+Knowledge API/worker, shared core/contracts and frontend assets. Existing stopped
+containers can receive the files before the final restart, so an old application
+need not start against a newly migrated schema. `--no-restart` leaves services
+stopped/running as they were. Source hot-update does not install dependencies or
+rewrite container environment values.
+
+Use source-mounted app services for continuous reload:
 
 ```bash
 make dev-compose
@@ -315,6 +329,14 @@ Compose startup waits for infrastructure and microservices to become healthy bef
 
 The knowledge service supports document ingestion, chunking, vector indexing, and retrieval modes including keyword, vector, hybrid RRF, optional reranking, and MMR.
 
+Dataset create/update validates parser backend names, cascade shape, options and limits before
+saving. The dataset `/config` response reports effective parsing configuration and unavailable
+backend warnings; ingestion uses the same compiler. Existing datasets without parsing settings
+retain the legacy path. Dataset catalogs retain the array response and support `limit` (up to
+200) and an opaque `cursor`; continue with `X-Next-Cursor` even when ACL filtering leaves a page
+empty. Web and internal Knowledge clients traverse every page. Synchronous dedupe rejects
+more than 10,000 segments with `KB_DEDUPE_INCOMPLETE` and performs no partial deletion.
+
 Embedding configuration is controlled by:
 
 ```env
@@ -385,8 +407,9 @@ request fields; Runtime snapshots carry only validated identities and grants.
 ### Code execution
 
 Code execution is a capability-worker operation with a bounded execution
-workspace. The default stack never mounts the host Docker socket into an
-application service.
+workspace. Input attachments are available under `input/`; generated artifacts
+must be written under `output/`. The default stack never mounts the host Docker
+socket into an application service.
 
 ## Database and Qdrant Notes
 

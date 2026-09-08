@@ -153,6 +153,19 @@ def _snapshot_parameters(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {"temperature": temperature}
 
 
+def native_web_search_authorized(snapshot: Mapping[str, Any]) -> bool:
+    readonly = snapshot.get("readonly_capabilities")
+    if not isinstance(readonly, Mapping):
+        return False
+    if readonly.get("responses_tool_choice") == "none" or readonly.get("responses_tool_names") is not None:
+        return False
+    items = readonly.get("items")
+    return isinstance(items, list) and any(
+        isinstance(item, Mapping) and item.get("source") == "web-search"
+        for item in items
+    )
+
+
 def _snapshot_responses_tool_controls(
     snapshot: Mapping[str, Any],
 ) -> tuple[set[str] | None, str | dict[str, str], bool]:

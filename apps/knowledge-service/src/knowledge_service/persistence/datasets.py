@@ -1886,6 +1886,8 @@ class DatasetPersistenceMixin:
         include_public: bool = True,
         limit: int = 100,
         offset: int = 0,
+        before_created_at: Any | None = None,
+        before_dataset_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出 Dataset"""
         if not self._pool:
@@ -1908,7 +1910,11 @@ class DatasetPersistenceMixin:
             if not include_public:
                 query += " AND visibility != 'public'"
 
-        query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        if before_created_at is not None and before_dataset_id is not None:
+            query += f" AND (created_at, dataset_id) < (${param_idx}::timestamptz, ${param_idx + 1}::text)"
+            params.extend([before_created_at, before_dataset_id])
+            param_idx += 2
+        query += f" ORDER BY created_at DESC, dataset_id DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
@@ -2332,14 +2338,16 @@ class DatasetPersistenceMixin:
             await conn.execute(
                 """
                 INSERT INTO dataset_permissions (
-                    dataset_id, subject_type, subject_id, permission
-                ) VALUES ($1, $2, $3, $4)
+                    dataset_id, subject_type, subject_id, permission, subject_tenant_id
+                ) SELECT dataset_id, $2, $3, $4,
+                    CASE WHEN $2::varchar = 'tenant_role' THEN tenant_id ELSE NULL END
+                  FROM datasets WHERE dataset_id = $1
                 ON CONFLICT (dataset_id, subject_type, subject_id) DO UPDATE SET
                     permission = EXCLUDED.permission,
                     updated_at = NOW()
                 """,
                 dataset_id,
-                subject_type,
+                "tenant_role" if subject_type == "role" else subject_type,
                 subject_id,
                 permission,
             )
@@ -2357,7 +2365,7 @@ class DatasetPersistenceMixin:
                 WHERE dataset_id = $1 AND subject_type = $2 AND subject_id = $3
                 """,
                 dataset_id,
-                subject_type,
+                "tenant_role" if subject_type == "role" else subject_type,
                 subject_id,
             )
             if result.startswith("DELETE "):
@@ -2371,7 +2379,9 @@ class DatasetPersistenceMixin:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT * FROM dataset_permissions
+                SELECT id, dataset_id,
+                    CASE WHEN subject_type = 'tenant_role' THEN 'role' ELSE subject_type END AS subject_type,
+                    subject_id, permission, created_at, updated_at FROM dataset_permissions
                 WHERE dataset_id = $1
                 ORDER BY created_at ASC
                 """,
@@ -2388,11 +2398,13 @@ class DatasetPersistenceMixin:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT * FROM dataset_permissions
+                SELECT id, dataset_id,
+                    CASE WHEN subject_type = 'tenant_role' THEN 'role' ELSE subject_type END AS subject_type,
+                    subject_id, permission, created_at, updated_at FROM dataset_permissions
                 WHERE dataset_id = $1 AND subject_type = $2 AND subject_id = $3
                 """,
                 dataset_id,
-                subject_type,
+                "tenant_role" if subject_type == "role" else subject_type,
                 subject_id,
             )
             return self._row_to_dict(row) if row else None

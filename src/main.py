@@ -61,6 +61,8 @@ from .core.middleware.streaming import (
 from .core.middleware.request_body_limit import RequestBodyLimitMiddleware
 from ai_gateway_core.logging import configure_structured_logging, get_logger
 from .core.observability.metrics import get_metrics
+from ai_gateway_core.comm.client import configure_service_metrics
+from .services.metrics.collector import get_service_metrics
 from .services.metrics.metrics_recorder import init_metrics_recorder
 from .services.metrics.realtime_metrics import init_realtime_metrics
 from .services.health_contract import (
@@ -482,6 +484,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup():
         """应用启动"""
+        configure_service_metrics(get_service_metrics)
         logger.info("正在启动 AI Gateway...")
 
         # OpenTelemetry SDK bootstrap — must run BEFORE the DB/Redis init
@@ -665,7 +668,7 @@ def create_app() -> FastAPI:
                 init_trace_retention_scheduler,
             )
 
-            eval_outbox_worker = init_eval_outbox_worker(container.database)
+            eval_outbox_worker = init_eval_outbox_worker(container.database, admission_controller=container.admission_controller, capacity_resolver=container.capacity_resolver)
             if eval_outbox_worker is not None:
                 await eval_outbox_worker.start(concurrency=2)
                 app.state.eval_outbox_worker = eval_outbox_worker
@@ -1068,6 +1071,8 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.agent_model_plane_internal_token = model_plane_token
     app.state.agent_model_plane = (
         AgentModelPlane(
+            admission_controller=container.admission_controller,
+            capacity_resolver=container.capacity_resolver,
             database=container.database,
             provider_service=app.state.provider_service,
             lease_signer=RuntimeModelLeaseSigner(lease_secret),
@@ -1103,6 +1108,8 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     ).strip()
     app.state.agent_runtime_control = (
         AgentRuntimeControlPlane(
+            admission_controller=container.admission_controller,
+            capacity_resolver=container.capacity_resolver,
             database=container.database,
             model_service=app.state.model_service,
             provider_service=app.state.provider_service,

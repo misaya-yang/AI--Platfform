@@ -173,3 +173,50 @@ async def test_kb_proxy_client_multimodal_wrappers_are_explicit() -> None:
     assert seen_payloads[0]["include_associated_images"] is True
     assert seen_payloads[1]["include_images"] is False
     assert seen_payloads[1]["include_associated_images"] is False
+
+
+@pytest.mark.asyncio
+async def test_kb_proxy_client_traverses_catalog_past_empty_acl_page_with_roles() -> None:
+    seen_cursors: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        cursor = request.url.params.get("cursor")
+        seen_cursors.append(cursor)
+        assert request.headers["x-user-roles"] == "reviewer"
+        if cursor is None:
+            return httpx.Response(
+                200,
+                json=[{"dataset_id": str(i)} for i in range(200)],
+                headers={"X-Next-Cursor": "second"},
+            )
+        if cursor == "second":
+            return httpx.Response(200, json=[], headers={"X-Next-Cursor": "third"})
+        assert cursor == "third"
+        return httpx.Response(200, json=[{"dataset_id": "200"}])
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        result = await client.list_datasets(
+            SimpleNamespace(user_id="u", tenant_id="t", tier="normal", roles=["reviewer"])
+        )
+    finally:
+        await client.close()
+    assert len(result) == 201
+    assert seen_cursors == [None, "second", "third"]
+
+
+@pytest.mark.asyncio
+async def test_kb_proxy_client_rejects_nonadvancing_cursor_instead_of_hanging() -> None:
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=[], headers={"X-Next-Cursor": "same"})
+        ),
+    )
+    try:
+        with pytest.raises(ValueError, match="pagination did not advance"):
+            await client.list_datasets(SimpleNamespace(user_id="u", tenant_id="t", tier="normal"))
+    finally:
+        await client.close()

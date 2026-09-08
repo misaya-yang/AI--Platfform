@@ -228,6 +228,8 @@ class BootstrapConnection:
                 for schema in args[1]
                 for object_type in ("r", "S", "f", "T")
             ]
+        if query == ledger.SELECT_APPLIED_CHANGES:
+            return []
         if query == ledger.SELECT_BASELINE:
             return [self.baseline_marker] if self.baseline_marker is not None else []
         raise AssertionError(f"unexpected bootstrap fetch: {query}")

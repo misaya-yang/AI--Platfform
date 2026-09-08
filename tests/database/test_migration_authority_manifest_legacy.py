@@ -170,7 +170,7 @@ def test_checked_in_epoch_and_legacy_manifests_are_valid_and_complete() -> None:
     legacy = load_legacy_manifest(LEGACY_MANIFEST)
 
     assert epoch.baseline_id == "2026_08_post_kb_v1"
-    assert epoch.changes == ()
+    assert [(c.sequence, c.name) for c in epoch.changes] == [(1, "knowledge_tenant_permissions"), (2, "gateway_eval_leases")]
     assert len(legacy.changes) == 108
     assert legacy.freeze_point == "112_kb_document_progress_retention.sql"
     assert legacy.by_file()["049_session_list_performance.sql"].transaction_mode is (

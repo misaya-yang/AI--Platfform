@@ -26,6 +26,7 @@ from ..runtime_configuration import (
     build_runtime_platform_config,
     runtime_platform_config_hash,
 )
+from .capacity import note_dispatch
 from .http_headers import runtime_headers
 from .types import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
@@ -120,7 +121,7 @@ async def start_turn(
         raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_LAUNCH_REQUIRED", status_code=409)
 
     assignment_row = await plane._assignment(tenant_id, user_id, session_id)
-    model = await plane.model_service.get_model(tenant_id, model_id)
+    model = await plane.model_service.get_model(tenant_id, model_id, provider_id=str(resolved_agent_snapshot["model"]["provider"]))
     if not model or not bool(model.get("is_enabled", True)):
         raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_MODEL_NOT_FOUND", status_code=400)
     provider_id = str(model.get("provider_id") or "")
@@ -429,7 +430,10 @@ async def start_turn(
         readonly_capabilities=readonly,
         capability_allowlist=capability_allowlist,
         native_web_search_enabled=(
-            isinstance(profile.get("native_search"), dict)
+            readonly.get("responses_tool_choice") != "none"
+            and readonly.get("responses_tool_names") is None
+            and any(item.get("source") == "web-search" for item in readonly.get("items", []) if isinstance(item, dict))
+            and isinstance(profile.get("native_search"), dict)
             and profile["native_search"].get("enabled") is True
             and isinstance(profile.get("tools"), dict)
             and profile["tools"].get("web_search_wire") == "native"
@@ -456,7 +460,10 @@ async def start_turn(
             )
         ),
         native_web_search_enabled=(
-            isinstance(profile.get("native_search"), dict)
+            readonly.get("responses_tool_choice") != "none"
+            and readonly.get("responses_tool_names") is None
+            and any(item.get("source") == "web-search" for item in readonly.get("items", []) if isinstance(item, dict))
+            and isinstance(profile.get("native_search"), dict)
             and profile["native_search"].get("enabled") is True
             and isinstance(profile.get("tools"), dict)
             and profile["tools"].get("web_search_wire") == "native"
@@ -513,6 +520,7 @@ async def start_turn(
             {"temperature": effective_temperature} if effective_temperature is not None else {}
         ),
         "pricing": {
+            "snapshot": model.get("pricing_snapshot"),
             "input_price_per_1k": float(model.get("input_price_per_1k") or 0),
             "output_price_per_1k": float(model.get("output_price_per_1k") or 0),
         },
@@ -606,6 +614,8 @@ async def start_turn(
     effort = resolved.canonical_effort
     if effort not in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
         effort = None
+    note_dispatch(runtime_thread_id=str(runtime_thread_id), run_id=str(run_id),
+                  after_sequence=int(thread.get("last_sequence") or 0))
     response = await plane.http_client.post(
         f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/turns",
         headers=runtime_headers(

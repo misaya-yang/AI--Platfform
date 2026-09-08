@@ -14,6 +14,11 @@ from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_catalog_sync import ModelCatalogSyncService
 from ...services.llm.model_failover import has_secret_field
 from ...services.llm.model_service import ModelService
+from ...services.llm.provider_health import (
+    begin_provider_probe,
+    invalidate_provider_probe,
+    record_provider_probe,
+)
 from ...services.llm.provider_service import ProviderService
 from ...services.llm.provider_templates import (
     get_provider_template,
@@ -144,6 +149,7 @@ async def create_provider(
             is_enabled=body.is_enabled,
         )
         if request is not None:
+            invalidate_provider_probe(request, user.tenant_id or "default", body.provider_id)
             await record_config_change(
                 request=request,
                 auth=_auth_from_user(user),
@@ -233,6 +239,7 @@ async def create_provider_from_template(
             is_enabled=body.is_enabled,
         )
         if request is not None:
+            invalidate_provider_probe(request, user.tenant_id or "default", provider_id)
             await record_config_change(
                 request=request,
                 auth=_auth_from_user(user),
@@ -290,6 +297,7 @@ async def update_provider(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
     if request is not None:
+        invalidate_provider_probe(request, user.tenant_id or "default", provider_id)
         await record_config_change(
             request=request,
             auth=_auth_from_user(user),
@@ -319,6 +327,7 @@ async def delete_provider(
     if not deleted:
         raise HTTPException(status_code=404, detail="Provider not found")
     if request is not None:
+        invalidate_provider_probe(request, user.tenant_id or "default", provider_id)
         await record_config_change(
             request=request,
             auth=_auth_from_user(user),
@@ -334,16 +343,20 @@ async def delete_provider(
 @router.post("/providers/{provider_id}/test")
 async def test_provider_connection(
     provider_id: str,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     user: UserContext = Depends(get_user_context),
 ):
     """Test API connection for a provider."""
     _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
+    tenant_id = user.tenant_id or "default"
+    probe_id = begin_provider_probe(request, tenant_id, provider_id)
     result = await provider_service.test_connection(
-        tenant_id=user.tenant_id or "default",
+        tenant_id=tenant_id,
         provider_id=provider_id,
     )
+    record_provider_probe(request, tenant_id, provider_id, result, probe_id=probe_id)
     return result
 
 

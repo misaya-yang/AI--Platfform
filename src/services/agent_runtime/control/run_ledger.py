@@ -33,6 +33,16 @@ async def complete_run(
         """,
         run_id,
     )
+    snapshot = await plane.database.fetchrow(
+        "SELECT snapshot AS payload FROM assistant_runtime_snapshots WHERE run_id=$1", run_id,
+    )
+    payload = (snapshot or {}).get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    usage_record = dict(usage or {})
+    pricing_snapshot = payload.get("pricing", {}).get("snapshot") if isinstance(payload, dict) else None
+    if pricing_snapshot:
+        usage_record["metadata"] = {"pricing_snapshot": pricing_snapshot}
     await plane.database.execute(
         """
         UPDATE assistant_runtime_model_leases
@@ -51,7 +61,7 @@ async def complete_run(
         """,
         run_id,
         status,
-        json.dumps(dict(usage or {}), separators=(",", ":")),
+        json.dumps(usage_record, separators=(",", ":")),
     )
 
 

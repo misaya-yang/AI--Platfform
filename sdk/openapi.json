@@ -13,6 +13,25 @@
     "version": "2.0.0"
   },
   "paths": {
+    "/version": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Version",
+        "operationId": "get_gateway_release_version",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -6689,6 +6708,27 @@
         }
       }
     },
+    "/api/v1/admin/architecture-status": {
+      "get": {
+        "tags": [
+          "administration"
+        ],
+        "summary": "Architecture Status",
+        "operationId": "architecture_status_api_v1_admin_architecture_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchitectureStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/setup/state": {
       "get": {
         "summary": "Setup State",
@@ -8699,46 +8739,7 @@
       }
     },
     "/api/v1/langgraph/{full_path}": {
-      "delete": {
-        "tags": [
-          "LangGraph"
-        ],
-        "summary": "Passthrough",
-        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
-        "parameters": [
-          {
-            "name": "full_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Full Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
+      "get": {
         "tags": [
           "LangGraph"
         ],
@@ -8778,45 +8779,6 @@
         }
       },
       "post": {
-        "tags": [
-          "LangGraph"
-        ],
-        "summary": "Passthrough",
-        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
-        "parameters": [
-          {
-            "name": "full_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Full Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
         "tags": [
           "LangGraph"
         ],
@@ -8893,81 +8855,22 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/proxy/{service_name}/{path}": {
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
       },
       "put": {
         "tags": [
-          "Transparent Proxy"
+          "LangGraph"
         ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "summary": "Passthrough",
+        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
-            "name": "service_name",
+            "name": "full_path",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
+              "title": "Full Path"
             }
           }
         ],
@@ -8992,30 +8895,21 @@
           }
         }
       },
-      "head": {
+      "delete": {
         "tags": [
-          "Transparent Proxy"
+          "LangGraph"
         ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "summary": "Passthrough",
+        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
-            "name": "service_name",
+            "name": "full_path",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
+              "title": "Full Path"
             }
           }
         ],
@@ -9039,103 +8933,9 @@
             }
           }
         }
-      },
-      "post": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
+      }
+    },
+    "/api/v1/proxy/{service_name}/{path}": {
       "options": {
         "tags": [
           "Transparent Proxy"
@@ -9184,7 +8984,247 @@
           }
         }
       },
+      "get": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9234,124 +9274,7 @@
       }
     },
     "/api/v1/proxy/{service_name}": {
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
+      "options": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9429,7 +9352,7 @@
           }
         }
       },
-      "options": {
+      "post": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9469,6 +9392,123 @@
         }
       },
       "patch": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9611,45 +9651,7 @@
       }
     },
     "/api/v1/knowledge/{path}": {
-      "delete": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
+      "get": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9725,7 +9727,7 @@
           }
         }
       },
-      "get": {
+      "patch": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9763,7 +9765,45 @@
           }
         }
       },
-      "patch": {
+      "put": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9803,46 +9843,7 @@
       }
     },
     "/api/v1/kb-tools/{path}": {
-      "delete": {
-        "tags": [
-          "KB Tools"
-        ],
-        "summary": "Proxy KB Tools to KB Service",
-        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
+      "get": {
         "tags": [
           "KB Tools"
         ],
@@ -9920,7 +9921,7 @@
           }
         }
       },
-      "get": {
+      "patch": {
         "tags": [
           "KB Tools"
         ],
@@ -9959,7 +9960,46 @@
           }
         }
       },
-      "patch": {
+      "put": {
+        "tags": [
+          "KB Tools"
+        ],
+        "summary": "Proxy KB Tools to KB Service",
+        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
         "tags": [
           "KB Tools"
         ],
@@ -10005,7 +10045,7 @@
           "Debug"
         ],
         "summary": "List Registered Tools",
-        "description": "Return the live Gateway-owned tool registry contents.\n\nOperator sanity check: if `confluence_read` / `confluence_write` are\nmissing here but the frontend shows Confluence 'connected', inspect\nthe Gateway capability registration logs.\n\nRequires a real user (not anonymous). `get_user_context` returns\nanonymous users for public endpoints; we reject those explicitly\nhere because tool names are tenant-level reconnaissance info.",
+        "description": "Return the tenant-visible catalog used for the next Runtime turn.",
         "operationId": "list_registered_tools_api_v1_debug_tools_get",
         "responses": {
           "200": {
@@ -13780,6 +13820,49 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "eval"
+        ],
+        "summary": "Delete Eval Example",
+        "description": "Delete one tenant-scoped example; a missing or repeated target is 404.",
+        "operationId": "delete_eval_example_api_v1_eval_datasets__dataset_id__examples__example_id__delete",
+        "parameters": [
+          {
+            "name": "dataset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dataset Id"
+            }
+          },
+          {
+            "name": "example_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Example Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/eval/datasets/{dataset_id}/examples:import": {
@@ -14349,6 +14432,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EvalExperimentRunResultsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/eval/experiment-runs/{run_id}:cancel": {
+      "post": {
+        "tags": [
+          "eval"
+        ],
+        "summary": "Cancel Eval Experiment Run",
+        "operationId": "cancel_eval_experiment_run_api_v1_eval_experiment_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Cancel Eval Experiment Run Api V1 Eval Experiment Runs  Run Id  Cancel Post"
                 }
               }
             }
@@ -15297,336 +15424,6 @@
         }
       }
     },
-    "/api/v1/local-nodes/pairing/challenges": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Create Local Node Pairing Challenge",
-        "description": "Start owner-bound pairing; device proof must complete it out of band.",
-        "operationId": "create_pairing_challenge_api_v1_local_nodes_pairing_challenges_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LocalNodePairingChallengeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "List Local Nodes",
-        "operationId": "list_devices_api_v1_local_nodes_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/status": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Local Node Status",
-        "operationId": "device_status_api_v1_local_nodes__device_id__status_get",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/capabilities": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Local Node Capabilities",
-        "operationId": "device_capabilities_api_v1_local_nodes__device_id__capabilities_get",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/doctor": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Local Node Doctor",
-        "operationId": "device_doctor_api_v1_local_nodes__device_id__doctor_get",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/grants": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "List Local Node Grants",
-        "operationId": "list_grants_api_v1_local_nodes__device_id__grants_get",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/grants/{grant_id}": {
-      "delete": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Revoke Local Node Grant",
-        "description": "Remove a grant; new grants require the trusted device channel.",
-        "operationId": "revoke_grant_api_v1_local_nodes__device_id__grants__grant_id__delete",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          },
-          {
-            "name": "grant_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Grant Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/local-nodes/{device_id}/events": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "List Local Node Events",
-        "operationId": "list_events_api_v1_local_nodes__device_id__events_get",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/assistant/tools": {
       "get": {
         "tags": [
@@ -15810,6 +15607,66 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResumeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/tasks/{task_id}/cancel": {
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Cancel Task",
+        "description": "Map the V1 task identifier to the owning Runtime run/turn interrupt.",
+        "operationId": "cancel_task_api_v1_assistant_tasks__task_id__cancel_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TaskCancelRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCancelResponse"
                 }
               }
             }
@@ -16111,66 +15968,6 @@
         }
       }
     },
-    "/api/v1/assistant/tasks/{task_id}/cancel": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Cancel Task",
-        "description": "Authenticate at the edge and cancel in the owning Assistant process.",
-        "operationId": "cancel_task_api_v1_assistant_tasks__task_id__cancel_post",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/TaskCancelRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Body"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TaskCancelResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/assistant/sessions/{session_id}/artifacts": {
       "get": {
         "tags": [
@@ -16354,338 +16151,6 @@
             "schema": {
               "type": "string",
               "title": "Artifact Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/generate-image": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Generate Image",
-        "description": "Gateway-owned image capability entry point with provider routing and artifact persistence.",
-        "operationId": "generate_image_api_v1_assistant_generate_image_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImageGenerationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImageGenerationResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/generate-image-async": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Submit Image Generation",
-        "description": "Submit an image capability task to the Gateway-owned task store.",
-        "operationId": "submit_image_generation_api_v1_assistant_generate_image_async_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AsyncImageGenerationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AsyncImageTaskSubmitResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/image-task/{task_id}": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Image Task Status",
-        "description": "Poll the Gateway-owned image capability task store.",
-        "operationId": "get_image_task_status_api_v1_assistant_image_task__task_id__get",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AsyncImageTaskStatusResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/image-blobs/upload-url": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Create Image Blob Upload Url",
-        "operationId": "create_image_blob_upload_url_api_v1_assistant_image_blobs_upload_url_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImageBlobUploadUrlRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImageBlobUploadUrlResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/image-blobs/complete": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Complete Image Blob Upload",
-        "operationId": "complete_image_blob_upload_api_v1_assistant_image_blobs_complete_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImageBlobCompleteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImageBlobResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/image-blobs/fetch-url": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Fetch Image Blob From Url",
-        "operationId": "fetch_image_blob_from_url_api_v1_assistant_image_blobs_fetch_url_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImageBlobFetchUrlRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImageBlobResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/artifacts/{artifact_id}/download-url": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Artifact Download Url",
-        "description": "Re-sign a presigned URL for an artifact variant.\n\nQuery params: ``variant`` (display|raw|thumbnail, default display) and\n``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on\ncross-owner access.",
-        "operationId": "get_artifact_download_url_api_v1_assistant_artifacts__artifact_id__download_url_get",
-        "parameters": [
-          {
-            "name": "artifact_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Artifact Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/image-sessions/{session_id}": {
-      "get": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Get Image Session View",
-        "description": "Thin proxy — paginated turn history for an image session.\n\nQuery params: ``limit`` (1..200, default 50), ``cursor`` (opaque),\n``include_urls`` (bool, default false). Owner-scoped.",
-        "operationId": "get_image_session_view_api_v1_assistant_image_sessions__session_id__get",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Session Id"
             }
           }
         ],
@@ -20337,6 +19802,1496 @@
         }
       }
     },
+    "/api/v1/local-nodes/pairing/challenges": {
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Create Pairing Challenge",
+        "operationId": "create_pairing_challenge_api_v1_local_nodes_pairing_challenges_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingChallengeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Pairing Challenge Api V1 Local Nodes Pairing Challenges Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/pairing/challenges/{challenge_id}/complete": {
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Complete Pairing",
+        "operationId": "complete_pairing_api_v1_local_nodes_pairing_challenges__challenge_id__complete_post",
+        "parameters": [
+          {
+            "name": "challenge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Challenge Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingCompleteBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Complete Pairing Api V1 Local Nodes Pairing Challenges  Challenge Id  Complete Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Devices",
+        "operationId": "list_devices_api_v1_local_nodes_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Devices Api V1 Local Nodes Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/status": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Status",
+        "operationId": "device_status_api_v1_local_nodes__device_id__status_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Status Api V1 Local Nodes  Device Id  Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/capabilities": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Capabilities",
+        "operationId": "device_capabilities_api_v1_local_nodes__device_id__capabilities_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Capabilities Api V1 Local Nodes  Device Id  Capabilities Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/doctor": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Doctor",
+        "operationId": "device_doctor_api_v1_local_nodes__device_id__doctor_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Doctor Api V1 Local Nodes  Device Id  Doctor Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/grants": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Grants",
+        "operationId": "list_grants_api_v1_local_nodes__device_id__grants_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Grants Api V1 Local Nodes  Device Id  Grants Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Create Grant",
+        "operationId": "create_grant_api_v1_local_nodes__device_id__grants_post",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Grant Api V1 Local Nodes  Device Id  Grants Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/grants/{grant_id}": {
+      "delete": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Revoke Grant",
+        "operationId": "revoke_grant_api_v1_local_nodes__device_id__grants__grant_id__delete",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Revoke Grant Api V1 Local Nodes  Device Id  Grants  Grant Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local-nodes/{device_id}/events": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Events",
+        "operationId": "list_events_api_v1_local_nodes__device_id__events_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "After Sequence"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Events Api V1 Local Nodes  Device Id  Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/pairing/challenges": {
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Create Pairing Challenge",
+        "operationId": "create_pairing_challenge_api_v1_assistant_local_nodes_pairing_challenges_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingChallengeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Pairing Challenge Api V1 Assistant Local Nodes Pairing Challenges Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/pairing/challenges/{challenge_id}/complete": {
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Complete Pairing",
+        "operationId": "complete_pairing_api_v1_assistant_local_nodes_pairing_challenges__challenge_id__complete_post",
+        "parameters": [
+          {
+            "name": "challenge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Challenge Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingCompleteBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Complete Pairing Api V1 Assistant Local Nodes Pairing Challenges  Challenge Id  Complete Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Devices",
+        "operationId": "list_devices_api_v1_assistant_local_nodes_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Devices Api V1 Assistant Local Nodes Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/status": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Status",
+        "operationId": "device_status_api_v1_assistant_local_nodes__device_id__status_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Status Api V1 Assistant Local Nodes  Device Id  Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/capabilities": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Capabilities",
+        "operationId": "device_capabilities_api_v1_assistant_local_nodes__device_id__capabilities_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Capabilities Api V1 Assistant Local Nodes  Device Id  Capabilities Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/doctor": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Device Doctor",
+        "operationId": "device_doctor_api_v1_assistant_local_nodes__device_id__doctor_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Device Doctor Api V1 Assistant Local Nodes  Device Id  Doctor Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/grants": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Grants",
+        "operationId": "list_grants_api_v1_assistant_local_nodes__device_id__grants_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Grants Api V1 Assistant Local Nodes  Device Id  Grants Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Create Grant",
+        "operationId": "create_grant_api_v1_assistant_local_nodes__device_id__grants_post",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Grant Api V1 Assistant Local Nodes  Device Id  Grants Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/grants/{grant_id}": {
+      "delete": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "Revoke Grant",
+        "operationId": "revoke_grant_api_v1_assistant_local_nodes__device_id__grants__grant_id__delete",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Revoke Grant Api V1 Assistant Local Nodes  Device Id  Grants  Grant Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/local-nodes/{device_id}/events": {
+      "get": {
+        "tags": [
+          "Local Nodes"
+        ],
+        "summary": "List Events",
+        "operationId": "list_events_api_v1_assistant_local_nodes__device_id__events_get",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "After Sequence"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Events Api V1 Assistant Local Nodes  Device Id  Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/local-node/action": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Dispatch Local Node Action",
+        "operationId": "dispatch_local_node_action_internal_v2_agent_capabilities_local_node_action_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-lease-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Lease-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalNodeActionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Dispatch Local Node Action Internal V2 Agent Capabilities Local Node Action Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/local-node/receipts": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Record Local Node Receipt",
+        "operationId": "record_local_node_receipt_internal_v2_agent_capabilities_local_node_receipts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalNodeReceiptBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Record Local Node Receipt Internal V2 Agent Capabilities Local Node Receipts Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/generate-image": {
+      "post": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Generate Image",
+        "operationId": "generate_image_api_v1_assistant_generate_image_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageGenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageGenerationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/generate-image-async": {
+      "post": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Submit Image Generation",
+        "operationId": "submit_image_generation_api_v1_assistant_generate_image_async_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AsyncImageGenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AsyncImageTaskSubmitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/image-task/{task_id}": {
+      "get": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Get Image Task Status",
+        "operationId": "get_image_task_status_api_v1_assistant_image_task__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AsyncImageTaskStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/image-sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Get Image Session View",
+        "operationId": "get_image_session_view_api_v1_assistant_image_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "include_urls",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Urls"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/artifacts/{artifact_id}/download-url": {
+      "get": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Get Artifact Download Url",
+        "operationId": "get_artifact_download_url_api_v1_assistant_artifacts__artifact_id__download_url_get",
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artifact Id"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(raw|display|thumbnail)$",
+              "default": "display",
+              "title": "Variant"
+            }
+          },
+          {
+            "name": "expires_in",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 3600,
+              "minimum": 60,
+              "default": 3600,
+              "title": "Expires In"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/image-blobs/upload-url": {
+      "post": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Create Image Blob Upload Url",
+        "operationId": "create_image_blob_upload_url_api_v1_assistant_image_blobs_upload_url_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageBlobUploadUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageBlobUploadUrlResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/image-blobs/complete": {
+      "post": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Complete Image Blob Upload",
+        "operationId": "complete_image_blob_upload_api_v1_assistant_image_blobs_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageBlobCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageBlobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/image-blobs/fetch-url": {
+      "post": {
+        "tags": [
+          "assistant-images"
+        ],
+        "summary": "Fetch Image Blob From Url",
+        "operationId": "fetch_image_blob_from_url_api_v1_assistant_image_blobs_fetch_url_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageBlobFetchUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageBlobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/agent/threads": {
       "post": {
         "tags": [
@@ -20739,6 +21694,1742 @@
         }
       }
     },
+    "/internal/v2/agent-capabilities/catalog": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Broker Agent Capability Catalog",
+        "description": "Broker the Worker catalog into the Runtime's tenant-scoped V1 shape.",
+        "operationId": "broker_agent_capability_catalog_internal_v2_agent_capabilities_catalog_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapabilityCatalogRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Broker Agent Capability Catalog Internal V2 Agent Capabilities Catalog Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/web-search": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Search Agent Web",
+        "description": "Execute bounded public search without sharing the provider key with Worker.",
+        "operationId": "search_agent_web_internal_v2_agent_capabilities_web_search_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebSearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Search Agent Web Internal V2 Agent Capabilities Web Search Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/artifacts/{artifact_id}/read": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Read Agent Capability Artifact",
+        "description": "Return a bounded UTF-8 character slice, never a path, URL, or redirect.",
+        "operationId": "read_agent_capability_artifact_internal_v2_agent_capabilities_artifacts__artifact_id__read_post",
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artifact Id"
+            }
+          },
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactReadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Read Agent Capability Artifact Internal V2 Agent Capabilities Artifacts  Artifact Id  Read Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/attachments/read": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Read Attachment",
+        "operationId": "read_attachment_internal_v2_agent_capabilities_attachments_read_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachmentReadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Read Attachment Internal V2 Agent Capabilities Attachments Read Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/python/execute": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Execute Python Capability",
+        "description": "Gateway boundary for the capability worker's sandbox request.",
+        "operationId": "execute_python_capability_internal_v2_agent_capabilities_python_execute_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Execute Python Capability Internal V2 Agent Capabilities Python Execute Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/python/artifacts": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Put Python Artifact",
+        "description": "Persist one isolated Python output without exposing storage credentials.",
+        "operationId": "put_python_artifact_internal_v2_agent_capabilities_python_artifacts_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          },
+          {
+            "name": "x-ai-arguments-hash",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Arguments-Hash"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Put Python Artifact Internal V2 Agent Capabilities Python Artifacts Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/confluence/read": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Read Confluence",
+        "operationId": "read_confluence_internal_v2_agent_capabilities_confluence_read_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfluenceReadEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Read Confluence Internal V2 Agent Capabilities Confluence Read Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/confluence/write": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Write Confluence",
+        "description": "Execute one tenant-authorized Confluence write without retrying side effects.",
+        "operationId": "write_confluence_internal_v2_agent_capabilities_confluence_write_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfluenceWriteEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Write Confluence Internal V2 Agent Capabilities Confluence Write Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/image/generate": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Generate Image Capability",
+        "operationId": "generate_image_capability_internal_v2_agent_capabilities_image_generate_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Generate Image Capability Internal V2 Agent Capabilities Image Generate Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/office/artifacts": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Put Office Artifact",
+        "operationId": "put_office_artifact_internal_v2_agent_capabilities_office_artifacts_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          },
+          {
+            "name": "x-ai-arguments-hash",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Arguments-Hash"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Put Office Artifact Internal V2 Agent Capabilities Office Artifacts Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v2/agent-capabilities/mcp/read": {
+      "post": {
+        "tags": [
+          "internal-agent-capabilities"
+        ],
+        "summary": "Broker Mcp Read",
+        "operationId": "broker_mcp_read_internal_v2_agent_capabilities_mcp_read_post",
+        "parameters": [
+          {
+            "name": "x-ai-platform-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Platform-Internal-Token"
+            }
+          },
+          {
+            "name": "x-ai-tenant-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tenant-Id"
+            }
+          },
+          {
+            "name": "x-ai-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-User-Id"
+            }
+          },
+          {
+            "name": "x-ai-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Session-Id"
+            }
+          },
+          {
+            "name": "x-ai-execution-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Execution-Id"
+            }
+          },
+          {
+            "name": "x-ai-run-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Run-Id"
+            }
+          },
+          {
+            "name": "x-ai-tool-call-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Tool-Call-Id"
+            }
+          },
+          {
+            "name": "x-ai-capability-proof",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Capability-Proof"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Broker Mcp Read Internal V2 Agent Capabilities Mcp Read Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/embed/agents/{public_id}": {
       "get": {
         "tags": [
@@ -20782,45 +23473,7 @@
       }
     },
     "/v1/knowledge/{path}": {
-      "delete": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
+      "get": {
         "tags": [
           "Knowledge Base"
         ],
@@ -20896,7 +23549,7 @@
           }
         }
       },
-      "get": {
+      "patch": {
         "tags": [
           "Knowledge Base"
         ],
@@ -20934,7 +23587,45 @@
           }
         }
       },
-      "patch": {
+      "put": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
@@ -21039,7 +23730,7 @@
           "Health"
         ],
         "summary": "Readiness Check",
-        "description": "就绪检查端点（K8s readiness probe）",
+        "description": "Public core-readiness only; dependency detail is admin-authorized.",
         "operationId": "readiness_check_health_ready_get",
         "responses": {
           "200": {
@@ -26528,6 +29219,199 @@
         "title": "ApprovalResponse",
         "description": "Approval mutation result."
       },
+      "ArchitectureDependency": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "required",
+          "status"
+        ],
+        "title": "ArchitectureDependency"
+      },
+      "ArchitectureGroupStatus": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "title": "Group Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ArchitectureServiceStatus"
+            },
+            "type": "array",
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_id",
+          "display_name",
+          "services"
+        ],
+        "title": "ArchitectureGroupStatus"
+      },
+      "ArchitectureServiceStatus": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "bounded_context": {
+            "type": "string",
+            "title": "Bounded Context"
+          },
+          "responsibility": {
+            "type": "string",
+            "title": "Responsibility"
+          },
+          "lifecycle": {
+            "type": "string",
+            "title": "Lifecycle"
+          },
+          "exposure": {
+            "type": "string",
+            "title": "Exposure"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "state_owner": {
+            "type": "string",
+            "title": "State Owner"
+          },
+          "scale_support": {
+            "type": "string",
+            "title": "Scale Support"
+          },
+          "replicas": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Replicas"
+          },
+          "active_in_mode": {
+            "type": "boolean",
+            "title": "Active In Mode"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/ArchitectureDependency"
+            },
+            "type": "array",
+            "title": "Dependencies"
+          },
+          "degraded_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Degraded Reasons"
+          },
+          "last_check": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "display_name",
+          "bounded_context",
+          "responsibility",
+          "lifecycle",
+          "exposure",
+          "status",
+          "version",
+          "state_owner",
+          "scale_support",
+          "replicas",
+          "active_in_mode",
+          "dependencies",
+          "degraded_reasons",
+          "last_check"
+        ],
+        "title": "ArchitectureServiceStatus"
+      },
+      "ArchitectureStatusResponse": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "ai-gateway/architecture-status/v1",
+            "title": "Schema Version"
+          },
+          "topology_revision": {
+            "type": "string",
+            "title": "Topology Revision"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "compact",
+              "full",
+              "scale"
+            ],
+            "title": "Mode"
+          },
+          "mode_configuration_valid": {
+            "type": "boolean",
+            "title": "Mode Configuration Valid"
+          },
+          "last_check": {
+            "type": "string",
+            "title": "Last Check"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/ArchitectureGroupStatus"
+            },
+            "type": "array",
+            "title": "Groups"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_version",
+          "topology_revision",
+          "mode",
+          "mode_configuration_valid",
+          "last_check",
+          "groups"
+        ],
+        "title": "ArchitectureStatusResponse"
+      },
       "ArtifactCreateRequest": {
         "properties": {
           "session_id": {
@@ -26721,6 +29605,27 @@
         ],
         "title": "ArtifactListResponse",
         "description": "Response with list of artifacts."
+      },
+      "ArtifactReadRequest": {
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "maximum": 2000000.0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 2000000.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 64000
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ArtifactReadRequest"
       },
       "ArtifactShareCreateRequest": {
         "properties": {
@@ -28043,6 +30948,38 @@
         "title": "Attachment",
         "description": "An attachment in a message."
       },
+      "AttachmentReadRequest": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Attachment Id"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "metadata",
+              "content"
+            ],
+            "title": "Operation",
+            "default": "content"
+          },
+          "max_chars": {
+            "type": "integer",
+            "maximum": 500000.0,
+            "minimum": 1.0,
+            "title": "Max Chars",
+            "default": 100000
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "attachment_id"
+        ],
+        "title": "AttachmentReadRequest"
+      },
       "AuthConfigUpdate": {
         "properties": {
           "jwt_enabled": {
@@ -28248,6 +31185,65 @@
         "title": "BreakdownResponse",
         "description": "指标分解响应"
       },
+      "CapabilityCatalogRequest": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Tenant Id"
+          },
+          "user_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "User Id"
+          },
+          "session_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Session Id"
+          },
+          "model_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Model Id"
+          },
+          "capability_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Capability Revision"
+          },
+          "capability_allowlist": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability Allowlist"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "user_id",
+          "session_id",
+          "model_id",
+          "capability_revision"
+        ],
+        "title": "CapabilityCatalogRequest",
+        "description": "Runtime's legacy catalog request, brokered to the Rust Worker."
+      },
       "CapacityMetrics": {
         "properties": {
           "queue_depth": {
@@ -28363,6 +31359,546 @@
         ],
         "title": "Citation",
         "description": "A citation linking content to source."
+      },
+      "ConfluenceConnectorBinding": {
+        "properties": {
+          "binding_type": {
+            "type": "string",
+            "enum": [
+              "grant",
+              "catalog"
+            ],
+            "title": "Binding Type"
+          },
+          "provider": {
+            "type": "string",
+            "const": "confluence",
+            "title": "Provider"
+          },
+          "tool_name": {
+            "type": "string",
+            "const": "confluence_read",
+            "title": "Tool Name"
+          },
+          "principal_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "service_account",
+                  "user_delegated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal Type"
+          },
+          "grant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Id"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "hosted",
+              "hosted_private",
+              "hosted_public",
+              "embed",
+              "api",
+              "builtin"
+            ],
+            "title": "Channel"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "binding_type",
+          "provider",
+          "tool_name",
+          "channel"
+        ],
+        "title": "ConfluenceConnectorBinding",
+        "description": "The only connector identity the Worker may forward to this broker."
+      },
+      "ConfluenceReadEnvelope": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/components/schemas/ConfluenceReadRequest"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/ConfluenceConnectorBinding"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "arguments",
+          "binding"
+        ],
+        "title": "ConfluenceReadEnvelope"
+      },
+      "ConfluenceReadRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "search",
+              "read_page",
+              "list_spaces",
+              "get_space",
+              "list_children"
+            ],
+            "title": "Action"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query"
+          },
+          "page_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "space_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Space Key"
+          },
+          "space_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Space Id"
+          },
+          "keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 250
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keys"
+          },
+          "space_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global",
+                  "personal",
+                  "collaboration",
+                  "knowledge_base"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Space Type"
+          },
+          "labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 250
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "title",
+                    "text"
+                  ]
+                },
+                "type": "array",
+                "maxItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1024
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "updated_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated Since"
+          },
+          "under_page_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Under Page Id"
+          },
+          "cql": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cql"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 250.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "ConfluenceReadRequest"
+      },
+      "ConfluenceWriteBinding": {
+        "properties": {
+          "binding_type": {
+            "type": "string",
+            "enum": [
+              "grant",
+              "catalog"
+            ],
+            "title": "Binding Type"
+          },
+          "provider": {
+            "type": "string",
+            "const": "confluence",
+            "title": "Provider"
+          },
+          "tool_name": {
+            "type": "string",
+            "const": "confluence_write",
+            "title": "Tool Name"
+          },
+          "principal_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "service_account",
+                  "user_delegated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal Type"
+          },
+          "grant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Id"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "hosted",
+              "hosted_private",
+              "hosted_public",
+              "embed",
+              "api",
+              "builtin"
+            ],
+            "title": "Channel"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "binding_type",
+          "provider",
+          "tool_name",
+          "channel"
+        ],
+        "title": "ConfluenceWriteBinding"
+      },
+      "ConfluenceWriteEnvelope": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/components/schemas/ConfluenceWriteRequest"
+          },
+          "arguments_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Arguments Hash"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/ConfluenceWriteBinding"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "arguments",
+          "arguments_hash",
+          "binding"
+        ],
+        "title": "ConfluenceWriteEnvelope"
+      },
+      "ConfluenceWriteRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create_page",
+              "update_page",
+              "find_replace",
+              "move_page",
+              "comment",
+              "delete_page"
+            ],
+            "title": "Action"
+          },
+          "page_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Id"
+          },
+          "space_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Space Key"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "target_parent_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Parent Id"
+          },
+          "find": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Find"
+          },
+          "replace": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replace"
+          },
+          "raw_html": {
+            "type": "boolean",
+            "title": "Raw Html",
+            "default": false
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "ConfluenceWriteRequest"
       },
       "ConnectorAuthConfig": {
         "properties": {
@@ -29658,6 +33194,10 @@
             "type": "string",
             "title": "User Id"
           },
+          "tenant_id": {
+            "type": "string",
+            "title": "Tenant Id"
+          },
           "email": {
             "anyOf": [
               {
@@ -29724,6 +33264,7 @@
         "type": "object",
         "required": [
           "user_id",
+          "tenant_id",
           "email",
           "display_name",
           "department",
@@ -32095,6 +35636,62 @@
         "title": "GeneratedImage",
         "description": "A generated image result."
       },
+      "GrantBody": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "pattern": "^(workspace|app|domain)$",
+            "title": "Kind"
+          },
+          "display_name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Display Name"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Capabilities"
+          },
+          "resource_ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Ref"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "display_name",
+          "capabilities"
+        ],
+        "title": "GrantBody"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -33248,53 +36845,226 @@
         "title": "LoadBalancerConfigUpdate",
         "description": "负载均衡配置更新"
       },
-      "LocalNodePairingChallengeRequest": {
+      "LocalNodeActionBody": {
         "properties": {
-          "display_name_hint": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 80,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name Hint"
+          "lease_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Lease Id"
           },
-          "ttl_seconds": {
+          "execution_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Execution Id"
+          },
+          "run_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Run Id"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Tool Call Id"
+          },
+          "attempt_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Attempt Id"
+          },
+          "device_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Device Id"
+          },
+          "channel_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Channel Id"
+          },
+          "capability_revision": {
             "type": "integer",
-            "maximum": 600.0,
-            "minimum": 30.0,
-            "title": "Ttl Seconds",
-            "default": 180
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "LocalNodePairingChallengeRequest",
-        "description": "Browser-safe input for starting (but never completing) pairing."
-      },
-      "LocalNodeRevokeRequest": {
-        "properties": {
-          "reason": {
+            "minimum": 1.0,
+            "title": "Capability Revision"
+          },
+          "capability_id": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Capability Id"
+          },
+          "effect": {
+            "type": "string",
+            "pattern": "^(read|write|unknown)$",
+            "title": "Effect"
+          },
+          "operation": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Operation"
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Arguments"
+          },
+          "arguments_sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Arguments Sha256"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Idempotency Key"
+          },
+          "approval_id": {
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 240
+                "maxLength": 255
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Reason"
+            "title": "Approval Id"
+          },
+          "grant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Id"
+          },
+          "grant_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Revision"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "title": "LocalNodeRevokeRequest",
-        "description": "Browser-safe reason attached to an owner-initiated device revocation."
+        "required": [
+          "lease_id",
+          "execution_id",
+          "run_id",
+          "tool_call_id",
+          "attempt_id",
+          "device_id",
+          "channel_id",
+          "capability_revision",
+          "capability_id",
+          "effect",
+          "operation",
+          "arguments",
+          "arguments_sha256",
+          "idempotency_key"
+        ],
+        "title": "LocalNodeActionBody"
+      },
+      "LocalNodeReceiptBody": {
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Execution Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Tenant Id"
+          },
+          "user_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "User Id"
+          },
+          "session_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Session Id"
+          },
+          "device_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Device Id"
+          },
+          "channel_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Channel Id"
+          },
+          "dispatch_fence": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Dispatch Fence"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "status": {
+            "type": "string",
+            "pattern": "^(running|succeeded|failed|cancelled|timeout|side_effect_unknown)$",
+            "title": "Status"
+          },
+          "event": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Event"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "execution_id",
+          "tenant_id",
+          "user_id",
+          "session_id",
+          "device_id",
+          "channel_id",
+          "dispatch_fence",
+          "sequence",
+          "status",
+          "event"
+        ],
+        "title": "LocalNodeReceiptBody"
       },
       "LoginRequest": {
         "properties": {
@@ -34997,6 +38767,69 @@
         ],
         "title": "ModelsListResponse",
         "description": "Response for listing available models."
+      },
+      "PairingChallengeBody": {
+        "properties": {
+          "expires_in_seconds": {
+            "type": "integer",
+            "maximum": 900.0,
+            "minimum": 60.0,
+            "title": "Expires In Seconds",
+            "default": 600
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PairingChallengeBody"
+      },
+      "PairingCompleteBody": {
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Display Name",
+            "default": "Local Node"
+          },
+          "platform": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Platform",
+            "default": "unknown"
+          },
+          "node_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Node Version",
+            "default": "unknown"
+          },
+          "protocol_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Protocol Version",
+            "default": "ai-platform.local-node.v1"
+          },
+          "capability_claims": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 64,
+            "title": "Capability Claims"
+          },
+          "permission_snapshot_digest": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Permission Snapshot Digest",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PairingCompleteBody"
       },
       "PasswordChangeRequest": {
         "properties": {
@@ -37418,7 +41251,14 @@
             "title": "Total"
           },
           "success_rate": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Success Rate"
           },
           "avg_duration_ms": {
@@ -38721,6 +42561,20 @@
               }
             ],
             "title": "Model Id"
+          },
+          "expected_tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Tenant Id",
+            "description": "Optional tenant precondition; never an authentication source."
           }
         },
         "additionalProperties": false,
@@ -39407,6 +43261,31 @@
             ],
             "title": "Model Id"
           },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "expected_model_ref": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Model Ref"
+          },
           "reasoning_option": {
             "anyOf": [
               {
@@ -40001,7 +43880,14 @@
             "title": "Total Requests"
           },
           "success_rate": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Success Rate"
           },
           "total_input_tokens": {
@@ -40232,7 +44118,14 @@
             "title": "Avg Latency Ms"
           },
           "error_rate": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Error Rate"
           },
           "timestamp": {
@@ -40644,6 +44537,32 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WebSearchRequest": {
+        "properties": {
+          "queries": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "minItems": 1,
+            "title": "Queries"
+          },
+          "max_results": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Results",
+            "default": 5
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "queries"
+        ],
+        "title": "WebSearchRequest"
       },
       "src__api__v1__dashboard__TimeSeriesResponse": {
         "properties": {

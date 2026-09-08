@@ -49,8 +49,9 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
     assert "agent_capability_worker_image_tag()" in common
     assert 'existing_worker_image="$(awk -F=' in init_env
     assert 'AGENT_CAPABILITY_WORKER_IMAGE=%s\\n' in init_env
-    assert 'assert_agent_runtime_image_locked "$desired_runtime_image"' in hot_update
-    assert "--force-recreate agent-runtime" in hot_update
+    assert 'assert_runtime_release_unit_locked "$desired_runtime_image" "$desired_worker_image"' in hot_update
+    assert "--force-recreate agent-runtime agent-capability-worker" in hot_update
+    assert "{{.Image}}" in hot_update and "desired_worker_digest" in hot_update
     assert 'wait_for_healthy "Agent Runtime" "check_agent_runtime_health"' in hot_update
     assert 'check_and_report "Knowledge worker" check_knowledge_worker_health' in status
     makefile = Path("Makefile").read_text(encoding="utf-8")

@@ -709,10 +709,19 @@ async def require_admin_user(
 
 @router.get("/knowledge/datasets")
 async def list_datasets(
+    response: Response,
+    limit: int = Query(default=200, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=1024),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
-    return await svc.list_datasets(user)
+    try:
+        page = await svc.list_datasets_page(user, limit=limit, cursor=cursor)
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if page["next_cursor"]:
+        response.headers["X-Next-Cursor"] = page["next_cursor"]
+    return page["items"]
 
 
 @router.post("/knowledge/datasets")
@@ -766,15 +775,19 @@ async def update_dataset(
 @router.delete("/knowledge/datasets/{dataset_id}")
 async def delete_dataset(
     dataset_id: str,
+    request: Request,
     payload: DatasetDeleteSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
+    from ..deletion_confirmation import require_deletion_confirmation
+
+    require_deletion_confirmation(request, user, dataset_id, payload.confirmation)
     try:
         ok = await svc.delete_dataset(
             user,
             dataset_id,
-            password=payload.password,
+            deletion_confirmed=True,
             reason=payload.reason,
         )
         return {"status": "success" if ok else "not_found", "dataset_id": dataset_id}
@@ -3815,6 +3828,9 @@ async def get_dataset_config(
         # Extract configurations from index_config
         index_config = dataset.get("index_config", {}) or {}
 
+        from ...services.knowledge.parsing.config_validation import parsing_config_report
+
+        parser_report = parsing_config_report(index_config)
         # Also get statistics
         try:
             stats = await svc.get_dataset_statistics(user, dataset_id)
@@ -3840,6 +3856,8 @@ async def get_dataset_config(
                     "mmr": {"enabled": False},
                 },
             ),
+            "parsing": parser_report,
+            "configuration_warnings": parser_report["warnings"],
             "embedding": {
                 "provider": dataset.get("embedding_provider"),
                 "model": dataset.get("embedding_model"),
@@ -4171,7 +4189,13 @@ async def dedupe_segments(
         generation = _dataset_content_generation(dataset)
 
         # Get all segments grouped by content_hash
-        segments = await svc.db.list_segments(dataset_id, limit=10000)
+        segments = await svc.db.list_segments(dataset_id, limit=10001)
+        if len(segments) > 10000:
+            raise HTTPException(status_code=422, detail={
+                "code": "KB_DEDUPE_INCOMPLETE", "incomplete": True,
+                "scan_limit": 10000, "observed_at_least": len(segments),
+                "message": "Dataset exceeds the synchronous dedupe limit.",
+            })
 
         # Group by content_hash
         hash_to_segments = defaultdict(list)
@@ -4191,6 +4215,7 @@ async def dedupe_segments(
         result = {
             "dataset_id": dataset_id,
             "total_segments": len(segments),
+            "incomplete": False,
             "unique_content": len(hash_to_segments),
             "duplicates_found": len(duplicates_to_delete),
             "dry_run": dry_run,

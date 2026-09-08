@@ -179,7 +179,7 @@ describe("Responses to Chat Completions compatibility", () => {
       ],
     });
 
-    expect((result.tools as any[]).map((tool) => tool.function.name)).toEqual(["write"]);
+    expect((result.tools as any[]).map((tool) => tool.function.name)).toEqual([expect.stringMatching(/^ns_[a-f0-9]{10}_write$/)]);
   });
 
   it("fails closed for hosted tools that Chat providers cannot represent", () => {
@@ -357,6 +357,93 @@ describe("Responses to Chat Completions compatibility", () => {
     expect(text).toContain(code);
     expect(text).toContain("event: response.failed");
     expect(text).not.toContain("event: response.completed");
+  });
+});
+
+
+describe("tool identity and authorization boundaries", () => {
+  const requestBody = (tools: unknown[], input: unknown = "hello") => ({ model: "chat-model", input, stream: true, tools });
+  const functions = (names: string[]) => names.map(name => ({ type: "function", name, parameters: { type: "object" } }));
+  const wireFrame = (toolCalls: unknown[], finished = false) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls }, ...(finished ? { finish_reason: "tool_calls" } : {}) }] })}\n\n`;
+  const post = (proxy: ChatCompatibilityProxy, body: unknown) => fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST", headers: { Authorization: `Bearer ${proxy.token}`, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  it.each([
+    { name: "get_data", parts: ["get", "_data"] },
+    { name: "get", parts: ["get"] },
+  ])("projects the exact $name identity when allowed tool names share a prefix", async ({ name, parts }) => {
+    const provider = await mockChatProvider(() => ({ chunks: [
+      ...parts.map(part => wireFrame([{ index: 0, id: "call_prefix", function: { name: part } }])),
+      wireFrame([{ index: 0, function: { arguments: '{"key":1}' } }], true),
+      "data: [DONE]\n\n",
+    ] }));
+    const proxy = await startProxy(profile(provider.baseUrl));
+    const response = await post(proxy, requestBody(functions(["get", "get_data"])));
+    const events = parseSseEvents(await response.text());
+    const added = events.filter(event => event.type === "response.output_item.added" && event.item?.type === "function_call");
+    const terminal = events.filter(event => event.type === "response.output_item.done" && event.item?.type === "function_call");
+    expect(added.map(event => event.item.name)).toEqual([name]);
+    expect(terminal.map(event => ({ name: event.item.name, arguments: event.item.arguments }))).toEqual([{ name, arguments: '{"key":1}' }]);
+    expect(events.filter(event => event.type === "response.completed").length).toBe(1);
+    expect(events.some(event => event.type === "response.failed")).toBe(false);
+  });
+
+  it("rejects a call ID reused across indexes before a successful terminal", async () => {
+    const provider = await mockChatProvider(() => ({ chunks: [wireFrame([
+      { index: 0, id: "same_call", function: { name: "read_data", arguments: "{}" } },
+      { index: 1, id: "same_call", function: { name: "write_data", arguments: "{}" } },
+    ], true), "data: [DONE]\n\n"] }));
+    const proxy = await startProxy(profile(provider.baseUrl));
+    const response = await post(proxy, requestBody(functions(["read_data", "write_data"])));
+    const events = parseSseEvents(await response.text());
+    expect(events.filter(event => event.type === "response.failed").map(event => event.response.error.code)).toEqual(["provider_tool_id_duplicate"]);
+    expect(events.some(event => event.type === "response.completed")).toBe(false);
+    expect(events.some(event => event.type === "response.function_call_arguments.done")).toBe(false);
+  });
+
+  it("keeps same-named namespaces distinct through output and the next-turn transcript", async () => {
+    const tools = ["files", "records"].map(name => ({ type: "namespace", name, tools: functions(["lookup"]) }));
+    const requests: any[] = [];
+    let aliases: string[] = [];
+    const provider = await mockChatProvider(({ body, attempt }) => {
+      requests.push(body);
+      if (attempt > 1) return { chunks: ['data: {"choices":[{"delta":{"content":"finished"},"finish_reason":"stop"}]}\n\n', "data: [DONE]\n\n"] };
+      aliases = body.tools.map((tool: any) => tool.function.name);
+      return { chunks: [wireFrame(aliases.map((name, index) => ({ index, id: `call_${index}`, function: { name, arguments: "{}" } })), true), "data: [DONE]\n\n"] };
+    });
+    const proxy = await startProxy(profile(provider.baseUrl));
+    const first = await post(proxy, requestBody(tools));
+    const events = parseSseEvents(await first.text());
+    const completed = events.find(event => event.type === "response.completed");
+    const calls = completed.response.output.filter((item: any) => item.type === "function_call");
+    expect(new Set(aliases).size).toBe(2);
+    expect(calls.map((call: any) => ({ namespace: call.namespace, name: call.name }))).toEqual([
+      { namespace: "files", name: "lookup" }, { namespace: "records", name: "lookup" },
+    ]);
+    const transcript = calls.flatMap((call: any) => [call, { type: "function_call_output", call_id: call.call_id, output: "found" }]);
+    const second = await post(proxy, requestBody(tools, transcript));
+    expect((await second.text()).includes("event: response.completed")).toBe(true);
+    expect(requests[1].messages.filter((message: any) => message.role === "assistant").map((message: any) => message.tool_calls[0].function.name)).toEqual(aliases);
+    expect(requests[1].messages.filter((message: any) => message.role === "tool").map((message: any) => ({ name: message.name, call_id: message.tool_call_id }))).toEqual(aliases.map((name, index) => ({ name, call_id: `call_${index}` })));
+  });
+
+  it.each([false, true])("tool_choice=none sends no callable tools even with history=%s", async (withHistory) => {
+    let outbound: any;
+    const provider = await mockChatProvider(({ body }) => {
+      outbound = body;
+      return { chunks: ['data: {"choices":[{"delta":{"content":"plain text"},"finish_reason":"stop"}]}\n\n', "data: [DONE]\n\n"] };
+    });
+    const proxy = await startProxy(profile(provider.baseUrl));
+    const input = withHistory ? [
+      { type: "function_call", call_id: "old_call", namespace: "files", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", call_id: "old_call", output: "old result" },
+    ] : "hello";
+    const response = await post(proxy, { ...requestBody([{ type: "namespace", name: "files", tools: functions(["lookup"]) }], input), tool_choice: "none", parallel_tool_calls: true });
+    expect((await response.text()).includes("event: response.completed")).toBe(true);
+    expect(outbound.tools).toBeUndefined();
+    expect(outbound.tool_choice).toBeUndefined();
+    expect(outbound.parallel_tool_calls).toBeUndefined();
   });
 });
 

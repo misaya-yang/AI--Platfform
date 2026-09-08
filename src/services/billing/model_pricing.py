@@ -129,7 +129,12 @@ class ModelPricingService:
             pricing_status=pricing_status,
         )
 
-    async def get_model_pricing(self, model: str) -> ModelPrice:
+    def invalidate_cache(self) -> None:
+        self._cache_time = 0
+
+    async def get_model_pricing(
+        self, model: str, *, tenant_id: str | None = None, provider_id: str | None = None,
+    ) -> ModelPrice:
         """
         Get pricing for a specific model.
 
@@ -139,6 +144,30 @@ class ModelPricingService:
         Returns:
             ModelPrice instance
         """
+        if tenant_id is not None and self.database and self.database._pool:
+            async with self.database._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT model_id, provider_id, input_price_per_1k, output_price_per_1k
+                       FROM llm_models WHERE tenant_id = $1 AND model_id = $2
+                       AND ($3::text IS NULL OR provider_id = $3) LIMIT 2""",
+                    tenant_id, model, provider_id,
+                )
+            if len(rows) > 1:
+                raise ValueError("model_provider_required")
+            if rows:
+                row = rows[0]
+                return ModelPrice(
+                    model=model, provider=row["provider_id"],
+                    input_price_per_1k=Decimal(str(row["input_price_per_1k"])),
+                    output_price_per_1k=Decimal(str(row["output_price_per_1k"])),
+                    pricing_status="tenant_model",
+                )
+            # A scoped miss must never read a different tenant's legacy mirror.
+            return self._get_default_price(model)
+
+        if tenant_id is not None:
+            return self._get_default_price(model)
+
         await self._ensure_cache()
 
         # Direct match
@@ -147,7 +176,7 @@ class ModelPricingService:
 
         # Partial match (for model variants)
         for cached_model, price in self._cache.items():
-            if model.startswith(cached_model) or cached_model.startswith(model):
+            if model.startswith(cached_model):
                 return self._with_pricing_status(price, "provider_model")
 
         # Return default
@@ -166,6 +195,7 @@ class ModelPricingService:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        *, tenant_id: str | None = None, provider_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Calculate cost for token usage.
@@ -173,7 +203,7 @@ class ModelPricingService:
         Returns:
             Cost breakdown dictionary
         """
-        price = await self.get_model_pricing(model)
+        price = await self.get_model_pricing(model, tenant_id=tenant_id, provider_id=provider_id)
         cost = price.calculate_cost(input_tokens, output_tokens)
         cost["model"] = price.model
         cost["provider"] = price.provider

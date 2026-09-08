@@ -24,7 +24,7 @@ def test_mutation_exception_retry_requires_replayable_body_and_idempotency_key(
         body_replayable=False,
         idempotency_key=True,
     )
-    assert policy.can_retry_exception(
+    assert not policy.can_retry_exception(
         error,
         method=method,
         body_replayable=True,
@@ -58,4 +58,13 @@ def test_exception_retry_rejects_non_transient_error_and_disabled_attempts() -> 
         ValueError("not a transport retry"),
         method="GET",
         body_replayable=False,
+    )
+
+
+def test_mutation_retry_requires_explicit_upstream_contract():
+    assert RetryPolicy(idempotency_guaranteed=True).can_retry_exception(
+        httpx.ConnectError("offline"), method="POST", body_replayable=True, idempotency_key=True,
+    )
+    assert not RetryPolicy().can_retry_response(
+        503, method="POST", body_replayable=True, idempotency_key=True,
     )

@@ -221,7 +221,7 @@ export function LoginPage() {
               {t("login.brandDescription")}
             </p>
 
-            {/* Live Gateway Control Plane Mockup Card */}
+            {/* Gateway Architecture Preview */}
             <div className="mt-8 overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/60 p-5 shadow-2xl backdrop-blur-xl">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 pb-3">
                 <div className="flex items-center gap-2">
@@ -231,20 +231,20 @@ export function LoginPage() {
                     <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/60" />
                   </div>
                   <span className="ml-2 font-mono text-xs text-zinc-400">
-                    ai-gateway.core / cluster-east
+                    AI Gateway / architecture overview
                   </span>
                 </div>
                 <div className="flex items-center gap-3 font-mono text-xs">
                   <span className="inline-flex items-center gap-1 text-emerald-400">
                     <Radio size={12} className="animate-pulse" />
-                    99.99% UPTIME
+                    DEPLOYMENT OVERVIEW
                   </span>
                   <span className="text-zinc-500">|</span>
-                  <span className="text-zinc-400">P99: 38ms</span>
+                  <span className="text-zinc-400">Metrics after sign-in</span>
                 </div>
               </div>
 
-              {/* Real-time Architecture Pipeline Flow */}
+              {/* Architecture Pipeline Flow */}
               <div className="my-4 grid grid-cols-3 gap-2 text-center text-xs">
                 <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5">
                   <div className="flex items-center justify-center gap-1.5 font-medium text-zinc-300">
@@ -252,7 +252,7 @@ export function LoginPage() {
                     Inbound Traffic
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                    4,820 req/s
+                    Request routing
                   </div>
                 </div>
 
@@ -262,7 +262,7 @@ export function LoginPage() {
                     Auth & Security
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-emerald-400">
-                    100% Verified
+                    Scoped authorization
                   </div>
                 </div>
 
@@ -272,7 +272,7 @@ export function LoginPage() {
                     Model Fleet
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                    12 Active Nodes
+                    Configured providers
                   </div>
                 </div>
               </div>
@@ -281,10 +281,10 @@ export function LoginPage() {
               <div className="flex items-center justify-between rounded-lg bg-black/40 px-3 py-2 font-mono text-[11px] text-zinc-400">
                 <span className="flex items-center gap-1.5">
                   <Network size={12} className="text-indigo-400" />
-                  Route: <code className="text-zinc-200">/v1/chat/completions</code> ➔ <span className="text-indigo-300">FastAPI Agent Pool</span>
+                  Route: <code className="text-zinc-200">/v1/chat/completions</code> ➔ <span className="text-indigo-300">Gateway routing</span>
                 </span>
                 <span className="text-emerald-400 flex items-center gap-1">
-                  <CheckCircle2 size={11} /> Ready
+                  <CheckCircle2 size={11} /> Architecture preview
                 </span>
               </div>
             </div>
@@ -317,7 +317,7 @@ export function LoginPage() {
               {t("login.secureAccess")}
             </span>
             <span>•</span>
-            <span>SOC-2 Type II Certified</span>
+            <span>Self-hosted deployment</span>
             <span>•</span>
             <span>Zero-Trust Gateway Architecture</span>
           </div>

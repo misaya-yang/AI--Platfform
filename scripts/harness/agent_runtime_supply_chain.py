@@ -559,16 +559,14 @@ def validate_lock(
         (
             property_.get("value")
             for property_ in sbom_component.get("properties") or []
-            if isinstance(property_, dict)
-            and property_.get("name") == "ai-platform:overlay.sha256"
+            if isinstance(property_, dict) and property_.get("name") == "ai-platform:overlay.sha256"
         ),
         None,
     )
     expected_overlay_sha = build.get("overlay_sha256")
     if expected_overlay_sha and (
         sbom_overlay_sha != expected_overlay_sha
-        or sbom_component.get("version")
-        != f"{source['upstream_sha']}+{expected_overlay_sha[:12]}"
+        or sbom_component.get("version") != f"{source['upstream_sha']}+{expected_overlay_sha[:12]}"
     ):
         raise ContractError("capability worker SBOM does not describe the locked overlay")
 
@@ -857,21 +855,11 @@ def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path) 
     validate_lock(repo_root=repo_root, lock_path=lock_path)
 
 
-def record_local_image(
-    *,
-    repo_root: Path,
-    lock_path: Path,
+def _checked_image_identity(
+    lock: dict[str, Any],
     artifact_id: str,
-    image: str,
-) -> None:
-    if artifact_id not in ARTIFACT_BINARIES:
-        raise ContractError(f"unknown OCI artifact: {artifact_id}")
-    validate_lock(repo_root=repo_root, lock_path=lock_path)
-    lock = _load_object(lock_path, label="Agent Harness lock")
-    inspected = json.loads(_run(["docker", "image", "inspect", image], cwd=repo_root))
-    if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
-        raise ContractError("Docker image inspection returned an unexpected shape")
-    image_info = inspected[0]
+    image_info: dict[str, Any],
+) -> tuple[str, str]:
     labels = (image_info.get("Config") or {}).get("Labels") or {}
     source = lock["source"]
     build = lock["build"]
@@ -895,6 +883,10 @@ def record_local_image(
             "com.misaya.ai-platform.agent-runtime.artifact": artifact_id,
             "com.misaya.ai-platform.agent-runtime.binary": expected_binary,
         }
+    if artifact_id == "capability_worker" and build.get("overlay_sha256"):
+        expected_labels["com.misaya.ai-platform.capability-worker.overlay-sha256"] = build[
+            "overlay_sha256"
+        ]
     if any(labels.get(key) != value for key, value in expected_labels.items()):
         raise ContractError("Docker image labels do not match the locked source/artifact identity")
     image_digest = image_info.get("Id")
@@ -905,13 +897,74 @@ def record_local_image(
     if not all(isinstance(value, str) and value for value in (os_name, architecture)):
         raise ContractError("Docker image platform is missing")
 
+    return image_digest, f"{os_name}/{architecture}"
+
+
+def verify_local_images(
+    *,
+    repo_root: Path,
+    lock_path: Path,
+    runtime_image: str | None = None,
+    worker_image: str | None = None,
+) -> None:
+    """Check the actual selected Runtime/Worker pair without rewriting its lock."""
+    for artifact_id in ("agent_runtime", "capability_worker"):
+        validate_lock(repo_root=repo_root, lock_path=lock_path, required_artifact=artifact_id)
+    lock = _load_object(lock_path, label="Agent Harness lock")
+    source, build = lock["source"], lock["build"]
+    suffix = f"local-{source['upstream_sha'][:12]}-{build.get('overlay_sha256', '')[:12]}"
+    selected = {
+        "agent_runtime": runtime_image or f"ai-gateway-agent-runtime:{suffix}",
+        "capability_worker": worker_image or f"ai-gateway-agent-capability-worker:{suffix}",
+    }
+    platforms = set()
+    for artifact_id, image in selected.items():
+        inspected = json.loads(_run(["docker", "image", "inspect", image], cwd=repo_root))
+        if (
+            not isinstance(inspected, list)
+            or len(inspected) != 1
+            or not isinstance(inspected[0], dict)
+        ):
+            raise ContractError("Docker image inspection returned an unexpected shape")
+        info = inspected[0]
+        digest, platform = _checked_image_identity(lock, artifact_id, info)
+        artifact = lock["oci"]["artifacts"][artifact_id]
+        if lock["release_state"] == "published":
+            if artifact["image_ref"] not in (info.get("RepoDigests") or []):
+                raise ContractError(f"{artifact_id} registry digest does not match its lock")
+        elif digest != artifact["image_digest"]:
+            raise ContractError(f"{artifact_id} image digest does not match its lock")
+        if platform not in artifact["platforms"]:
+            raise ContractError(f"{artifact_id} platform does not match its lock")
+        platforms.add(platform)
+    if len(platforms) != 1:
+        raise ContractError("Runtime and capability worker must target the same platform")
+
+
+def record_local_image(
+    *,
+    repo_root: Path,
+    lock_path: Path,
+    artifact_id: str,
+    image: str,
+) -> None:
+    if artifact_id not in ARTIFACT_BINARIES:
+        raise ContractError(f"unknown OCI artifact: {artifact_id}")
+    validate_lock(repo_root=repo_root, lock_path=lock_path)
+    lock = _load_object(lock_path, label="Agent Harness lock")
+    inspected = json.loads(_run(["docker", "image", "inspect", image], cwd=repo_root))
+    if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+        raise ContractError("Docker image inspection returned an unexpected shape")
+    image_info = inspected[0]
+    image_digest, platform = _checked_image_identity(lock, artifact_id, image_info)
+
     artifact = lock["oci"]["artifacts"][artifact_id]
     artifact.update(
         {
             "candidate_start_allowed": True,
             "image_ref": f"local-image://{image_digest}",
             "image_digest": image_digest,
-            "platforms": [f"{os_name}/{architecture}"],
+            "platforms": [platform],
         }
     )
     lock["release_state"] = "local_image_locked"
@@ -959,6 +1012,15 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--artifact", choices=sorted(ARTIFACT_BINARIES), required=True)
     record.add_argument("--image", required=True)
 
+    verify_pair = subparsers.add_parser(
+        "verify-local-images",
+        help="verify the selected Runtime/Worker release unit against the lock",
+    )
+    verify_pair.add_argument("--repo-root", type=Path, required=True)
+    verify_pair.add_argument("--lock", type=Path, required=True)
+    verify_pair.add_argument("--runtime-image")
+    verify_pair.add_argument("--worker-image")
+
     validate = subparsers.add_parser("validate", help="validate the committed immutable lock")
     validate.add_argument("--repo-root", type=Path, required=True)
     validate.add_argument("--lock", type=Path, required=True)
@@ -987,6 +1049,13 @@ def main() -> int:
                 repo_root=args.repo_root.resolve(),
                 lock_path=args.lock.resolve(),
                 cargo_workspace=args.cargo_workspace,
+            )
+        elif args.command == "verify-local-images":
+            verify_local_images(
+                repo_root=args.repo_root.resolve(),
+                lock_path=args.lock.resolve(),
+                runtime_image=args.runtime_image,
+                worker_image=args.worker_image,
             )
         elif args.command == "record-local-image":
             record_local_image(

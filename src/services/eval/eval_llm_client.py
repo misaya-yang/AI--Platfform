@@ -17,7 +17,7 @@ from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 
 logger = get_logger(__name__)
 
-ASSISTANT_CHAT_PATH = "/api/v1/assistant/chat"
+RESPONSES_PATH = "/v1/responses"
 DEFAULT_JUDGE_MODEL_ID = "qwen3.7-plus"
 EVAL_WORKER_USER_ID = "eval-worker"
 
@@ -62,7 +62,13 @@ def load_eval_llm_settings() -> EvalLlmSettings:
     )
 
 
-def _build_internal_jwt(*, tenant_id: str) -> str:
+def _build_internal_jwt(*, tenant_id: str, delegation: dict[str, str] | None = None) -> str:
+    user_id = EVAL_WORKER_USER_ID
+    if delegation is not None:
+        if (delegation.get("tenant_id") != tenant_id or delegation.get("actor") != "eval-worker"
+                or not all(delegation.get(key) for key in ("subject", "run_id", "job_id"))):
+            raise RuntimeError("AGENT_EVAL_DELEGATION_INVALID")
+        user_id = delegation["subject"]
     configured_secret = (
         os.getenv("GATEWAY_AUTHENTICATION__JWT__SECRET", "").strip()
         or os.getenv("JWT_SECRET", "").strip()
@@ -79,8 +85,8 @@ def _build_internal_jwt(*, tenant_id: str) -> str:
     algorithm = get_jwt_algorithms(configured_algorithms)[0]
     now = datetime.now(UTC)
     payload: dict[str, object] = {
-        "sub": EVAL_WORKER_USER_ID,
-        "user_id": EVAL_WORKER_USER_ID,
+        "sub": user_id,
+        "user_id": user_id,
         "tenant_id": tenant_id,
         "roles": ["user"],
         "permissions": [],
@@ -88,6 +94,12 @@ def _build_internal_jwt(*, tenant_id: str) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=5),
     }
+    if delegation is not None:
+        # On behalf of a DB-verified job creator. Gateway may resolve current
+        # permissions from that user's DB grants; token roles are not a ceiling.
+        payload["act"] = {"sub": "eval-worker", "purpose": "eval_candidate",
+                          "tenant_id": tenant_id, "run_id": delegation["run_id"],
+                          "job_id": delegation["job_id"]}
     audience = os.getenv("GATEWAY_AUTHENTICATION__JWT__AUDIENCE", "").strip()
     issuer = os.getenv("GATEWAY_AUTHENTICATION__JWT__ISSUER", "").strip()
     if audience:
@@ -111,26 +123,34 @@ class EvalGatewayLlmClient:
     ) -> str:
         tenant_id = context.tenant_id or self.settings.system_tenant_id
         body = {
-            "message": prompt,
-            "model_id": model_id or self.settings.default_judge_model_id,
+            "input": prompt,
+            "model": model_id or self.settings.default_judge_model_id,
             "temperature": 0,
-            "max_tokens": 512,
-            "kb_mode": "off",
-            "memory_mode": "off",
-            "web_search_enabled": False,
+            "max_output_tokens": 512,
+            "tools": [],
+            "tool_choice": "none",
+            "parallel_tool_calls": False,
+            "stream": False,
         }
+        if context.model_ref is not None:
+            body["expected_model_ref"] = context.model_ref
+        if context.provider_id:
+            body["provider_id"] = context.provider_id
         encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         headers = self._headers(tenant_id=tenant_id)
 
         timeout = httpx.Timeout(connect=5.0, read=self.settings.timeout_read_s, write=30.0, pool=10.0)
-        async with httpx.AsyncClient(base_url=self.settings.gateway_base_url, timeout=timeout) as client:
-            response = await client.post(ASSISTANT_CHAT_PATH, headers=headers, content=encoded)
+        async with httpx.AsyncClient(
+            base_url=self.settings.gateway_base_url, timeout=timeout,
+            trust_env=False, follow_redirects=False,
+        ) as client:
+            response = await client.post(RESPONSES_PATH, headers=headers, content=encoded)
 
-        if response.status_code >= 400:
+        if response.status_code < 200 or response.status_code >= 300:
             raise RuntimeError(f"Gateway Agent Runtime judge failed with HTTP {response.status_code}")
 
         payload = response.json()
-        content = str(payload.get("content") or "").strip()
+        content = str(payload.get("output_text") or "").strip()
         if not content:
             raise RuntimeError("Gateway Agent Runtime judge returned empty content")
         return content
@@ -140,11 +160,6 @@ class EvalGatewayLlmClient:
             "Authorization": f"Bearer {_build_internal_jwt(tenant_id=tenant_id)}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "X-User-Id": EVAL_WORKER_USER_ID,
-            "X-Tenant-Id": tenant_id,
-            "X-User-Tier": "normal",
-            "X-User-Type": "system",
-            "X-User-Roles": "admin",
         }
         return headers
 

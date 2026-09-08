@@ -5,6 +5,8 @@ metrics modules (also moved to ai_gateway_core) can resolve their
 ``pricing_catalog`` import without depending on gateway src/.
 """
 
+from ai_gateway_contracts.pricing import build_pricing_snapshot, validate_pricing_snapshot
+
 from .pricing_catalog import (
     DEFAULT_TOKEN_PRICING_PER_1K_USD,
     microcents_to_usd,
@@ -15,6 +17,8 @@ from .pricing_catalog import (
 
 __all__ = [
     "DEFAULT_TOKEN_PRICING_PER_1K_USD",
+    "build_pricing_snapshot",
+    "validate_pricing_snapshot",
     "microcents_to_usd",
     "resolve_pricing",
     "resolve_pricing_with_status",

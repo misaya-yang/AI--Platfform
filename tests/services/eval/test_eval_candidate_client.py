@@ -62,6 +62,10 @@ class _FakeClient:
     async def __aexit__(self, *_args: Any) -> None:
         return None
 
+    async def get(self, path: str, **kwargs: Any) -> _FakeResponse:
+        self.captured.append({"method": "GET", "path": path, **kwargs})
+        return _FakeResponse({"user_id": "eval-user", "tenant_id": "tenant-a"})
+
     async def post(self, path: str, **kwargs: Any) -> _FakeResponse:
         self.captured.append({"method": "POST", "path": path, **kwargs})
         return self.responses.pop(0)
@@ -84,8 +88,10 @@ def _install_fake_client(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("auth_mode", ["jwt", "api_key"])
 async def test_candidate_client_uses_v2_thread_turn_events_and_runtime_owner(
     monkeypatch: pytest.MonkeyPatch,
+    auth_mode: str,
 ) -> None:
     captured: list[dict[str, Any]] = []
     _install_fake_client(
@@ -117,7 +123,10 @@ async def test_candidate_client_uses_v2_thread_turn_events_and_runtime_owner(
     async def remember(trace_id: str) -> None:
         started.append(trace_id)
 
-    result = await EvalCandidateClient().run(
+    candidate = EvalCandidateClient()
+    candidate.token = "test-token" if auth_mode == "jwt" else ""
+    candidate.api_key = "test-key" if auth_mode == "api_key" else ""
+    result = await candidate.run(
         tenant_id="tenant-a",
         run_case_id="run-case-1",
         message="hello",
@@ -126,14 +135,20 @@ async def test_candidate_client_uses_v2_thread_turn_events_and_runtime_owner(
     )
 
     assert [item["path"] for item in captured] == [
+        "/api/v1/auth/me",
         "/api/v2/agent/threads",
         "/api/v2/agent/threads/thread-1/turns",
         "/api/v2/agent/threads/thread-1/events?turn_id=turn-1",
     ]
-    assert captured[0]["headers"]["Authorization"] == "Bearer test-token"
-    assert captured[0]["json"]["model_id"] == "qwen3.7-plus"
+    auth_header, auth_value = (
+        ("Authorization", "Bearer test-token") if auth_mode == "jwt"
+        else ("X-API-Key", "test-key")
+    )
+    assert all(item["headers"][auth_header] == auth_value for item in captured)
     assert captured[1]["json"]["model_id"] == "qwen3.7-plus"
-    assert captured[1]["json"]["temperature"] == 0.2
+    assert captured[1]["json"]["expected_tenant_id"] == "tenant-a"
+    assert captured[2]["json"]["model_id"] == "qwen3.7-plus"
+    assert captured[2]["json"]["temperature"] == 0.2
     assert started == ["turn-1"]
     assert result.trace_id == "turn-1"
     assert result.output == "answer"
@@ -155,7 +170,7 @@ async def test_candidate_client_does_not_inherit_host_proxy_settings(
                 }
             }
         ),
-        _FakeResponse({"turn": {"id": "turn-1", "events_url": "/events"}}),
+        _FakeResponse({"turn": {"id": "turn-1", "events_url": "/api/v2/agent/threads/thread-1/events"}}),
         _FakeResponse(
             lines=[
                 _v2_event("run_started", {"run_id": "turn-1"}, 1),
@@ -208,7 +223,7 @@ async def test_candidate_client_preserves_terminal_error_after_v2_stream(
         captured,
         [
             _FakeResponse({"thread": {"thread_id": "thread-1", "runtime": {"owner": "agent_runtime"}}}),
-            _FakeResponse({"turn": {"id": "turn-1", "events_url": "/events"}}),
+            _FakeResponse({"turn": {"id": "turn-1", "events_url": "/api/v2/agent/threads/thread-1/events"}}),
             _FakeResponse(
                 lines=[
                     _v2_event("run_started", {"run_id": "turn-1"}, 1),
@@ -228,8 +243,8 @@ async def test_candidate_client_preserves_terminal_error_after_v2_stream(
 
     assert result.trace_id == "turn-1"
     assert result.error == "tool failed"
-    assert "model_id" not in captured[0]["json"]
     assert "model_id" not in captured[1]["json"]
+    assert "model_id" not in captured[2]["json"]
 
 
 @pytest.mark.asyncio
@@ -258,7 +273,7 @@ async def test_candidate_client_rejects_missing_or_duplicate_terminal(
         captured,
         [
             _FakeResponse({"thread": {"thread_id": "thread-1", "runtime": {"owner": "agent_runtime"}}}),
-            _FakeResponse({"turn": {"id": "turn-1", "events_url": "/events"}}),
+            _FakeResponse({"turn": {"id": "turn-1", "events_url": "/api/v2/agent/threads/thread-1/events"}}),
             _FakeResponse(lines=stream_events),
         ],
     )

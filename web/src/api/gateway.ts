@@ -119,10 +119,11 @@ export async function getTaskResult(taskId: string) {
 // 供应商状态类型
 export interface ProviderStatus {
   name: string;
-  status: "configured" | "not_configured";
+  status: "configured" | "not_configured" | "unverified" | "healthy" | "unhealthy" | "stale";
   configured: boolean;
   model_count: number;
-  last_check: string;
+  last_check: string | null;
+  probe_source?: string | null;
 }
 
 export async function getProvidersHealth() {

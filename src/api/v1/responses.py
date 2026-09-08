@@ -33,11 +33,13 @@ from ...services.assistant_entry.model_access import (
     check_model_permission,
 )
 from ...services.assistant_entry.session_binding import ensure_agent_runtime_session
+from ...services.llm.model_service import ModelProviderAmbiguous
 from ..deps import enforce_rate_limit, get_user_context
 from ._agent_runtime_headers import reject_client_agent_forgery
 from .responses_usage import responses_usage
 
 router = APIRouter(tags=["Responses"])
+
 logger = logging.getLogger(__name__)
 _RESPONSES_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAX_RESPONSES_TOOLS = 128
@@ -509,6 +511,17 @@ async def create_response(
             message="model must be a non-empty string.",
             param="model",
         )
+    expected_model_ref = payload.get("expected_model_ref")
+    if expected_model_ref is not None and not isinstance(expected_model_ref, dict):
+        return _error(status_code=400, code="invalid_expected_model_ref",
+                      message="expected_model_ref must be an object.", param="expected_model_ref")
+    provider_id = payload.get("provider_id")
+    if provider_id is not None and (
+        not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 255
+    ):
+        return _error(status_code=400, code="invalid_provider_id",
+                      message="provider_id must be a non-empty string.", param="provider_id")
+    provider_id = provider_id.strip() if provider_id else None
     model_meta = getattr(request.app.state, "model_meta", None)
     if model_meta is None:
         return _error(
@@ -519,7 +532,7 @@ async def create_response(
             error_type="server_error",
         )
     try:
-        await check_model_permission(user, model, model_meta)
+        await check_model_permission(user, model, model_meta, provider_id=provider_id)
     except HTTPException as exc:
         if exc.status_code == 400:
             return _error(
@@ -537,6 +550,9 @@ async def create_response(
                 error_type="permission_error",
             )
         raise
+    except ModelProviderAmbiguous:
+        return _error(status_code=409, code="model_provider_required",
+                      message="Specify provider_id for this model.", param="provider_id")
     except Exception as exc:
         logger.error(
             "Responses model authorization unavailable (exception_type=%s)",
@@ -680,6 +696,8 @@ async def create_response(
             user_id=user.user_id,
             session_id=session_id,
             model_id=model_id,
+            provider_id=provider_id,
+            expected_model_ref=expected_model_ref,
             model_service=(
                 assistant_model_service(request)
                 or getattr(control, "model_service", None)

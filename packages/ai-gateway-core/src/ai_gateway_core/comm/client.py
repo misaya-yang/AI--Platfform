@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,7 +16,7 @@ import httpx
 
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 
-from .retry import RetryBudget, RetryPolicy
+from .retry import RetryBudget, RetryPolicy, UpstreamOutcomeUnknown, outcome_is_unknown
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,8 @@ class InternalServiceClient:
                         status=type(exc).__name__,
                         duration_seconds=time.perf_counter() - started,
                     )
+                    if outcome_is_unknown(exc, method=method_upper):
+                        raise UpstreamOutcomeUnknown("UPSTREAM_OUTCOME_UNKNOWN") from exc
                     raise
 
                 if (
@@ -358,40 +361,24 @@ def _parse_rate_limits(raw: str) -> dict[str, tuple[float, int]]:
 
 
 _SERVICE_METRICS: dict[str, Any] | None = None
+_SERVICE_METRICS_FACTORY: Callable[[], dict[str, Any]] | None = None
+
+
+def configure_service_metrics(factory: Callable[[], dict[str, Any]] | None) -> None:
+    """Inject a process-owned metrics sink; services without one remain uninstrumented."""
+    global _SERVICE_METRICS, _SERVICE_METRICS_FACTORY
+    _SERVICE_METRICS_FACTORY = factory
+    _SERVICE_METRICS = None
 
 
 def _service_metrics() -> dict[str, Any] | None:
     global _SERVICE_METRICS
     if _SERVICE_METRICS is not None:
         return _SERVICE_METRICS
+    if _SERVICE_METRICS_FACTORY is None:
+        return None
     try:
-        from src.core.observability.metrics import Counter, Gauge, Histogram, get_metrics
-
-        collector = get_metrics()
-        _SERVICE_METRICS = {
-            "duration": collector.register_histogram(
-                Histogram(
-                    "service_call_duration_seconds",
-                    "Internal service call duration in seconds",
-                    labels=["service", "method", "status"],
-                    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
-                )
-            ),
-            "total": collector.register_counter(
-                Counter(
-                    "service_call_total",
-                    "Internal service calls",
-                    labels=["service", "method", "status"],
-                )
-            ),
-            "inflight": collector.register_gauge(
-                Gauge(
-                    "service_call_inflight",
-                    "Internal service calls in flight",
-                    labels=["service"],
-                )
-            ),
-        }
+        _SERVICE_METRICS = _SERVICE_METRICS_FACTORY()
         return _SERVICE_METRICS
     except Exception:  # noqa: BLE001
         _SERVICE_METRICS = {}

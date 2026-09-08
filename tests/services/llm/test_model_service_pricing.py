@@ -52,287 +52,60 @@ def sample_model_row():
     }
 
 
-class TestModelServicePricingSync:
-    """Tests for pricing synchronization in ModelService."""
-
-    def test_row_capability_json_is_decoded_before_profile_merge(
-        self, model_service, sample_model_row
-    ):
-        row = {
-            **sample_model_row,
-            "catalog_capabilities": json.dumps({}),
-            "capability_overrides": json.dumps({}),
-            "capability_revision": 1,
-        }
-
-        result = model_service._row_to_dict(row)
-
-        assert isinstance(result["catalog_capabilities"], dict)
-        assert isinstance(result["capability_overrides"], dict)
-        assert result["effective_capabilities"]["schema_version"] == 1
-
-    @pytest.mark.asyncio
-    async def test_create_model_syncs_pricing(self, model_service, mock_db, sample_model_row):
-        """Test that creating a model syncs pricing to model_pricing table."""
-        mock_db.fetchrow.return_value = sample_model_row
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
-
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "startup"])
+async def test_tenant_model_does_not_publish_global_price(
+    model_service, mock_db, sample_model_row, operation,
+):
+    mock_db.fetchrow.return_value = sample_model_row
+    mock_db.fetch.return_value = [sample_model_row]
+    with patch("src.services.llm.model_service.get_pricing_service") as get_pricing:
+        pricing = get_pricing.return_value
+        pricing.update_pricing = AsyncMock()
+        if operation == "create":
             result = await model_service.create_model(
-                tenant_id="test-tenant",
-                model_id="gpt-4o",
-                provider_id="openai",
-                display_name="GPT-4o",
-                context_window=128000,
-                max_output_tokens=4096,
-                supports_vision=True,
-                supports_tools=True,
-                input_price_per_1k=Decimal("0.0025"),
-                output_price_per_1k=Decimal("0.01"),
+                tenant_id="test-tenant", model_id="gpt-4o", provider_id="openai", display_name="GPT",
             )
-
-            # Verify pricing sync was called
-            mock_pricing_svc.update_pricing.assert_called_once_with(
-                model="gpt-4o",
-                input_price_per_1k=0.0025,
-                output_price_per_1k=0.01,
-                provider="openai",
-                display_name="GPT-4o",
-                context_window=128000,
-                max_output_tokens=4096,
-                supports_vision=True,
-                supports_tools=True,
-            )
-
-            # Verify model was returned
-            assert result["model_id"] == "gpt-4o"
-
-    @pytest.mark.asyncio
-    async def test_update_model_syncs_pricing(self, model_service, mock_db, sample_model_row):
-        """Test that updating a model syncs pricing to model_pricing table."""
-        mock_db.fetchrow.return_value = sample_model_row
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
-
+        elif operation == "update":
             result = await model_service.update_model(
-                tenant_id="test-tenant",
-                model_id="gpt-4o",
-                input_price_per_1k=Decimal("0.003"),
-                output_price_per_1k=Decimal("0.012"),
+                tenant_id="test-tenant", model_id="gpt-4o", input_price_per_1k=Decimal("0.0025"),
             )
-
-            # Verify pricing sync was called with values from the updated row
-            mock_pricing_svc.update_pricing.assert_called_once()
-            call_kwargs = mock_pricing_svc.update_pricing.call_args.kwargs
-            assert call_kwargs["model"] == "gpt-4o"
-            assert call_kwargs["provider"] == "openai"
-
-            # Verify model was returned
-            assert result["model_id"] == "gpt-4o"
-
-    @pytest.mark.asyncio
-    async def test_pricing_sync_failure_does_not_block_create(
-        self, model_service, mock_db, sample_model_row
-    ):
-        """Test that pricing sync failure doesn't prevent model creation."""
-        mock_db.fetchrow.return_value = sample_model_row
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock(
-                side_effect=Exception("Pricing sync failed")
-            )
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            # Should not raise, model should still be created
-            result = await model_service.create_model(
-                tenant_id="test-tenant",
-                model_id="gpt-4o",
-                provider_id="openai",
-                display_name="GPT-4o",
-            )
-
-            # Verify model was still returned despite pricing sync failure
-            assert result["model_id"] == "gpt-4o"
-
-    @pytest.mark.asyncio
-    async def test_pricing_sync_failure_does_not_block_update(
-        self, model_service, mock_db, sample_model_row
-    ):
-        """Test that pricing sync failure doesn't prevent model update."""
-        mock_db.fetchrow.return_value = sample_model_row
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock(
-                side_effect=Exception("Pricing sync failed")
-            )
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            # Should not raise, model should still be updated
-            result = await model_service.update_model(
-                tenant_id="test-tenant",
-                model_id="gpt-4o",
-                display_name="Updated GPT-4o",
-            )
-
-            # Verify model was still returned despite pricing sync failure
-            assert result["model_id"] == "gpt-4o"
-
-    @pytest.mark.asyncio
-    async def test_update_model_no_changes_skips_pricing_sync(
-        self, model_service, mock_db, sample_model_row
-    ):
-        """Test that update with no changes doesn't trigger pricing sync."""
-        # get_model returns the existing model
-        mock_db.fetchrow.return_value = sample_model_row
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            # Call update with no changes
-            result = await model_service.update_model(
-                tenant_id="test-tenant",
-                model_id="gpt-4o",
-            )
-
-            # Since no updates, it falls back to get_model path
-            # which doesn't sync pricing
-            # (The fetchrow is called for get_model, not update)
-            assert result is not None
-
-    @pytest.mark.asyncio
-    async def test_update_nonexistent_model_returns_none(self, model_service, mock_db):
-        """Test that updating a non-existent model returns None."""
-        mock_db.fetchrow.return_value = None
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            result = await model_service.update_model(
-                tenant_id="test-tenant",
-                model_id="nonexistent-model",
-                display_name="Updated Name",
-            )
-
-            # Should return None for non-existent model
-            assert result is None
-
-            # Pricing sync should not be called
-            mock_pricing_svc.update_pricing.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_sync_pricing_from_llm_models(self, model_service, mock_db, sample_model_row):
-        """Startup sync should mirror llm_models pricing into model_pricing."""
-        mock_db.fetch.return_value = [sample_model_row]
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock(return_value={"success": True})
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            synced = await model_service.sync_pricing_from_llm_models(
-                tenant_id="test-tenant",
-                include_disabled=True,
-            )
-
-            assert synced == 1
-            mock_pricing_svc.update_pricing.assert_called_once()
-            call_kwargs = mock_pricing_svc.update_pricing.call_args.kwargs
-            assert call_kwargs["model"] == "gpt-4o"
-            assert call_kwargs["input_price_per_1k"] == 0.0025
-            assert call_kwargs["output_price_per_1k"] == 0.01
+            query, *params = mock_db.fetchrow.call_args.args
+            assert "provider_id =" in query
+            assert "openai" in params
+        else:
+            assert await model_service.sync_pricing_from_llm_models("test-tenant") == 1
+            result = model_service._row_to_dict(sample_model_row)
+        pricing.update_pricing.assert_not_called()
+        pricing.invalidate_cache.assert_called_once()
+        receipt = result["pricing_snapshot"]
+        assert receipt["tenant_id"] == "test-tenant"
+        assert receipt["provider_id"] == "openai"
+        assert receipt["input_price_per_1k"] == "0.0025"
 
 
-class TestModelServicePricingValues:
-    """Tests for pricing value handling."""
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "update", "delete"])
+async def test_ambiguous_model_requires_provider(model_service, mock_db, sample_model_row, operation):
+    mock_db.fetchrow.return_value = {**sample_model_row, "provider_matches": 2}
+    method = getattr(model_service, f"{operation}_model")
+    with pytest.raises(ValueError, match="model_provider_required"):
+        await method(tenant_id="test-tenant", model_id="gpt-4o")
+    mock_db.execute.assert_not_called()
+    assert mock_db.fetchrow.await_count == 1
 
-    @pytest.mark.asyncio
-    async def test_create_model_with_zero_prices(self, model_service, mock_db):
-        """Test creating a model with zero prices."""
-        mock_db.fetchrow.return_value = {
-            "model_id": "free-model",
-            "tenant_id": "test-tenant",
-            "provider_id": "local",
-            "display_name": "Free Model",
-            "context_window": 4096,
-            "max_output_tokens": 1024,
-            "supports_vision": False,
-            "supports_tools": False,
-            "input_price_per_1k": Decimal("0"),
-            "output_price_per_1k": Decimal("0"),
-            "access_level": "public",
-            "is_enabled": True,
-            "sort_order": 0,
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T00:00:00Z",
-        }
 
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
+def test_snapshot_is_scoped_precise_and_versioned(model_service, sample_model_row):
+    row = {**sample_model_row, "input_price_per_1k": Decimal("0.000000000123456789")}
+    first = model_service._row_to_dict(row)["pricing_snapshot"]
+    other = model_service._row_to_dict({**row, "tenant_id": "other"})["pricing_snapshot"]
+    assert first["input_price_per_1k"] == "0.000000000123456789"
+    assert first["version"] != other["version"]
+    assert model_service._row_to_dict(row)["pricing_snapshot"] == first
 
-            await model_service.create_model(
-                tenant_id="test-tenant",
-                model_id="free-model",
-                provider_id="local",
-                display_name="Free Model",
-                input_price_per_1k=Decimal("0"),
-                output_price_per_1k=Decimal("0"),
-            )
 
-            # Verify pricing sync was called with zero prices
-            call_kwargs = mock_pricing_svc.update_pricing.call_args.kwargs
-            assert call_kwargs["input_price_per_1k"] == 0.0
-            assert call_kwargs["output_price_per_1k"] == 0.0
-
-    @pytest.mark.asyncio
-    async def test_create_model_with_high_precision_prices(self, model_service, mock_db):
-        """Test creating a model with high precision prices."""
-        mock_db.fetchrow.return_value = {
-            "model_id": "precise-model",
-            "tenant_id": "test-tenant",
-            "provider_id": "custom",
-            "display_name": "Precise Model",
-            "context_window": 8192,
-            "max_output_tokens": 2048,
-            "supports_vision": False,
-            "supports_tools": True,
-            "input_price_per_1k": Decimal("0.000125"),
-            "output_price_per_1k": Decimal("0.000375"),
-            "access_level": "public",
-            "is_enabled": True,
-            "sort_order": 0,
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T00:00:00Z",
-        }
-
-        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
-            mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock()
-            mock_get_pricing.return_value = mock_pricing_svc
-
-            await model_service.create_model(
-                tenant_id="test-tenant",
-                model_id="precise-model",
-                provider_id="custom",
-                display_name="Precise Model",
-                input_price_per_1k=Decimal("0.000125"),
-                output_price_per_1k=Decimal("0.000375"),
-            )
-
-            # Verify pricing sync was called with correct precision
-            call_kwargs = mock_pricing_svc.update_pricing.call_args.kwargs
-            assert call_kwargs["input_price_per_1k"] == 0.000125
-            assert call_kwargs["output_price_per_1k"] == 0.000375
+def test_row_capability_json_is_decoded(model_service, sample_model_row):
+    row = {**sample_model_row, "catalog_capabilities": json.dumps({}), "capability_overrides": "{}"}
+    result = model_service._row_to_dict(row)
+    assert isinstance(result["catalog_capabilities"], dict)
+    assert result["effective_capabilities"]["schema_version"] == 1

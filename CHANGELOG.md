@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Phase-one tenant boundaries
+
+- Expose the authenticated tenant through `/api/v1/auth/me`; Eval verifies it before creating a
+  candidate. V2 thread creation accepts an optional tenant precondition and rejects binding changes
+  before accessing session storage. Missing or mismatched identities fail closed without trace writes.
+- Store Knowledge role grants as tenant-bound subjects while preserving the public user/role ACL
+  contract, explicit user sharing, public visibility and creator ownership. Epoch 001 adds the
+  old-reader/writer-safe discriminator and constraints, and removes Knowledge account/RBAC-table
+  privileges. Gateway now owns current actor resolution and dataset deletion password confirmation.
+- Epoch 002 adds Eval claim leases, heartbeat and runtime-handle reconciliation; the application
+  compatibility window requires epoch 2. These changes do not by themselves certify a complete
+  release, native CLI acceptance, frozen rollback or Git merge.
+
 ### Product convergence (program: deploy/runbooks/product-convergence)
 
 - Removed the Confluence fossil stack: the gateway REST surface (`src/api/v1/confluence.py`,

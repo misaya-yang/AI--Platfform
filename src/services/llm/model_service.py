@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from ai_gateway_core.billing import build_pricing_snapshot
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.models import (
     ModelCapabilityError,
@@ -20,6 +21,10 @@ from ...persistence.database import DatabaseStorage
 from ...services.billing.model_pricing import get_pricing_service
 
 logger = get_logger(__name__)
+
+
+class ModelProviderAmbiguous(ValueError):
+    """A model name needs an explicit provider before launch or mutation."""
 
 
 class ModelCapabilityRevisionConflict(RuntimeError):
@@ -98,9 +103,7 @@ class ModelService:
         ``provider_id`` disambiguates when the same model_id exists under
         multiple providers (e.g. ``gemini-3.1-pro-preview`` on both
         ``google`` AI Studio and ``google-vertex`` Vertex Express Mode).
-        When omitted, returns the first match by sort_order — preserves
-        pre-migration-055 callers that only knew about one provider per
-        model_id.
+        When omitted, only a unique tenant model is accepted.
         """
         if provider_id is not None:
             query = """
@@ -115,7 +118,8 @@ class ModelService:
             row = await self.db.fetchrow(query, tenant_id, provider_id, model_id)
         else:
             query = """
-                SELECT model_id, tenant_id, provider_id, display_name,
+                SELECT COUNT(*) OVER () AS provider_matches,
+                       model_id, tenant_id, provider_id, display_name,
                        context_window, max_output_tokens, supports_vision, supports_tools,
                        catalog_capabilities, capability_overrides, capability_revision,
                        input_price_per_1k, output_price_per_1k, access_level,
@@ -126,6 +130,8 @@ class ModelService:
                 LIMIT 1
             """
             row = await self.db.fetchrow(query, tenant_id, model_id)
+            if row and int(row.get("provider_matches") or 1) > 1:
+                raise ModelProviderAmbiguous("model_provider_required")
         return self._row_to_dict(row) if row else None
 
     async def get_provider_model(
@@ -160,6 +166,10 @@ class ModelService:
         capability_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a new model."""
+        build_pricing_snapshot(
+            tenant_id=tenant_id, provider_id=provider_id, model_id=model_id,
+            input_price_per_1k=input_price_per_1k, output_price_per_1k=output_price_per_1k,
+        )
         catalog_capabilities = dict(catalog_capabilities or {})
         capability_overrides = dict(capability_overrides or {})
         # The read path (_row_to_dict) synthesizes the builtin catalog into
@@ -211,8 +221,9 @@ class ModelService:
         )
         row_dict = self._row_to_dict(row)
 
-        # Sync with model_pricing table for usage recording
+        # Refresh price visibility without writing the global catalog
         await self._sync_single_model_pricing(
+            tenant_id=tenant_id,
             model_id=model_id,
             input_price_per_1k=float(input_price_per_1k),
             output_price_per_1k=float(output_price_per_1k),
@@ -328,9 +339,20 @@ class ModelService:
 
         ``provider_id`` disambiguates when the same model_id exists under
         multiple providers. Post-migration-055 callers should pass it to
-        avoid updating the wrong row. Omitting it falls back to the
-        pre-migration behaviour of matching the first row by tenant+id.
+        avoid updating the wrong row. Omission is accepted only for a unique
+        model; the mutation then uses that exact provider identity.
         """
+        for price in (input_price_per_1k, output_price_per_1k):
+            if price is not None:
+                number = Decimal(str(price))
+                if not number.is_finite() or number < 0:
+                    raise ValueError("invalid_model_price")
+        current_model = None
+        if provider_id is None:
+            current_model = await self.get_model(tenant_id, model_id)
+            if current_model is None:
+                return None
+            provider_id = current_model["provider_id"]
         updates = []
         params = []
         param_idx = 1
@@ -404,7 +426,7 @@ class ModelService:
         )
         revision_guarded = capability_touched and expected_capability_revision is not None
         if capability_touched:
-            current = await self.get_model(
+            current = current_model or await self.get_model(
                 tenant_id,
                 model_id,
                 provider_id=provider_id,
@@ -515,21 +537,8 @@ class ModelService:
 
         if row:
             row_dict = self._row_to_dict(row)
-            # Sync with model_pricing table for usage recording.
-            # Use the RETURNING row's model_id (reflects a rename) so the
-            # pricing table stays keyed to the new id. An old pricing row
-            # for the original id is left alone — historic usage records
-            # still reference it.
             await self._sync_single_model_pricing(
-                model_id=row["model_id"],
-                input_price_per_1k=float(row["input_price_per_1k"] or 0),
-                output_price_per_1k=float(row["output_price_per_1k"] or 0),
-                provider=row["provider_id"],
-                display_name=row["display_name"],
-                context_window=row["context_window"],
-                max_output_tokens=row["max_output_tokens"],
-                supports_vision=row["supports_vision"],
-                supports_tools=row["supports_tools"],
+                tenant_id=tenant_id, model_id=row["model_id"],
             )
             return row_dict
 
@@ -576,6 +585,11 @@ class ModelService:
         — flag this in any new caller and pass provider_id wherever the
         lookup context has it.
         """
+        if provider_id is None:
+            current_model = await self.get_model(tenant_id, model_id)
+            if current_model is None:
+                return False
+            provider_id = current_model["provider_id"]
         if provider_id is not None:
             result = await self.db.execute(
                 "DELETE FROM llm_models WHERE tenant_id = $1 AND provider_id = $2 AND model_id = $3",
@@ -647,10 +661,12 @@ class ModelService:
         include_disabled: bool = True,
     ) -> int:
         """
-        Sync pricing records from llm_models to model_pricing table.
+        Refresh price visibility for the legacy startup hook.
+
+        Tenant prices stay in llm_models; model_pricing is a global catalog.
 
         Returns:
-            Number of models successfully synced.
+            Number of scoped model rows whose visibility was refreshed.
         """
         models = await self.list_models(
             tenant_id=tenant_id,
@@ -659,6 +675,7 @@ class ModelService:
         synced = 0
         for row in models:
             ok = await self._sync_single_model_pricing(
+                tenant_id=tenant_id,
                 model_id=row["model_id"],
                 input_price_per_1k=float(row.get("input_price_per_1k") or 0),
                 output_price_per_1k=float(row.get("output_price_per_1k") or 0),
@@ -674,42 +691,26 @@ class ModelService:
         return synced
 
     async def _sync_single_model_pricing(
-        self,
-        *,
-        model_id: str,
-        input_price_per_1k: float,
-        output_price_per_1k: float,
-        provider: str | None = None,
-        display_name: str | None = None,
-        context_window: int | None = None,
-        max_output_tokens: int | None = None,
-        supports_vision: bool | None = None,
-        supports_tools: bool | None = None,
+        self, *, tenant_id: str, model_id: str, **_pricing: Any,
     ) -> bool:
-        try:
-            pricing_svc = get_pricing_service()
-            await pricing_svc.update_pricing(
-                model=model_id,
-                input_price_per_1k=input_price_per_1k,
-                output_price_per_1k=output_price_per_1k,
-                provider=provider,
-                display_name=display_name,
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-                supports_vision=supports_vision,
-                supports_tools=supports_tools,
-            )
-            logger.info(f"Synced pricing for model {model_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to sync pricing for model {model_id}: {e}")
-            return False
+        del tenant_id, model_id
+        # No cross-tenant mirror. Reads resolve llm_models by compound identity.
+        get_pricing_service().invalidate_cache()
+        return True
 
     def _row_to_dict(self, row) -> dict[str, Any]:
         """Convert database row to dictionary."""
         if not row:
             return {}
         result = dict(row)
+        result.pop("provider_matches", None)
+        result["pricing_snapshot"] = build_pricing_snapshot(
+            tenant_id=str(result.get("tenant_id") or ""),
+            provider_id=str(result.get("provider_id") or ""),
+            model_id=str(result.get("model_id") or ""),
+            input_price_per_1k=result.get("input_price_per_1k") or 0,
+            output_price_per_1k=result.get("output_price_per_1k") or 0,
+        )
         for field in ("catalog_capabilities", "capability_overrides"):
             raw = result.get(field)
             if isinstance(raw, str):

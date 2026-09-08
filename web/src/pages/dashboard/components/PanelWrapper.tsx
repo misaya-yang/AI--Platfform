@@ -111,7 +111,7 @@ export function PanelWrapper({
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
-  const isError = dataStatus === "error";
+  const isError = ["error", "collection_error", "unavailable"].includes(dataStatus || "");
 
   return (
     <div

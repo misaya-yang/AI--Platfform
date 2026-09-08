@@ -4,8 +4,9 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ai_gateway_core.exceptions import ValidationFailedError
 from ai_gateway_core.enums import ContentType, ServiceType, StreamEventType
+from ai_gateway_core.exceptions import ValidationFailedError
+
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, UnifiedResponse
 from .base import ProtocolAdapter
@@ -63,20 +64,38 @@ class OpenAIAdapter(ProtocolAdapter):
 
         chunk_index = 0
         usage: dict[str, Any] | None = None
+        terminal_seen = False
         async with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+            resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
+                    terminal_seen = True
                     break
                 try:
                     evt = json.loads(data_str)
-                except Exception:
-                    continue
+                except ValueError:
+                    raise ValidationFailedError("provider_stream_json_invalid") from None
                 if isinstance(evt, dict) and isinstance(evt.get("usage"), dict):
                     usage = evt.get("usage")
-                delta = evt.get("choices", [{}])[0].get("delta", {}).get("content")
+                if not isinstance(evt, dict) or evt.get("error"):
+                    raise ValidationFailedError("provider_stream_error")
+                choices = evt.get("choices") or []
+                if not isinstance(choices, list):
+                    raise ValidationFailedError("provider_choices_invalid")
+                if not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict) or not isinstance(choice.get("delta", {}), dict):
+                    raise ValidationFailedError("provider_delta_invalid")
+                finish = choice.get("finish_reason")
+                if finish is not None:
+                    if finish not in {"stop", "tool_calls", "function_call"}:
+                        raise ValidationFailedError("provider_stream_incomplete")
+                    terminal_seen = True
+                delta = choice.get("delta", {}).get("content")
                 if delta:
                     yield StreamChunk(
                         request_id=request.request_id,
@@ -85,6 +104,8 @@ class OpenAIAdapter(ProtocolAdapter):
                         is_final=False,
                     )
                     chunk_index += 1
+        if not terminal_seen:
+            raise ValidationFailedError("provider_stream_incomplete")
         yield StreamChunk(
             request_id=request.request_id,
             chunk_index=chunk_index,

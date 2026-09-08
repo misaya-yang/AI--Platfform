@@ -1,3 +1,4 @@
+import { DataStatusBadge } from "./components/DataStatusBadge";
 import { useMemo, useState, type ComponentType } from "react";
 import { Segmented, Tooltip } from "antd";
 import { useQuery } from "@tanstack/react-query";
@@ -246,16 +247,16 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const health = healthQuery.data || {};
   const healthyCount = services.filter((service) => health[service.service_id]?.status === "healthy").length;
   const availability = services.length > 0 ? (healthyCount / services.length) * 100 : 0;
-  const errorRate = summaryQuery.data
-    ? Math.max(0, 100 - summaryQuery.data.success_rate)
-    : null;
+  const observedSuccessRate = summaryQuery.data && summaryQuery.data.total_requests > 0
+    ? summaryQuery.data.success_rate : null;
+  const errorRate = observedSuccessRate == null ? null : Math.max(0, 100 - observedSuccessRate);
   const traces = tracesQuery.data || [];
   const failedTraceCount = traces.filter((trace) => trace.status === "error").length;
   const slowTraceCount = traces.filter((trace) => trace.sample_reason === "slow_request" || trace.request_total_duration_ms > 5000).length;
   const sampledTraceCount = traces.filter((trace) => trace.sample_reason === "baseline_sample").length;
   const quotaSummary = quotaQuery.data?.summary;
   const quotaRiskCount = (quotaSummary?.warning || 0) + (quotaSummary?.exceeded || 0) + (quotaSummary?.blocked || 0);
-  const successRate = summaryQuery.data?.success_rate ?? 0;
+  const successRate = observedSuccessRate;
   const usesExternalTabs = Boolean(forceWorkspace);
   const workspaceSignals: Record<WorkspaceKey, WorkspaceSignal[]> = {
     overview: [
@@ -306,8 +307,8 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
       },
       {
         label: t("metrics.successRate", "成功率"),
-        value: summaryQuery.data ? `${successRate.toFixed(1)}%` : "—",
-        tone: successRate >= 99.5 ? "ok" : successRate >= 95 ? "warn" : "critical",
+        value: successRate == null ? "—" : `${successRate.toFixed(1)}%`,
+        tone: successRate == null ? "neutral" : successRate >= 99.5 ? "ok" : successRate >= 95 ? "warn" : "critical",
       },
       {
         label: t("dashboard.requestTrace.tab.error", "失败请求"),
@@ -406,6 +407,10 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
           </div>
 
           <div className="dashboard-workspace-signals" style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <DataStatusBadge
+              dataStatus={summaryQuery.isError ? "collection_error" : summaryQuery.data?.data_status}
+              dataFreshnessMinutes={summaryQuery.data?.data_freshness_minutes}
+            />
             {workspaceSignals[activeWorkspace].map((signal) => {
               const tone = toneColors[signal.tone];
               return (

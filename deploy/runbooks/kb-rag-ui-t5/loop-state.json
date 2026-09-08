@@ -51,7 +51,7 @@
     ],
     "c8_motion_scan": "check-source.sh 切片扫描 7 pass 1 fail（切片目录内无 prefers-reduced-motion 声明）——已核实 web/src/index.css:469-474 全局 reduce 规则对 * 折叠 animation/transition，切片动效（含 animate-spin）全覆盖；静态扫描只扫切片目录故挂 fail，不重复添加规则，如实记录"
   },
-  "active_phase": "C1–C9 收口；等后端合入 → rebase 新 main → 对接修正 → 活栈串行回归",
+  "active_phase": null,
   "iterations": [
     {
       "phase": "C1",
@@ -190,5 +190,11 @@
       ]
     }
   ],
-  "blockers": []
+  "blockers": [],
+  "lifecycle": "superseded",
+  "status": "superseded",
+  "active_feature": null,
+  "next_action": null,
+  "superseded_by": "agent-platform-vnext",
+  "superseded_at": "2026-09-07"
 }

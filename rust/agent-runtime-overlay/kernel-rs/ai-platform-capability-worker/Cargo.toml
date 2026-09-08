@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "ai-platform-capability-worker-health"
 path = "src/bin/health_probe.rs"
 
+[[bin]]
+name = "ai-platform-python-supervisor"
+path = "src/bin/python_supervisor.rs"
+
 [dependencies]
 ai-platform-capability-contract = { path = "../ai-platform-capability-contract" }
 ai-platform-office = { path = "../ai-platform-office" }

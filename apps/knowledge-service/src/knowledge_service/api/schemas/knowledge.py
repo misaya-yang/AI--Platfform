@@ -84,7 +84,7 @@ class DatasetDeleteSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    password: str | None = Field(default=None, max_length=128)
+    confirmation: dict[str, Any] | None = Field(default=None, alias="_gateway_delete_confirmation")
     reason: str | None = Field(default=None, max_length=500)
 
 

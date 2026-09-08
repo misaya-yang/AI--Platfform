@@ -76,7 +76,7 @@ def _request() -> SimpleNamespace:
     settings = Settings()
     request = SimpleNamespace()
     request.app = SimpleNamespace()
-    request.app.state = SimpleNamespace()
+    request.app.state = SimpleNamespace(settings=SimpleNamespace(default_model="fixture-model"))
     request.app.state.dispatcher = SimpleNamespace(rbac=RBAC(role_permissions=settings.rbac.roles))
     request.app.state.database = SimpleNamespace(enabled=True)
     request.state = SimpleNamespace(request_id="req-eval-trace")
@@ -1792,6 +1792,7 @@ async def test_eval_experiment_live_run_freezes_private_prompt_and_defaults_repe
     assert response.jobs[0].status == "queued"
     payload = next(call[1] for call in repo.calls if call[0] == "live_experiment_run")
     assert payload["repetitions"] == 3
+    assert payload["execution_config"]["model_id"] == "fixture-model"
     assert payload["execution_config"]["system_prompt_override"] == "private eval prompt"
     assert "private eval prompt" not in json.dumps(payload["target_snapshot"])
     assert payload["candidate_fingerprint"]["verification"] == "pending"

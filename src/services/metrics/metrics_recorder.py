@@ -375,7 +375,7 @@ class MetricsRecorder:
             Dictionary with aggregated metrics for today
         """
         if not self.redis or not self.redis._client:
-            return self._empty_summary()
+            return self._empty_summary(data_status="unavailable")
 
         try:
             today = self._get_date_str()
@@ -432,11 +432,11 @@ class MetricsRecorder:
 
             # Calculate derived metrics
             success_rate = (
-                round(success_count / total_requests * 100, 1) if total_requests > 0 else 100.0
+                round(success_count / total_requests * 100, 1) if total_requests > 0 else None
             )
             avg_latency = int(latency_sum / latency_count) if latency_count > 0 else 0
             run_success_rate = (
-                round(runs_success / total_runs * 100, 1) if total_runs > 0 else 100.0
+                round(runs_success / total_runs * 100, 1) if total_runs > 0 else None
             )
             avg_run_duration = (
                 int(runs_duration_sum / runs_duration_count) if runs_duration_count > 0 else 0
@@ -482,13 +482,13 @@ class MetricsRecorder:
 
         except Exception as e:
             logger.warning(f"Failed to get today's summary: {e}")
-            return self._empty_summary()
+            return self._empty_summary(data_status="collection_error")
 
-    def _empty_summary(self) -> dict[str, Any]:
+    def _empty_summary(self, *, data_status: str = "empty") -> dict[str, Any]:
         """Return an empty metrics summary"""
         return {
             "total_requests": 0,
-            "success_rate": 100.0,
+            "success_rate": None,
             "avg_latency_ms": 0,
             "latency_p50": 0,
             "latency_p95": 0,
@@ -498,11 +498,11 @@ class MetricsRecorder:
             "completion_tokens": 0,
             "estimated_cost_usd": 0.0,
             "total_runs": 0,
-            "run_success_rate": 100.0,
+            "run_success_rate": None,
             "avg_run_duration_ms": 0,
             "requests_by_hour": [{"hour": f"{i:02d}:00", "count": 0} for i in range(24)],
             "last_ingested_at": None,
-            "data_status": "empty",
+            "data_status": data_status,
             "data_freshness_minutes": 9999,
             "data_source": "none",
         }

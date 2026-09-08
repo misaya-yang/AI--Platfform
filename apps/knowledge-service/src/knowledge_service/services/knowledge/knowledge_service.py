@@ -666,6 +666,11 @@ class KnowledgeService:
     async def list_datasets(self, user: UserContext) -> list[dict[str, Any]]:
         return await self.dataset_service.list_datasets(user)
 
+    async def list_datasets_page(
+        self, user: UserContext, *, limit: int = 200, cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.dataset_service.list_datasets_page(user, limit=limit, cursor=cursor)
+
     async def preview_chunking(
         self, user: UserContext, dataset_id: str, text: str, config: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -680,10 +685,10 @@ class KnowledgeService:
         return await self.dataset_service.update_dataset(user, dataset_id, patch)
 
     async def delete_dataset(
-        self, user: UserContext, dataset_id: str, *, password: str, reason: str | None = None,
+        self, user: UserContext, dataset_id: str, *, deletion_confirmed: bool = False, reason: str | None = None,
     ) -> bool:
         return await self.dataset_service.delete_dataset(
-            user, dataset_id, password=password, reason=reason
+            user, dataset_id, deletion_confirmed=deletion_confirmed, reason=reason
         )
 
     async def list_dataset_permissions(

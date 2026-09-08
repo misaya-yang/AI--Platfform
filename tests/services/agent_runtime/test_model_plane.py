@@ -185,7 +185,7 @@ def test_native_responses_accepts_paired_kernel_history_without_current_tools() 
         reasoning_option="minimal",
     )
 
-    assert body["tools"] == [{"type": "web_search"}]
+    assert "tools" not in body
     assert body["input"][0]["name"] == "wait_agent"
 
 
@@ -752,10 +752,10 @@ def test_qwen_tool_adapter_flattens_namespaces_without_prompt_routing() -> None:
     assert function_tool["name"].startswith("ns_")
     assert aliases[function_tool["name"]] == ("skills", "read")
     assert aliases["read"] == ("skills", "read")
-    assert body["tools"][1] == {"type": "web_search"}
+    assert all(tool["type"] != "web_search" for tool in body["tools"])
 
 
-def test_qwen_native_search_is_injected_from_profile_at_final_serialization() -> None:
+def test_qwen_native_search_requires_explicit_authorization() -> None:
     body, _aliases = _native_responses_body(
         {"input": [{"role": "user", "content": "latest news"}], "tools": []},
         model_id="qwen3.7-plus",
@@ -763,7 +763,13 @@ def test_qwen_native_search_is_injected_from_profile_at_final_serialization() ->
         profile=_native_search_profile(),
         reasoning_option="minimal",
     )
-    assert body["tools"] == [{"type": "web_search"}]
+    assert "tools" not in body
+    authorized, _ = _native_responses_body(
+        {"input": [{"role": "user", "content": "latest news"}], "tools": []},
+        model_id="qwen3.7-plus", max_output_tokens=128,
+        profile=_native_search_profile(), reasoning_option="minimal", native_search_authorized=True,
+    )
+    assert authorized["tools"] == [{"type": "web_search"}]
 
     disabled, _aliases = _native_responses_body(
         {"input": [{"role": "user", "content": "latest news"}], "tools": []},
@@ -847,7 +853,7 @@ def test_responses_tool_choice_and_parallel_are_pinned_for_first_call_only() -> 
         parallel_tool_calls=False,
     )
     assert follow_up["tool_choice"] == "auto"
-    assert follow_up["parallel_tool_calls"] is True
+    assert follow_up["parallel_tool_calls"] is False
 
 
 def test_snapshot_tool_choice_must_be_catalog_selected() -> None:
@@ -999,7 +1005,6 @@ async def test_qwen_native_responses_is_default_wire_and_completes_before_termin
                 },
                 "strict": True,
             },
-            {"type": "web_search"},
         ],
         "tool_choice": "auto",
         "parallel_tool_calls": True,
@@ -1125,7 +1130,7 @@ async def test_closing_native_responses_stream_terminalizes_dispatched_call() ->
         await client.aclose()
 
     execute_calls = [args for operation, args in database.operations if operation == "execute"]
-    assert execute_calls == [(call.call_id,), (call.call_id,)]
+    assert execute_calls == [(call.call_id,), (call.call_id,), (call.call_id,)]
 
 
 @pytest.mark.asyncio

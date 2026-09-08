@@ -29,7 +29,7 @@ Qdrant; Docker Compose in every environment.
 
 Runtime calls: `web` → Gateway; Gateway → apps by HTTP. Code imports keep `src/` and `apps/*`
 as siblings that may depend on `packages/ai-gateway-core`; they must not import each other, and one
-app must not import another. Static enforcement is an ARC-00 gap, not a currently proven gate.
+app must not import another. `make architecture-boundary-gate` enforces this with dated exceptions.
 Details: [`docs/harness/architecture.md`](docs/harness/architecture.md).
 
 ## Canonical commands

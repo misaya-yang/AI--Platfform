@@ -99,6 +99,7 @@ class CurrentUserResponse(BaseModel):
     """Current user information response."""
 
     user_id: str
+    tenant_id: str
     email: str | None
     display_name: str | None
     department: str | None
@@ -450,6 +451,7 @@ async def get_current_user(
             )
             return CurrentUserResponse(
                 user_id=user_data.get("user_id", user.user_id),
+                tenant_id=user.tenant_id,
                 email=user_data.get("email"),
                 display_name=user_data.get("display_name"),
                 department=user_data.get("department"),
@@ -470,6 +472,7 @@ async def get_current_user(
 
     return CurrentUserResponse(
         user_id=user.user_id,
+        tenant_id=user.tenant_id,
         email=None,
         display_name=None,
         department=None,

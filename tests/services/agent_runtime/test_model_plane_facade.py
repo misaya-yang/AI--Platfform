@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -30,7 +32,8 @@ def test_model_facade_ast_surface_is_stable() -> None:
             "self, *, database: _Database, provider_service: Any, "
             "lease_signer: RuntimeModelLeaseSigner, "
             "http_client: httpx.AsyncClient | None=None, "
-            "clock: Callable[[], float]=time.perf_counter",
+            "clock: Callable[[], float]=time.perf_counter, "
+            "admission_controller: Any | None=None, capacity_resolver: Any | None=None",
             "None",
         ),
         "close": ("AsyncFunctionDef", "self", "None"),
@@ -152,6 +155,11 @@ def test_message_projection_resolves_live_content_helper(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_stream_wrapper_delegates_and_closes_authority(monkeypatch) -> None:
     instance = object.__new__(model_plane.AgentModelPlane)
+    instance.authorize_and_reserve = AsyncMock(return_value=SimpleNamespace(
+        call_id="call", tenant_id="tenant", user_id="user", provider_id="provider",
+    ))
+    instance.database = SimpleNamespace(execute=AsyncMock())
+
     closed = False
 
     async def fake_stream(plane, **kwargs):

@@ -70,3 +70,25 @@ async def test_resolver_rejects_model_identity_drift() -> None:
             model_id="model-a",
             model_service=WrongModel(),
         )
+
+
+@pytest.mark.asyncio
+async def test_provider_and_frozen_model_ref_are_checked_before_launch():
+    calls = []
+
+    class Models:
+        async def get_model(self, tenant, model, *, provider_id):
+            calls.append((tenant, model, provider_id))
+            return {"model_id": model, "provider_id": provider_id, "is_enabled": True,
+                    "effective_capabilities": {}, "capability_revision": 4,
+                    "pricing_snapshot": {"version": "price-v1"}}
+
+    ref = {"tenant_id": "a", "model_id": "m", "provider_id": "p2",
+           "capability_revision": 4, "price_version": "price-v1"}
+    params = {"entrypoint": "responses", "tenant_id": "a", "user_id": "u", "session_id": "s",
+              "model_id": "m", "provider_id": "p2", "expected_model_ref": ref, "model_service": Models()}
+    launch = await resolve_agent_launch(**params)
+    assert launch.model["provider"] == "p2"
+    assert calls == [("a", "m", "p2")]
+    with pytest.raises(AgentLaunchResolutionError, match="EVAL_MODEL_REF_CHANGED"):
+        await resolve_agent_launch(**{**params, "expected_model_ref": {**ref, "capability_revision": 3}})

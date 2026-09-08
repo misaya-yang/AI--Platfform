@@ -207,7 +207,7 @@ async def test_outbox_worker_marks_failed_job_for_retry() -> None:
         }
     )
 
-    assert repo.failed == [("job-2", "judge unavailable")]
+    assert repo.failed == [("job-2", "eval_job_failed:RuntimeError")]
     assert repo.run_updates[-1]["status"] == "queued"
 
 
@@ -243,7 +243,7 @@ async def test_outbox_worker_retries_infrastructure_review_run() -> None:
         }
     )
 
-    assert repo.failed == [("job-infrastructure", "KB RAGAS infrastructure failure requires retry")]
+    assert repo.failed == [("job-infrastructure", "eval_job_failed:RuntimeError")]
     assert repo.succeeded == []
 
 
@@ -299,6 +299,9 @@ class FakeOutboxConnection:
 
     def transaction(self) -> FakeTransaction:
         return FakeTransaction()
+
+    async def execute(self, _query: str, *_args: Any) -> str:
+        return "UPDATE 0"
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         self.fetch_calls.append((query, args))
@@ -393,15 +396,15 @@ async def test_create_trace_ingested_outbox_job_dedupes_pending_trace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repository_claim_outbox_jobs_uses_limit_and_max_attempts_only() -> None:
+async def test_repository_claim_outbox_jobs_binds_owner_and_lease() -> None:
     conn = FakeOutboxConnection()
     repo = AgentTraceRepository(FakePoolHolder(conn))
 
-    rows = await repo.claim_outbox_jobs(limit=3, max_attempts=7)
+    rows = await repo.claim_outbox_jobs(limit=3, max_attempts=7, owner_id="worker-1", lease_seconds=30)
 
     assert rows[0]["job_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert conn.fetch_calls
-    assert conn.fetch_calls[0][1] == (3, 7)
+    assert conn.fetch_calls[0][1] == (3, 7, "worker-1", 30)
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,7 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
 # Namespace-package import works from /app; copying the complete database tree
 # is intentional because the authority verifies manifests against every frozen
 # SQL input before it connects or writes.
+COPY packages/ai-gateway-contracts/src/ai_gateway_contracts /app/ai_gateway_contracts
 COPY database /app/database
 
 # Same DATABASE_URL fallback chain as the runner expects.

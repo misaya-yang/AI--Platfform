@@ -243,6 +243,19 @@ PY
     return 0
 }
 
+assert_runtime_release_unit_locked() {
+    local task_runtime_image="$1"
+    local task_worker_image="$2"
+    if ! python3 "$PROJECT_ROOT/scripts/harness/agent_runtime_supply_chain.py" verify-local-images \
+        --repo-root "$PROJECT_ROOT" \
+        --lock "$PROJECT_ROOT/deploy/agent-runtime-source/lock.json" \
+        --runtime-image "$task_runtime_image" \
+        --worker-image "$task_worker_image" >/dev/null; then
+        log_error "Runtime/capability worker image, platform, or source identity does not match the locked release unit"
+        return 1
+    fi
+}
+
 # -- Compose ownership guard -------------------------------------------------
 assert_compose_owner() {
     local expected_owner="${1:-$PROJECT_ROOT}"

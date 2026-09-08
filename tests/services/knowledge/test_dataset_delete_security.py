@@ -14,7 +14,6 @@ from knowledge_service.services.knowledge.document_service import (
     _require_dataset_index_readable,
 )
 
-from src.core.auth.password import hash_password
 from src.core.auth.user_resolver import UserContext
 
 
@@ -51,30 +50,28 @@ async def test_delete_dataset_requires_authenticated_user(mock_service: DatasetS
     user = UserContext(user_id="anon:test", is_authenticated=False, roles=["guest"])
 
     with pytest.raises(PermissionDeniedError):
-        await mock_service.delete_dataset(user, "kb_test", password="irrelevant")
+        await mock_service.delete_dataset(user, "kb_test", deletion_confirmed=True)
 
 
 @pytest.mark.asyncio
-async def test_delete_dataset_rejects_invalid_password(mock_service: DatasetService) -> None:
+async def test_delete_dataset_rejects_missing_gateway_confirmation(mock_service: DatasetService) -> None:
     user = UserContext(user_id="u_test", tenant_id="t1", is_authenticated=True, roles=["user"])
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
 
-    with pytest.raises(ValidationFailedError):
-        await mock_service.delete_dataset(user, "kb_test", password="wrong-password")
+    with pytest.raises(PermissionDeniedError):
+        await mock_service.delete_dataset(user, "kb_test", deletion_confirmed=False)
 
     mock_service.db.delete_dataset.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_delete_dataset_accepts_bcrypt_password_hash(mock_service: DatasetService) -> None:
+async def test_delete_dataset_accepts_verified_gateway_confirmation(mock_service: DatasetService) -> None:
     user = UserContext(user_id="u_test", tenant_id="tenant_a", is_authenticated=True, roles=["user"])
-    mock_service.db.get_user.return_value = {"password_hash": hash_password("Correct#123")}
     mock_service.db.delete_dataset.return_value = True
 
     deleted = await mock_service.delete_dataset(
         user,
         "kb_test",
-        password="Correct#123",
+        deletion_confirmed=True,
         reason="cleanup obsolete kb",
     )
 
@@ -98,13 +95,12 @@ async def test_delete_dataset_soft_delete_and_audit(mock_service: DatasetService
     user = UserContext(
         user_id="u_test", tenant_id="tenant_a", is_authenticated=True, roles=["user"]
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     mock_service.db.delete_dataset.return_value = True
 
     deleted = await mock_service.delete_dataset(
         user,
         "kb_test",
-        password="Correct#123",
+        deletion_confirmed=True,
         reason="cleanup obsolete kb",
     )
 
@@ -134,7 +130,6 @@ async def test_dataset_delete_sweeps_every_document_asset_before_qdrant_and_db(
         is_authenticated=True,
         roles=["user"],
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     mock_service.db.list_document_ids_by_dataset.return_value = ["doc-a", "doc-b"]
     mock_service.db.delete_dataset.return_value = True
     events: list[str] = []
@@ -163,7 +158,7 @@ async def test_dataset_delete_sweeps_every_document_asset_before_qdrant_and_db(
     assert await mock_service.delete_dataset(
         user,
         "kb_test",
-        password="Correct#123",
+        deletion_confirmed=True,
     )
 
     assert events == ["assets:doc-a", "assets:doc-b", "qdrant", "database"]
@@ -183,7 +178,6 @@ async def test_dataset_asset_failure_keeps_qdrant_and_db_then_same_target_retry_
         is_authenticated=True,
         roles=["user"],
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     mock_service.db.list_document_ids_by_dataset.return_value = ["doc-a", "doc-b"]
     mock_service.db.delete_dataset.return_value = True
     attempts: list[str] = []
@@ -205,7 +199,7 @@ async def test_dataset_asset_failure_keeps_qdrant_and_db_then_same_target_retry_
         await mock_service.delete_dataset(
             user,
             "kb_test",
-            password="Correct#123",
+            deletion_confirmed=True,
         )
 
     mock_service._ks.vector_store.delete_dataset_collections.assert_not_awaited()
@@ -215,7 +209,7 @@ async def test_dataset_asset_failure_keeps_qdrant_and_db_then_same_target_retry_
     assert await mock_service.delete_dataset(
         user,
         "kb_test",
-        password="Correct#123",
+        deletion_confirmed=True,
     )
 
     assert attempts == ["doc-a", "doc-b", "doc-a", "doc-b"]
@@ -233,7 +227,6 @@ async def test_delete_dataset_keeps_database_when_vector_sweep_fails(
         is_authenticated=True,
         roles=["user"],
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     mock_service._ks.vector_store.delete_dataset_collections.side_effect = RuntimeError(
         "qdrant unavailable"
     )
@@ -242,7 +235,7 @@ async def test_delete_dataset_keeps_database_when_vector_sweep_fails(
         await mock_service.delete_dataset(
             user,
             "kb_test",
-            password="Correct#123",
+            deletion_confirmed=True,
         )
 
     mock_service.db.delete_dataset.assert_not_awaited()
@@ -259,7 +252,6 @@ async def test_dataset_late_collection_failure_happens_after_durable_marker(
         is_authenticated=True,
         roles=["user"],
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     events: list[str] = []
     dataset = await mock_service.require_dataset_access(user, "kb_test", required="owner")
 
@@ -283,7 +275,7 @@ async def test_dataset_late_collection_failure_happens_after_durable_marker(
     mock_service._ks.vector_store.delete_dataset_collections.side_effect = partial_sweep
 
     with pytest.raises(RuntimeError, match="second collection failed"):
-        await mock_service.delete_dataset(user, "kb_test", password="Correct#123")
+        await mock_service.delete_dataset(user, "kb_test", deletion_confirmed=True)
 
     assert events == [
         "marker-committed",
@@ -311,7 +303,6 @@ async def test_dataset_final_db_failure_never_reports_success_or_clears_fence(
         is_authenticated=True,
         roles=["user"],
     )
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     dataset = await mock_service.require_dataset_access(user, "kb_test", required="owner")
 
     async def set_fence(*_args, **_kwargs):
@@ -334,7 +325,7 @@ async def test_dataset_final_db_failure_never_reports_success_or_clears_fence(
         expected = "database deletion failed"
 
     with pytest.raises(Exception, match=expected):
-        await mock_service.delete_dataset(user, "kb_test", password="Correct#123")
+        await mock_service.delete_dataset(user, "kb_test", deletion_confirmed=True)
 
     mock_service.db.set_dataset_index_deletion_fence.assert_awaited_once()
     mock_service.db.log_audit.assert_not_awaited()
@@ -366,14 +357,13 @@ async def test_dataset_same_target_retry_reuses_fence_and_finishes(
         }
     }
     mock_service.require_dataset_access.return_value = dataset
-    mock_service.db.get_user.return_value = {"password_hash": "Correct#123"}
     mock_service.db.set_dataset_index_deletion_fence.return_value = (dataset, False)
     mock_service.db.delete_dataset.return_value = True
 
     assert await mock_service.delete_dataset(
         user,
         "kb_test",
-        password="Correct#123",
+        deletion_confirmed=True,
     ) is True
     mock_service.db.set_dataset_index_deletion_fence.assert_awaited_once_with(
         "kb_test",
@@ -407,6 +397,6 @@ async def test_dataset_delete_rejects_different_pending_target(
     mock_service.require_dataset_access.return_value = dataset
 
     with pytest.raises(ValidationFailedError, match="another dataset index deletion"):
-        await mock_service.delete_dataset(user, "kb_test", password="Correct#123")
+        await mock_service.delete_dataset(user, "kb_test", deletion_confirmed=True)
 
     mock_service.db.set_dataset_index_deletion_fence.assert_not_awaited()

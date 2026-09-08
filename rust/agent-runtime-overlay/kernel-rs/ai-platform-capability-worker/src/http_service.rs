@@ -172,7 +172,7 @@ impl WorkerState {
     async fn request_cancel(&self, execution_id: &str) {
         let cancellation = self.cancellation.lock().await.get(execution_id).cloned();
         if let Some(cancellation) = cancellation {
-            cancellation.notify_waiters();
+            cancellation.notify_one();
         }
     }
 

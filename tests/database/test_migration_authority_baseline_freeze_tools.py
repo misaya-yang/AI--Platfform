@@ -14,7 +14,6 @@ sys.path.insert(0, str(ROOT / "scripts/inventory"))
 sys.path.insert(0, str(ROOT / "scripts/database"))
 
 import data_access  # noqa: E402
-import database_policy  # noqa: E402
 import freeze_baseline  # noqa: E402
 import generate_database_grants  # noqa: E402
 import render_baseline_contract  # noqa: E402
@@ -49,16 +48,15 @@ def test_frozen_baseline_is_bound_and_activates() -> None:
 
 def test_static_policy_and_sql_regenerate_exactly() -> None:
     manifest = json.loads((BASELINE / "manifest.json").read_text(encoding="utf-8"))
-    inventory, ownership, grants_policy = database_policy.build(
-        source_git_sha=manifest["source_git_sha"]
-    )
+    # Epochs deliberately change the live read/write inventory. Reproduce the
+    # immutable baseline from its hash-bound policy, not today's source labelled
+    # with an old Git SHA. The test above checks every policy file's frozen hash.
     generated = {
-        "data-access-inventory.json": database_policy._serialized(inventory),
-        "ownership-policy.json": database_policy._serialized(ownership),
-        "grants-policy.json": database_policy._serialized(grants_policy),
+        filename: (BASELINE / filename).read_bytes()
+        for filename in ("data-access-inventory.json", "ownership-policy.json", "grants-policy.json")
     }
     for filename, content in generated.items():
-        assert (BASELINE / filename).read_bytes() == content
+        assert hashlib.sha256(content).hexdigest() == manifest["policy_files_sha256"][filename]
 
     grants = generate_database_grants.generate_grants_sql(
         generated["data-access-inventory.json"],

@@ -239,6 +239,12 @@ for identity_artifact in "${identity_artifacts[@]}"; do
         --require-artifact "$identity_artifact"
 done
 
+if [[ "$artifact" == "all" ]]; then
+    run_command python3 "$identity_script" verify-local-images \
+        --repo-root "$repo_root" \
+        --lock "$lock_file"
+fi
+
 if [[ "$dry_run" == "true" ]]; then
     echo "DRY RUN: preflight passed; no identity or build command was executed."
 else

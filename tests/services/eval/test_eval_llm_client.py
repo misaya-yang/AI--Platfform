@@ -15,14 +15,14 @@ from src.services.eval.eval_outbox_worker import init_eval_outbox_worker
 
 
 @pytest.mark.asyncio
-async def test_eval_assistant_llm_client_posts_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_eval_judge_posts_bounded_tool_free_response(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeResponse:
         status_code = 200
 
         def json(self) -> dict[str, str]:
-            return {"content": '{"numeric_value": 0.8, "confidence": 0.7, "label": "pass"}'}
+            return {"output_text": '{"numeric_value": 0.8, "confidence": 0.7, "label": "pass"}'}
 
     async def _fake_post(self, url: str, **kwargs):
         captured["url"] = url
@@ -47,16 +47,19 @@ async def test_eval_assistant_llm_client_posts_chat(monkeypatch: pytest.MonkeyPa
     )
 
     assert "0.8" in text
-    assert captured["url"] == "/api/v1/assistant/chat"
+    assert captured["url"] == "/v1/responses"
     headers = captured["headers"]
     assert isinstance(headers, dict)
     assert str(headers["Authorization"]).startswith("Bearer ")
-    assert headers["X-Tenant-Id"] == "tenant-a"
-    assert headers["X-User-Id"] == "eval-worker"
+    assert "X-Tenant-Id" not in headers
+    assert "X-User-Roles" not in headers
     body = captured["body"]
     assert isinstance(body, dict)
-    assert body["kb_mode"] == "off"
-    assert body["memory_mode"] == "off"
+    assert body["tools"] == []
+    assert body["tool_choice"] == "none"
+    assert body["parallel_tool_calls"] is False
+    assert body["max_output_tokens"] == 512
+    assert body["stream"] is False
 
 
 def test_build_eval_llm_complete_disabled_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

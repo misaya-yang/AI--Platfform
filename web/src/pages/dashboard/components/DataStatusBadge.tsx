@@ -4,7 +4,7 @@
 import { Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
-export type DataStatus = "live" | "stale" | "no_data";
+export type DataStatus = "live" | "stale" | "no_data" | "error";
 
 interface DataStatusBadgeProps {
   dataStatus?: string;
@@ -14,12 +14,15 @@ interface DataStatusBadgeProps {
 const STATUS_CONFIG: Record<DataStatus, { color: string; label: string; bgColor: string }> = {
   live: { color: "hsl(var(--success))", label: "dashboard.dataStatus.live", bgColor: "hsl(var(--success) / 0.15)" },
   stale: { color: "hsl(var(--warning))", label: "dashboard.dataStatus.stale", bgColor: "hsl(var(--warning) / 0.15)" },
+  error: { color: "hsl(var(--destructive))", label: "dashboard.dataStatus.unknown", bgColor: "hsl(var(--destructive) / 0.15)" },
   no_data: { color: "hsl(var(--muted-foreground))", label: "dashboard.dataStatus.noData", bgColor: "hsl(var(--muted) / 0.75)" },
 };
 
 function resolveStatus(dataStatus?: string, freshnessMinutes?: number): DataStatus {
-  if (dataStatus === "no_data") return "no_data";
-  if (dataStatus === "stale") return "stale";
+  if (["error", "collection_error", "unavailable"].includes(dataStatus || "")) return "error";
+  if (dataStatus === "no_data" || dataStatus === "empty") return "no_data";
+  if (dataStatus === "stale" || dataStatus === "delayed") return "stale";
+  if (dataStatus === "ok") return "live";
   if (dataStatus === "live") {
     // Double check with freshness
     if (freshnessMinutes !== undefined && freshnessMinutes >= 5) return "stale";
@@ -70,7 +73,7 @@ export function DataStatusBadge({ dataStatus, dataFreshnessMinutes }: DataStatus
           }}
         />
         <span style={{ fontSize: 10, fontWeight: 500, color: config.color }}>
-          {status === "live" ? "LIVE" : status === "stale" ? "STALE" : "N/A"}
+          {status === "live" ? "LIVE" : status === "stale" ? "STALE" : status === "error" ? "ERROR" : "N/A"}
         </span>
       </div>
     </Tooltip>

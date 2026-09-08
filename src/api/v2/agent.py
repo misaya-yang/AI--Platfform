@@ -41,6 +41,12 @@ class ThreadCreateRequest(BaseModel):
 
     session_id: str | None = Field(default=None, min_length=1, max_length=255)
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
+    expected_tenant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Optional tenant precondition; never an authentication source.",
+    )
 
 
 class TurnCreateRequest(BaseModel):
@@ -48,6 +54,8 @@ class TurnCreateRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=200_000)
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=255)
+    expected_model_ref: dict[str, Any] | None = None
     reasoning_option: str | None = Field(default=None, max_length=100)
     thinking_level: str | None = Field(default=None, max_length=100)
     temperature: float | None = Field(default=None, ge=0, le=2)
@@ -186,6 +194,11 @@ async def create_thread(
     user: UserContext = Depends(get_user_context),
 ) -> dict[str, Any]:
     _require_actor(user)
+    if body.expected_tenant_id is not None and body.expected_tenant_id != user.tenant_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "AGENT_RUNTIME_TENANT_PRECONDITION_FAILED"},
+        )
     session_manager = getattr(request.app.state, "session_manager", None)
     if session_manager is None:
         raise HTTPException(status_code=503, detail={"code": "SESSION_STORAGE_UNAVAILABLE"})
@@ -349,6 +362,8 @@ async def create_turn(
             user_id=user.user_id,
             session_id=thread.session_id,
             model_id=model_id,
+            provider_id=body.provider_id,
+            expected_model_ref=body.expected_model_ref,
             model_service=(
                 assistant_model_service(request)
                 or getattr(control, "model_service", None)

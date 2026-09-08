@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import sys
@@ -25,6 +26,7 @@ from ai_gateway_core.models import (
 )
 from ai_gateway_core.models import apply_reasoning_wire
 
+from ...core.gateway.admission import _finish_cleanup
 from ..metrics.redaction import redact_sensitive_text as redact_sensitive_text
 from .model import (
     accounting,
@@ -94,6 +96,9 @@ def _runtime_snapshot(value: Any) -> dict[str, Any]:
 
 def _snapshot_parameters(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return authorization._snapshot_parameters(snapshot)
+
+
+native_web_search_authorized = authorization.native_web_search_authorized
 
 
 def _snapshot_responses_tool_controls(
@@ -198,6 +203,7 @@ def _native_responses_body(
     allowed_tool_names: set[str] | None = None,
     tool_choice: str | dict[str, str] = "auto",
     parallel_tool_calls: bool = True,
+    native_search_authorized: bool = False,
 ) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     return native_responses._native_responses_body(
         body,
@@ -208,6 +214,7 @@ def _native_responses_body(
         allowed_tool_names=allowed_tool_names,
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
+        native_search_authorized=native_search_authorized,
         _apply_reasoning_wire=apply_reasoning_wire,
         _helpers=_FACADE_MODULE,
     )
@@ -276,6 +283,8 @@ class AgentModelPlane:
         lease_signer: RuntimeModelLeaseSigner,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        admission_controller: Any | None = None,
+        capacity_resolver: Any | None = None,
     ) -> None:
         self.database = database
         self.provider_service = provider_service
@@ -283,9 +292,12 @@ class AgentModelPlane:
         self.http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            trust_env=False,
         )
         self._owns_http_client = http_client is None
         self._clock = clock
+        self.admission_controller = admission_controller
+        self.capacity_resolver = capacity_resolver
 
     async def close(self) -> None:
         if self._owns_http_client:
@@ -324,16 +336,40 @@ class AgentModelPlane:
         turn_metadata: dict[str, Any],
         authorized_call: _AuthorizedCall | None = None,
     ) -> AsyncIterator[bytes]:
-        chunks = chat_completions.stream(
-            self,
-            body=body,
-            turn_metadata=turn_metadata,
-            authorized_call=authorized_call,
-            _helpers=_FACADE_MODULE,
-        )
-        async with contextlib.aclosing(chunks):
-            async for chunk in chunks:
-                yield chunk
+        from .control import capacity
+        call = authorized_call or await self.authorize_and_reserve(body=body, turn_metadata=turn_metadata)
+        try:
+            lease = await capacity.acquire(self, tenant_id=call.tenant_id, user_id=call.user_id,
+                                           kind="provider", request_id=str(call.call_id), provider_id=call.provider_id)
+        except BaseException:
+            await _finish_cleanup(asyncio.create_task(
+                self._fail_call(call.call_id, "capacity_rejected", dispatched=False)
+            ))
+            raise
+        try:
+            chunks = chat_completions.stream(
+                self, body=body, turn_metadata=turn_metadata, authorized_call=call, _helpers=_FACADE_MODULE,
+            )
+            async with contextlib.aclosing(chunks):
+                async for chunk in chunks:
+                    yield chunk
+        finally:
+            async def finish() -> None:
+                try:
+                    # Errors in provider lookup or request construction happen
+                    # before child stream cleanup is installed. Preserve exact
+                    # completed/failed states; uncertain dispatched work stays unknown.
+                    await self.database.execute(
+                        "UPDATE assistant_runtime_model_calls SET "
+                        "status=CASE WHEN status='reserved' THEN 'failed' ELSE 'unknown' END, "
+                        "error_code='model_stream_interrupted', completed_at=NOW(), updated_at=NOW() "
+                        "WHERE call_id=$1 AND status IN ('reserved','dispatched')",
+                        call.call_id,
+                    )
+                finally:
+                    if lease is not None:
+                        await lease.release()
+            await _finish_cleanup(asyncio.create_task(finish()))
 
     async def _stream_native_responses(
         self,

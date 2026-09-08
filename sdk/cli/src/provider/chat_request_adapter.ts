@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export interface ResponsesRequest {
   model: string;
   input: unknown;
@@ -25,6 +27,32 @@ const SUPPORTED_REQUEST_FIELDS = new Set([
   "stream", "store", "stream_options", "include", "service_tier",
   "prompt_cache_key", "text", "client_metadata", "access_programs",
 ]);
+
+export function namespaceAlias(namespace: string, name: string): string {
+  const digest = createHash("sha256").update(`${namespace}\0${name}`).digest("hex").slice(0, 10);
+  const prefix = `ns_${digest}_`;
+  return prefix + name.slice(0, 64 - prefix.length);
+}
+
+export function namespaceBindings(body: ResponsesRequest): Map<string, { namespace: string; name: string }> {
+  const aliases = new Map<string, { namespace: string; name: string }>();
+  const direct = new Set<string>();
+  const bare = new Map<string, Array<{ namespace: string; name: string }>>();
+  for (const raw of Array.isArray(body.tools) ? body.tools : []) {
+    const tool = record(raw, "responses_tool_invalid");
+    if (tool.type === "function") direct.add(String(tool.name ?? record(tool.function, "responses_tool_invalid").name));
+    if (tool.type !== "namespace") continue;
+    const namespace = text(tool.name, "responses_tool_invalid");
+    for (const rawChild of Array.isArray(tool.tools) ? tool.tools : []) {
+      const name = text(record(rawChild, "responses_tool_invalid").name, "responses_tool_invalid");
+      const identity = { namespace, name };
+      aliases.set(namespaceAlias(namespace, name), identity);
+      bare.set(name, [...(bare.get(name) ?? []), identity]);
+    }
+  }
+  for (const [name, identities] of bare) if (identities.length === 1 && !direct.has(name)) aliases.set(name, identities[0]!);
+  return aliases;
+}
 
 /** Convert the lossless Responses subset accepted by a Chat-only provider. */
 export function responsesToChat(body: ResponsesRequest): Record<string, unknown> {
@@ -55,11 +83,12 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
     if (!Array.isArray(body.tools)) throw new CompatibilityError("responses_tools_invalid");
     const projectedTools: Array<Record<string, unknown>> = [];
     const projectedNames = new Set<string>();
-    const appendFunction = (tool: unknown) => {
+    const appendFunction = (tool: unknown, namespace?: string) => {
       const value = record(tool, "responses_tool_unsupported");
       const functionValue = value.function && typeof value.function === "object"
         ? record(value.function, "responses_tool_invalid") : value;
-      const name = text(functionValue.name, "responses_tool_invalid");
+      const childName = text(functionValue.name, "responses_tool_invalid");
+      const name = namespace ? namespaceAlias(namespace, childName) : childName;
       if (projectedNames.has(name)) throw new CompatibilityError("responses_tool_duplicate");
       projectedNames.add(name);
       projectedTools.push({
@@ -80,11 +109,12 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
         for (const child of value.tools) {
           const childValue = record(child, "responses_tool_unsupported");
           if (childValue.type !== "function") throw new CompatibilityError("responses_tool_unsupported");
-          appendFunction(childValue);
+          appendFunction(childValue, text(value.name, "responses_tool_invalid"));
         }
       } else throw new CompatibilityError("responses_tool_unsupported");
     }
     const toolChoice = chatToolChoice(body.tool_choice);
+    if (toolChoice === "none") projectedTools.length = 0;
     if (!projectedTools.length && !["auto", "none"].includes(String(toolChoice))) {
       throw new CompatibilityError("responses_tool_choice_requires_tools");
     }
@@ -153,7 +183,8 @@ function responsesInputToMessages(input: unknown, instructions: unknown): Array<
     }
     if (type === "function_call") {
       const id = text(item.call_id ?? item.id, "responses_function_call_invalid");
-      const name = text(item.name, "responses_function_call_invalid");
+      const originalName = text(item.name, "responses_function_call_invalid");
+      const name = typeof item.namespace === "string" ? namespaceAlias(item.namespace, originalName) : originalName;
       const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {});
       if (pendingCalls.has(id)) throw new CompatibilityError("responses_function_call_duplicate");
       pendingCalls.set(id, name);

@@ -310,13 +310,11 @@ pub(super) async fn cancel_execution(
         )
     })?;
     validate_execution_id(execution_id)?;
+    let cancelled = state
+        .store
+        .cancel(&scope, execution_id)
+        .await
+        .map_err(store_error)?;
     state.request_cancel(execution_id).await;
-    Ok(Json(
-        state
-            .store
-            .cancel(&scope, execution_id)
-            .await
-            .map_err(store_error)?
-            .execution,
-    ))
+    Ok(Json(cancelled.execution))
 }

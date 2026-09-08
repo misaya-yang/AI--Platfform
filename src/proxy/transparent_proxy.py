@@ -751,14 +751,21 @@ class TransparentProxy:
                 is_streaming=False,
             )
 
+        except BaseException:
+            if capacity_lease is not None:
+                await capacity_lease.release()
+            raise
+
         body = request.body
         t_body_done = time.perf_counter()
         capacity_headers = capacity_lease.headers if capacity_lease is not None else {}
 
         async def release_all() -> None:
-            await release_slot()
-            if capacity_lease is not None:
-                await capacity_lease.release()
+            try:
+                await release_slot()
+            finally:
+                if capacity_lease is not None:
+                    await capacity_lease.release()
 
         # Performance logging
         logger.info(
@@ -794,6 +801,19 @@ class TransparentProxy:
                     effective_model=request.effective_model,
                     effective_provider=request.effective_provider,
                 )
+                if response.stream is not None and capacity_lease is not None:
+                    upstream_stream = response.stream
+                    async def owned_stream():
+                        try:
+                            capacity_lease.bind_owner()
+                            async for item in upstream_stream:
+                                yield item
+                        finally:
+                            try:
+                                await upstream_stream.aclose()
+                            finally:
+                                await capacity_lease.release()
+                    response.stream = owned_stream()
                 response.headers.update(capacity_headers)
                 return response
             else:
@@ -835,7 +855,7 @@ class TransparentProxy:
                 headers={},
                 error=f"Upstream error: {e}",
             )
-        except Exception:
+        except BaseException:
             await release_all()
             raise
 

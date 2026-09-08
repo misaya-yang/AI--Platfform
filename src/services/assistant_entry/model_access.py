@@ -51,7 +51,9 @@ def user_can_access_model(user: UserContext, access_level: str) -> bool:
     return False
 
 
-async def check_model_permission(user: UserContext, model_id: str, model_meta: Any) -> None:
+async def check_model_permission(
+    user: UserContext, model_id: str, model_meta: Any, *, provider_id: str | None = None,
+) -> None:
     """Check if the user has permission to invoke ``model_id``.
 
     DB-backed via ``GatewayModelMeta``. Unknown model → 400; caller's
@@ -59,7 +61,10 @@ async def check_model_permission(user: UserContext, model_id: str, model_meta: A
     lookup was sync; swapping to a single DB query per chat request
     is cheap (well under 1 ms).
     """
-    access_level = await model_meta.get_access_level(user.tenant_id, model_id)
+    access_level = (
+        await model_meta.get_access_level(user.tenant_id, model_id, provider_id=provider_id)
+        if provider_id else await model_meta.get_access_level(user.tenant_id, model_id)
+    )
     if access_level is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
 

@@ -150,6 +150,59 @@ def build_assistant_runtime_trace(
     }
 
 
+def runtime_model_evidence(
+    *, evidence: dict[str, Any] | None, tenant_id: str, run_case_id: str,
+    run_id: str, expected_model_ref: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Project durable, scoped model receipts; never infer a call from SSE text."""
+    if (not evidence or evidence.get("tenant_id") != tenant_id
+            or evidence.get("session_id") != run_case_id or str(evidence.get("run_id")) != run_id):
+        raise RuntimeError("AGENT_EVAL_MODEL_EVIDENCE_UNAVAILABLE")
+    pricing = evidence.get("pricing_snapshot") or {}
+    model_ref = {
+        "tenant_id": tenant_id, "provider_id": evidence.get("provider_id"),
+        "model_id": evidence.get("model_id"),
+        "capability_revision": evidence.get("capability_revision"),
+        "price_version": pricing.get("version"),
+    }
+    if any(value is None or value == "" for value in model_ref.values()):
+        raise RuntimeError("AGENT_EVAL_MODEL_EVIDENCE_UNAVAILABLE")
+    if any(expected_model_ref.get(key) != value for key, value in model_ref.items()):
+        raise RuntimeError("AGENT_EVAL_MODEL_REF_MISMATCH")
+    fingerprint = {
+        "runtime_revision": evidence.get("runtime_revision"),
+        "model_id": model_ref["model_id"], "provider": model_ref["provider_id"],
+        "model_ref": model_ref, "model_ref_verified": True,
+        "sampling": {"temperature": (evidence.get("parameters") or {}).get("temperature"),
+                     "max_tokens": (evidence.get("limits") or {}).get("max_output_tokens")},
+    }
+    calls = [call for call in evidence.get("calls") or [] if call.get("dispatched_at")]
+    usage: dict[str, Any] = {}
+    # Missing measurements stay unknown; reserved budgets are not observed usage.
+    for key in ("input_tokens", "output_tokens"):
+        if calls and all(isinstance(call.get(key), int) for call in calls):
+            usage[key] = sum(call[key] for call in calls)
+    if "input_tokens" in usage and "output_tokens" in usage:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    spans = []
+    for index, call in enumerate(calls, 1):
+        started, ended = call["dispatched_at"], call.get("completed_at")
+        spans.append({
+            "span_id": span_id_for(run_id, f"model_call:{call['call_id']}"),
+            "span_kind": "model_invocation", "name": "runtime_model_call",
+            "sequence_no": index, "status": "succeeded" if call["status"] == "completed" else "failed",
+            "started_at": started.isoformat(), "ended_at": ended.isoformat() if ended else None,
+            "duration_ms": max(0, int((ended - started).total_seconds() * 1000)) if ended else None,
+            "model_id": model_ref["model_id"], "provider": model_ref["provider_id"],
+            "attributes": {"call_id": str(call["call_id"]), "ledger_status": call["status"],
+                           "input_tokens": call.get("input_tokens"),
+                           "output_tokens": call.get("output_tokens"),
+                           "cost_microusd": call.get("cost_microusd"), "model_ref": model_ref},
+            "error_type": call.get("error_code"),
+        })
+    return fingerprint, usage, spans
+
+
 async def capture_assistant_runtime_stream(
     source: AsyncIterator[bytes | str],
     *,

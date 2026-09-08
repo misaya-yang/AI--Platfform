@@ -6,8 +6,8 @@ branch, mutable tag, local checkout, or unverified App Server schema.
 
 Files:
 
-- `lock.json` pins source, schema, SBOM, license, and separate App Server plus
-  Agent Runtime OCI identities. One artifact can never satisfy the other's gate.
+- `lock.json` pins source, schema, SBOM, license, and separate App Server,
+  Agent Runtime and capability worker OCI identities. One artifact cannot satisfy another's gate.
 - `source-receipt.json` is generated from one clean fork revision and its
   source-built App Server schema bundle.
 - `sbom.cdx.json` is the deterministic CycloneDX inventory for that revision.
@@ -44,9 +44,36 @@ AI_PLATFORM_AGENT_RUNTIME_IMAGE=ai-gateway-agent-runtime:local-<sha> \
 make agent-runtime-contract
 ```
 
-Refreshing source identity deliberately invalidates both prior images. The two
-builders record label-verified local digests atomically; the Runtime contract
-requires both artifacts from the same receipt before candidate startup.
+Refreshing source identity invalidates every prior image. The existing
+`scripts/rust/build-update.sh --artifact all` builds Runtime and capability worker
+serially, then checks both selected images against the source lock. App Server
+remains a separate protocol-probe artifact.
+
+`make quickstart-build` and `scripts/new/deploy.sh --build` use both existing Rust
+builders before Compose builds the Python/Web images. A prebuilt Runtime never
+substitutes for a missing Worker. Deployment verifies the actual selected image
+IDs, platform, source/schema/binary labels and the Worker's full overlay hash
+before stopping or starting application services:
+
+```bash
+python3 scripts/harness/agent_runtime_supply_chain.py verify-local-images \
+  --repo-root . --lock deploy/agent-runtime-source/lock.json \
+  --runtime-image <runtime-tag-or-digest> --worker-image <worker-tag-or-digest>
+```
+
+Source hot-update uses the same pair check and compares container image IDs,
+so replacing an image behind the same tag still recreates the Runtime/Worker
+pair. Existing stopped Python containers can receive Gateway/Knowledge source
+and both shared packages without starting the old application: site-packages is
+queried by an isolated `python` entrypoint from that container's immutable image.
+The frontend entrypoint is copied with execute permission, then runs on the final
+restart. `--no-restart` copies files without starting services or probing app health.
+Hot-update does not rewrite container environment values; deployment requires any
+explicit kernel revision to match the selected source unit before building or
+changing application services.
+
+Source identity checks do not claim that native execution, Docker health,
+provider calls, rollback, publication or another platform has been verified.
 
 When the platform overlay or capability migration changes, refresh its derived
 identity and Worker dependency SBOM from the clean, controlled composed source

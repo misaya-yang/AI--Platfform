@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -13,7 +14,12 @@ from typing import Any
 from ai_gateway_core.logging import get_logger
 
 from .capacity import CapacityBudget
-from .lua_scripts import CAPACITY_ACQUIRE_PAIR_LUA, CAPACITY_RELEASE_LUA, eval_script
+from .lua_scripts import (
+    CAPACITY_ACQUIRE_PAIR_LUA,
+    CAPACITY_RELEASE_LUA,
+    CAPACITY_RENEW_LUA,
+    eval_script,
+)
 
 logger = get_logger(__name__)
 
@@ -60,6 +66,20 @@ class _LocalBudgetState:
         self.queue_timeout_ms = max(int(budget.queue_timeout_ms), 1)
 
 
+async def _finish_cleanup(task: asyncio.Task[Any]) -> Any:
+    """Cancellation propagates only after owned cleanup has completed."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 class CapacityLease:
     def __init__(
         self,
@@ -72,6 +92,10 @@ class CapacityLease:
         self.queue_wait_ms = max(float(queue_wait_ms), 0.0)
         self._release = release
         self._released = False
+        self._release_task: asyncio.Task[None] | None = None
+        self._renew_task: asyncio.Task[None] | None = None
+        self._owner = asyncio.current_task()
+        self.lost = False
 
     @property
     def headers(self) -> dict[str, str]:
@@ -83,10 +107,23 @@ class CapacityLease:
     async def release(self) -> None:
         if self._released:
             return
-        self._released = True
-        await self._release()
+        if self._release_task is None:
+            async def finish() -> None:
+                if self._renew_task is not None:
+                    self._renew_task.cancel()
+                    await asyncio.gather(self._renew_task, return_exceptions=True)
+                await self._release()
+                self._released = True
+            self._release_task = asyncio.create_task(finish())
+        await _finish_cleanup(self._release_task)
+
+    def bind_owner(self) -> None:
+        self._owner = asyncio.current_task()
+        if self.lost:
+            raise CapacityRejected(budget_key=",".join(self.budget_keys), code="GATEWAY_CAPACITY_LEASE_LOST")
 
     async def __aenter__(self) -> CapacityLease:
+        self.bind_owner()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -214,10 +251,19 @@ class CapacityAdmissionController:
         acquired_tenant: list[tuple[str, str, str]] = []
         acquired_shared: list[tuple[str, str, str]] = []
         started = time.perf_counter()
+        # Run/SSE/job leases span whole workflows, including user think time.
+        # Their duration is not HTTP request latency. Feeding them into the
+        # legacy latency window rejects healthy follow-up turns and callbacks.
+        lifecycle_budget = any(
+            budget.scope in {"run", "provider", "capability", "job", "sse"}
+            and budget.key == f"gateway.{budget.scope}_inflight"
+            for budget in enforced
+        )
+        load_shedder = None if lifecycle_budget else self.load_shedder
 
         try:
-            if self.load_shedder is not None:
-                rejected = self.load_shedder.maybe_reject(
+            if load_shedder is not None:
+                rejected = load_shedder.maybe_reject(
                     service_id=service_id,
                     request_class=request_class,
                     priority=priority,
@@ -226,7 +272,11 @@ class CapacityAdmissionController:
                     _record_admission_rejected(service_id, rejected.code)
                     raise rejected
             for budget in enforced:
-                wait_ms = await self._acquire_local(budget)
+                remaining_ms = max(1, min(
+                    budget.queue_timeout_ms,
+                    min(item.queue_timeout_ms for item in enforced) - int((time.perf_counter() - started) * 1000),
+                ))
+                wait_ms = await self._acquire_local(budget, queue_timeout_ms=remaining_ms)
                 acquired_local.append(budget)
                 if self.redis is not None and budget.shared:
                     # One atomic EVAL covers the shared budget AND the tenant
@@ -279,25 +329,53 @@ class CapacityAdmissionController:
                     request_id,
                     wait_ms,
                 )
-        except Exception as exc:
+        except BaseException as exc:
             if isinstance(exc, CapacityRejected):
                 _record_admission_rejected(service_id, exc.code)
-            await self._release_many(acquired_local, acquired_shared, acquired_tenant)
+            await _finish_cleanup(asyncio.create_task(
+                self._release_many(acquired_local, acquired_shared, acquired_tenant)
+            ))
             raise
 
         queue_wait_ms = (time.perf_counter() - started) * 1000
 
         async def _release() -> None:
             duration_ms = (time.perf_counter() - started) * 1000
-            if self.load_shedder is not None:
-                self.load_shedder.record_latency(duration_ms)
+            if load_shedder is not None:
+                load_shedder.record_latency(duration_ms)
             await self._release_many(acquired_local, acquired_shared, acquired_tenant)
 
-        return CapacityLease(
+        lease = CapacityLease(
             budget_keys=[budget.key for budget in enforced],
             queue_wait_ms=queue_wait_ms,
             release=_release,
         )
+        if acquired_shared:
+            lease._renew_task = asyncio.create_task(self._renew_loop(lease, acquired_shared))
+        return lease
+
+    async def _renew_loop(
+        self, lease: CapacityLease, shared_leases: list[tuple[str, str, str]],
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.lease_ttl_ms / 3000)
+                for shared_key, tenant_key, member in shared_leases:
+                    now_ms = int(time.time() * 1000)
+                    renewed = await asyncio.wait_for(eval_script(
+                        self.redis, CAPACITY_RENEW_LUA,
+                        keys=[shared_key, tenant_key],
+                        args=[now_ms, now_ms + self.lease_ttl_ms, member, self.lease_ttl_ms],
+                    ), timeout=self.lease_ttl_ms / 3000)
+                    if int(renewed) != 1:
+                        raise RuntimeError("capacity_lease_lost")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            lease.lost = True
+            logger.error("gateway_capacity_lease_lost budget_keys=%s", lease.budget_keys)
+            if lease._owner is not None and not lease._owner.done():
+                lease._owner.cancel()
 
     def snapshot(self) -> dict[str, dict[str, int]]:
         return {
@@ -403,6 +481,7 @@ class CapacityAdmissionController:
         member = json.dumps(
             {
                 "request_id": request_id,
+                "lease_id": str(uuid.uuid4()),
                 "gateway_instance_id": self.gateway_instance_id,
                 "started_at_ms": now_ms,
                 "lease_expires_at_ms": expires_at,
@@ -410,7 +489,7 @@ class CapacityAdmissionController:
             sort_keys=True,
         )
         try:
-            shared_count, tenant_count = await eval_script(
+            acquire_task = asyncio.create_task(eval_script(
                 self.redis,
                 CAPACITY_ACQUIRE_PAIR_LUA,
                 keys=[shared_key, tenant_key],
@@ -422,7 +501,17 @@ class CapacityAdmissionController:
                     budget.limit,
                     tenant_limit,
                 ],
-            )
+            ))
+            try:
+                shared_count, tenant_count = await asyncio.shield(acquire_task)
+            except asyncio.CancelledError:
+                try:
+                    await _finish_cleanup(acquire_task)
+                finally:
+                    await _finish_cleanup(asyncio.create_task(
+                        self._release_shared_pair(shared_key, tenant_key, member)
+                    ))
+                raise
             shared_count = int(shared_count)
             tenant_count = int(tenant_count)
             if shared_count >= budget.limit:
@@ -462,7 +551,9 @@ class CapacityAdmissionController:
             ) from exc
         return (shared_key, member), (tenant_key, member)
 
-    async def _acquire_local(self, budget: CapacityBudget) -> float:
+    async def _acquire_local(
+        self, budget: CapacityBudget, *, queue_timeout_ms: int | None = None,
+    ) -> float:
         condition = self._conditions.setdefault(budget.key, asyncio.Condition())
         started = time.perf_counter()
         async with condition:
@@ -490,7 +581,7 @@ class CapacityAdmissionController:
                 )
 
             state.queue_depth += 1
-            deadline = time.monotonic() + state.queue_timeout_ms / 1000
+            deadline = time.monotonic() + (queue_timeout_ms or state.queue_timeout_ms) / 1000
             try:
                 while state.inflight >= state.limit:
                     remaining = deadline - time.monotonic()
@@ -529,12 +620,12 @@ class CapacityAdmissionController:
             return
         try:
             # One EVAL releases both keys (SPO-02): a single round trip.
-            await eval_script(
+            await asyncio.wait_for(eval_script(
                 self.redis,
                 CAPACITY_RELEASE_LUA,
                 keys=[shared_key, tenant_key],
                 args=[member],
-            )
+            ), timeout=min(self.lease_ttl_ms / 1000, 5.0))
         except Exception as exc:
             logger.warning(
                 "Failed to release shared capacity lease shared_key=%s error=%s",
@@ -574,13 +665,12 @@ class CapacityAdmissionController:
                 )
 
     def _redis_key(self, *, tenant_id: str, budget_key: str, request_class: str) -> str:
-        del tenant_id
-        group = budget_key.split(".", 1)[1] if "." in budget_key else budget_key
-        return f"gateway:capacity:{self.cluster_epoch}:global:{group}:{request_class}"
+        del tenant_id, request_class
+        return f"gateway:capacity:{self.cluster_epoch}:global:{budget_key}"
 
     def _tenant_redis_key(self, *, tenant_id: str, budget_key: str, request_class: str) -> str:
-        group = budget_key.split(".", 1)[1] if "." in budget_key else budget_key
-        return f"gateway:tenant-capacity:{self.cluster_epoch}:{tenant_id}:{group}:{request_class}"
+        del request_class
+        return f"gateway:tenant-capacity:{self.cluster_epoch}:{tenant_id}:{budget_key}"
 
     def _tenant_limit_for(self, budget: CapacityBudget, tenant_id: str) -> int:
         if tenant_id in self.per_tenant_limits:

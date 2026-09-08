@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -34,7 +35,7 @@ async def test_thread_terminal_closes_gateway_ledger_before_yield() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     plane = AgentRuntimeControlPlane(
-        database=SimpleNamespace(),
+        database=SimpleNamespace(fetchrow=AsyncMock(return_value={"run_id": "scoped"})),
         model_service=SimpleNamespace(),
         provider_service=SimpleNamespace(),
         assignment_store=SimpleNamespace(),
@@ -110,7 +111,7 @@ async def test_whole_thread_stream_continues_after_each_turn_terminal() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     plane = AgentRuntimeControlPlane(
-        database=SimpleNamespace(),
+        database=SimpleNamespace(fetchrow=AsyncMock(return_value={"run_id": "scoped"})),
         model_service=SimpleNamespace(),
         provider_service=SimpleNamespace(),
         assignment_store=SimpleNamespace(),
@@ -143,7 +144,7 @@ async def test_whole_thread_stream_continues_after_each_turn_terminal() -> None:
             second_run_id,
             second_run_id,
         ]
-        assert completed == []
+        assert completed == [(uuid.UUID(first_run_id), "succeeded"), (uuid.UUID(second_run_id), "succeeded")]
     finally:
         await stream.aclose()
         await client.aclose()

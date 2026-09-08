@@ -1238,7 +1238,7 @@
       "id": "execute_python_code",
       "version": null,
       "schema_hash": "sha256:d1bf42fb0244ebca6a0952b92359c8c75269794255d2c85ec3aa622ec2f41d23",
-      "description": "Execute bounded Python in an isolated capability-worker subprocess.",
+      "description": "Execute bounded Python in an isolated capability-worker subprocess. Read supplied files from input/<filename>; write deliverables only to output/<filename>. Input files are read-only. Subprocesses, threads and networking are not permitted.",
       "input_schema": {"type":"object","required":["code"],"properties":{"code":{"type":"string"},"inputs":{"type":"array","items":{"type":"object","required":["filename","content_base64","size_bytes"],"properties":{"filename":{"type":"string"},"mime_type":{"type":"string"},"content_base64":{"type":"string"},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false}}},"additionalProperties":false},
       "read_only": false,
       "effect": "write",

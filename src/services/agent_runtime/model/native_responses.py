@@ -187,6 +187,7 @@ def _native_responses_body(
     allowed_tool_names: set[str] | None = None,
     tool_choice: str | dict[str, str] = "auto",
     parallel_tool_calls: bool = True,
+    native_search_authorized: bool = False,
     _apply_reasoning_wire: Any = apply_reasoning_wire,
     _helpers: Any,
 ) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
@@ -195,7 +196,9 @@ def _native_responses_body(
     native_search = profile.get("native_search")
     tool_capabilities = profile.get("tools")
     if (
-        isinstance(native_search, Mapping)
+        native_search_authorized
+        and tool_choice != "none"
+        and isinstance(native_search, Mapping)
         and native_search.get("enabled") is True
         and isinstance(tool_capabilities, Mapping)
         and tool_capabilities.get("web_search_wire") == "native"
@@ -210,8 +213,8 @@ def _native_responses_body(
         isinstance(item, Mapping) and item.get("type") in {"function_call", "function_call_output"}
         for item in raw_input
     )
-    if tool_choice == "none" and not has_tool_transcript:
-        serialized_tools = []
+    if not native_search_authorized:
+        serialized_tools = [tool for tool in serialized_tools if tool.get("type") != "web_search"]
     function_tool_names = {
         str(tool["name"]) for tool in serialized_tools if tool.get("type") == "function"
     }
@@ -249,8 +252,10 @@ def _native_responses_body(
     # A required/specific choice applies to the initial model call only. Once
     # the kernel supplies a completed tool transcript, forcing it again would
     # create an unbounded post-tool loop.
-    effective_tool_choice = "auto" if has_tool_transcript else tool_choice
-    effective_parallel_tool_calls = True if has_tool_transcript else parallel_tool_calls
+    effective_tool_choice = "auto" if has_tool_transcript and tool_choice != "none" else tool_choice
+    effective_parallel_tool_calls = parallel_tool_calls
+    if tool_choice == "none":
+        serialized_tools = []
     if (
         isinstance(effective_tool_choice, dict)
         and effective_tool_choice["name"] not in function_tool_names
@@ -305,6 +310,7 @@ async def _stream_native_responses(
             allowed_tool_names=allowed_tool_names,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
+            native_search_authorized=_helpers.native_web_search_authorized(call.snapshot),
         )
     except ReasoningWireError:
         await self._fail_call(call.call_id, "reasoning_wire_invalid", dispatched=False)

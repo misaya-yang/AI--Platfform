@@ -14,6 +14,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from ai_gateway_core.eval.runtime_contract import assert_runtime_observation
@@ -21,6 +22,7 @@ from ai_gateway_core.eval.runtime_contract import assert_runtime_observation
 from .assistant_trace_capture import build_assistant_runtime_trace
 
 V2_THREADS_PATH = "/api/v2/agent/threads"
+AUTH_IDENTITY_PATH = "/api/v1/auth/me"
 EVAL_CANDIDATE_USER_ID = "eval-candidate"
 
 
@@ -78,7 +80,8 @@ class EvalCandidateResult:
 
 
 class EvalCandidateClient:
-    def __init__(self) -> None:
+    def __init__(self, *, allow_service_identity: bool = False) -> None:
+        self.allow_service_identity = allow_service_identity
         self.base_url = os.getenv(
             "AGENT_EVAL_GATEWAY_URL",
             os.getenv("GATEWAY_URL", "http://gateway:8080"),
@@ -92,6 +95,44 @@ class EvalCandidateClient:
             "GATEWAY_API_KEY", ""
         ).strip()
 
+    async def _validate_identity(
+        self, client: httpx.AsyncClient, headers: dict[str, str], tenant_id: str
+    ) -> dict[str, Any]:
+        """Check the same credential used for candidate writes on every run."""
+        if (
+            not isinstance(tenant_id, str)
+            or not tenant_id
+            or tenant_id.strip() != tenant_id
+            or tenant_id == "public"
+        ):
+            raise RuntimeError("AGENT_EVAL_IDENTITY_INVALID")
+        try:
+            response = await client.get(AUTH_IDENTITY_PATH, headers=headers)
+        except httpx.HTTPError:
+            raise RuntimeError("AGENT_EVAL_IDENTITY_UNAVAILABLE") from None
+        if response.status_code != 200:
+            raise RuntimeError("AGENT_EVAL_IDENTITY_UNAVAILABLE")
+        try:
+            identity = response.json()
+        except ValueError:
+            raise RuntimeError("AGENT_EVAL_IDENTITY_INVALID") from None
+        if not isinstance(identity, dict):
+            raise RuntimeError("AGENT_EVAL_IDENTITY_INVALID")
+        subject = identity.get("user_id")
+        actual_tenant = identity.get("tenant_id")
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or not isinstance(actual_tenant, str)
+            or not actual_tenant
+            or actual_tenant.strip() != actual_tenant
+            or actual_tenant == "public"
+        ):
+            raise RuntimeError("AGENT_EVAL_IDENTITY_INVALID")
+        if actual_tenant != tenant_id:
+            raise RuntimeError("AGENT_EVAL_TENANT_MISMATCH")
+        return identity
+
     async def run(
         self,
         *,
@@ -100,8 +141,13 @@ class EvalCandidateClient:
         message: str,
         config: dict[str, Any],
         on_run_started: Callable[[str], Awaitable[None]] | None = None,
+        delegation: dict[str, str] | None = None,
+        resume_handle: dict[str, Any] | None = None,
+        on_dispatch_started: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_turn_created: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_cursor: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> EvalCandidateResult:
-        if not self.token and not self.api_key:
+        if not self.token and not self.api_key and not self.allow_service_identity:
             raise RuntimeError(
                 "AGENT_EVAL_AUTH_TOKEN/GATEWAY_TOKEN/GATEWAY_ADMIN_JWT or "
                 "AGENT_EVAL_API_KEY/GATEWAY_API_KEY is required for V2 live eval"
@@ -113,18 +159,17 @@ class EvalCandidateClient:
             )
         configured_model_id = str(config.get("model_id") or "").strip()
         model_id = configured_model_id if configured_model_id not in {"", "current"} else None
-        headers = self._auth_headers()
+        headers = self._auth_headers(tenant_id=tenant_id, delegation=delegation)
         headers.update(
             {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                # The token remains the authority; these headers make the
-                # eval scope explicit for request tracing and test servers.
-                "X-Tenant-Id": tenant_id,
-                "X-User-Id": EVAL_CANDIDATE_USER_ID,
             }
         )
-        thread_body: dict[str, Any] = {"session_id": run_case_id}
+        thread_body: dict[str, Any] = {
+            "session_id": run_case_id,
+            "expected_tenant_id": tenant_id,
+        }
         if model_id is not None:
             thread_body["model_id"] = model_id
 
@@ -144,10 +189,21 @@ class EvalCandidateClient:
             base_url=self.base_url,
             timeout=timeout,
             trust_env=False,
+            follow_redirects=False,
         ) as client:
-            thread_response = await client.post(
-                V2_THREADS_PATH, headers=headers, json=thread_body
-            )
+            identity = await self._validate_identity(client, headers, tenant_id)
+            if delegation is not None and identity["user_id"] != delegation["subject"]:
+                raise RuntimeError("AGENT_EVAL_DELEGATION_SUBJECT_MISMATCH")
+            if resume_handle is not None:
+                if (resume_handle.get("tenant_id") != tenant_id
+                        or resume_handle.get("user_id") != identity["user_id"]
+                        or resume_handle.get("run_case_id") != run_case_id):
+                    raise RuntimeError("AGENT_EVAL_HANDLE_IDENTITY_MISMATCH")
+                thread_response = await client.get(
+                    f"{V2_THREADS_PATH}/{resume_handle['thread_id']}", headers=headers,
+                )
+            else:
+                thread_response = await client.post(V2_THREADS_PATH, headers=headers, json=thread_body)
             if thread_response.status_code >= 400:
                 raise RuntimeError(
                     f"Agent Runtime thread create failed with HTTP {thread_response.status_code}"
@@ -164,6 +220,8 @@ class EvalCandidateClient:
             turn_body = {
                 "message": message,
                 "model_id": model_id,
+                "provider_id": config.get("provider_id"),
+                "expected_model_ref": config.get("model_ref"),
                 "reasoning_option": config.get("reasoning_option"),
                 "thinking_level": config.get("thinking_level"),
                 "temperature": config.get("temperature"),
@@ -175,23 +233,40 @@ class EvalCandidateClient:
                 "web_search_max_results": config.get("web_search_max_results") or 5,
             }
             turn_body = {key: value for key, value in turn_body.items() if value is not None}
-            turn_response = await client.post(
-                f"{V2_THREADS_PATH}/{thread_id}/turns", headers=headers, json=turn_body
-            )
-            if turn_response.status_code >= 400:
-                raise RuntimeError(
-                    f"Agent Runtime turn create failed with HTTP {turn_response.status_code}"
+            handle = {
+                "tenant_id": tenant_id, "user_id": identity["user_id"],
+                "run_case_id": run_case_id, "thread_id": thread_id,
+                **({"delegation": dict(delegation)} if delegation is not None else {}),
+            }
+            if resume_handle is None:
+                # Commit the dispatch marker before any effect-producing POST.
+                if on_dispatch_started is not None:
+                    await on_dispatch_started(handle)
+                turn_response = await client.post(
+                    f"{V2_THREADS_PATH}/{thread_id}/turns", headers=headers, json=turn_body,
                 )
-            turn_payload = turn_response.json()
-            turn = turn_payload.get("turn") if isinstance(turn_payload, dict) else None
-            turn_id = str((turn or {}).get("id") or "")
-            if not turn_id:
-                raise RuntimeError("Agent Runtime turn response has no turn_id")
-            events_path = str((turn or {}).get("events_url") or "")
-            if not events_path:
-                raise RuntimeError("Agent Runtime turn response has no events_url")
-            if events_path.startswith("http"):
-                events_path = events_path.split(self.base_url, 1)[-1]
+                if turn_response.status_code < 200 or turn_response.status_code >= 300:
+                    raise RuntimeError(f"Agent Runtime turn create failed with HTTP {turn_response.status_code}")
+                turn_payload = turn_response.json()
+                turn = turn_payload.get("turn") if isinstance(turn_payload, dict) else None
+                turn_id = str((turn or {}).get("id") or "")
+                events_path = str((turn or {}).get("events_url") or "")
+            else:
+                turn_id = str(resume_handle.get("turn_id") or "")
+                events_path = str(resume_handle.get("events_url") or "")
+            if not turn_id or not events_path:
+                raise RuntimeError("AGENT_EVAL_RUNTIME_HANDLE_INVALID")
+            parsed = urlsplit(events_path)
+            base = urlsplit(self.base_url)
+            if (parsed.netloc and (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc)) or (
+                parsed.path != f"{V2_THREADS_PATH}/{thread_id}/events"
+            ):
+                raise RuntimeError("AGENT_EVAL_EVENTS_ORIGIN_INVALID")
+            events_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            handle.update({"turn_id": turn_id, "events_url": events_path})
+            # Persist before opening SSE, including before the first run_started event.
+            if on_turn_created is not None:
+                await on_turn_created(handle)
             async with client.stream("GET", events_path, headers={**headers, "Accept": "text/event-stream"}) as response:
                 if response.status_code >= 400:
                     raise RuntimeError(
@@ -215,6 +290,10 @@ class EvalCandidateClient:
                     event = envelope.get("event") if isinstance(envelope, dict) else None
                     if isinstance(envelope, dict):
                         observed_events.append(envelope)
+                        if isinstance(envelope.get("sequence"), int):
+                            handle["last_sequence"] = envelope["sequence"]
+                            if on_cursor is not None and len(observed_events) % 50 == 0:
+                                await on_cursor(dict(handle))
                     raw = event.get("payload") if isinstance(event, dict) else None
                     if not isinstance(raw, dict):
                         continue
@@ -315,9 +394,20 @@ class EvalCandidateClient:
             trace_payload=trace_payload,
         )
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _auth_headers(self, *, tenant_id: str | None = None,
+                      delegation: dict[str, str] | None = None) -> dict[str, str]:
         if self.token:
             return {"Authorization": f"Bearer {self.token}"}
         if self.api_key:
             return {"X-API-Key": self.api_key}
+        if self.allow_service_identity:
+            if not tenant_id or tenant_id.strip() != tenant_id or tenant_id == "public":
+                raise RuntimeError("AGENT_EVAL_IDENTITY_INVALID")
+            if delegation is None:
+                raise RuntimeError("AGENT_EVAL_DELEGATION_REQUIRED")
+            from .eval_llm_client import _build_internal_jwt
+
+            return {"Authorization": "Bearer " + _build_internal_jwt(
+                tenant_id=tenant_id, delegation=delegation,
+            )}
         return {}

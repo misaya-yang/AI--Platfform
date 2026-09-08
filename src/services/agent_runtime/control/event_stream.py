@@ -253,9 +253,24 @@ async def stream_thread_events(
                 # A stream without a turn filter is a durable whole-thread
                 # cursor. An older turn reaching terminal state must not hide
                 # later turns from backlog replay or close the live stream.
-                if turn_id and event_type in {"run_finished", "run_error"}:
-                    terminal_status = str((event_data or {}).get("status") or "failed")
-                    await plane._complete_run(uuid.UUID(turn_id), terminal_status)
+                if event_type in {"run_finished", "run_error"} and isinstance(event_data, dict):
+                    event_run_id = str(event_data.get("run_id") or "")
+                    try:
+                        completed_id = uuid.UUID(event_run_id)
+                    except ValueError:
+                        completed_id = None
+                    scoped = turn_id == event_run_id if turn_id else False
+                    if completed_id is not None and not turn_id:
+                        scoped = bool(await plane.database.fetchrow(
+                            "SELECT run_id FROM assistant_runs WHERE run_id=$1 AND tenant_id=$2 "
+                            "AND user_id=$3 AND session_id=$4 AND harness_thread_id=$5 AND engine='agent_runtime'",
+                            completed_id, tenant_id, user_id, session_id, uuid.UUID(runtime_thread_id),
+                        ))
+                    if completed_id is not None and scoped:
+                        status = str(event_data.get("status") or "failed")
+                        await plane._complete_run(completed_id, status)
+                        if turn_id:
+                            terminal_status = status
                 yield envelope
                 if terminal_status:
                     break

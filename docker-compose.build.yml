@@ -4,8 +4,12 @@
 # normal open-source quickstart pulls published, versioned images. Include this
 # file explicitly when changing source code:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
-#     --env-file .env up -d --build
+#   AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/controlled-source make quickstart-build
+#
+# Use the deploy entrypoint: Runtime and capability-worker images are built by
+# the existing composed-source builders and verified as one release unit before
+# Compose starts services. A raw `compose up --build` with only this override
+# cannot rebuild the Rust artifacts.
 
 services:
   migrate:

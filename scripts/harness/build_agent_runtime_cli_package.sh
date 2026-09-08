@@ -74,6 +74,9 @@ if manifest.get("file_count") != len(files) or manifest.get("sha256") != digest.
     raise SystemExit("ERROR: overlay manifest does not match overlay files")
 PY
 
+python3 "$repo_root/scripts/harness/agent_runtime_supply_chain.py" validate \
+    --repo-root "$repo_root" --lock "$repo_root/deploy/agent-runtime-source/lock.json"
+
 if [[ "$dry_run" == "true" ]]; then
     echo "DRY RUN: independent CLI source identity is valid"
     echo "upstream=$upstream_sha overlay=$overlay_sha output=${output_dir:-sdk/cli/vendor/linux-<docker-arch>}"
@@ -119,7 +122,7 @@ docker build \
 
 mkdir -p "$output_dir"
 install -m 0755 "$export_dir/codex" "$output_dir/codex"
-python3 - "$output_dir" "$repo_root/sdk/cli/vendor" "$upstream_sha" "$overlay_sha" "$node_arch" <<'PY'
+python3 - "$output_dir" "$repo_root/sdk/cli/vendor" "$upstream_sha" "$overlay_sha" "$node_arch" "$repo_root" "$build_context" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -128,6 +131,24 @@ import sys
 output = pathlib.Path(sys.argv[1])
 vendor = pathlib.Path(sys.argv[2])
 binary = output / "codex"
+repository = pathlib.Path(sys.argv[6])
+source = pathlib.Path(sys.argv[7])
+lock = json.loads((repository / "deploy/agent-runtime-source/lock.json").read_text())
+material_paths = {
+    "LICENSE": (source / "LICENSE", lock["license"]["upstream_license_sha256"]),
+    "NOTICE": (source / "NOTICE", lock["license"]["upstream_notice_sha256"]),
+    "NOTICE.ai-platform.md": (repository / lock["license"]["notice"], lock["license"]["notice_sha256"]),
+    "sbom.cdx.json": (repository / lock["build"]["sbom"], lock["build"]["sbom_sha256"]),
+    "source-receipt.json": (repository / lock["build"]["source_receipt"], lock["build"]["source_receipt_sha256"]),
+}
+materials = {}
+for name, (path, expected) in material_paths.items():
+    content = path.read_bytes()
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        raise SystemExit(f"ERROR: native package material does not match source lock: {name}")
+    (output / name).write_bytes(content)
+    materials[name] = actual
 receipt = {
     "schema_version": "ai-gateway-cli/native-artifact/v1",
     "upstream_sha": sys.argv[3],
@@ -136,6 +157,7 @@ receipt = {
     "target_arch": sys.argv[5],
     "binary": "codex",
     "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "materials": materials,
 }
 (output / "artifact.json").write_text(json.dumps(receipt, indent=2) + "\n")
 vendor.mkdir(parents=True, exist_ok=True)

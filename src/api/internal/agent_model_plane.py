@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -9,6 +10,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ...core.gateway.admission import CapacityRejected, _finish_cleanup
 from ...services.agent_runtime import AgentModelPlaneError
 
 router = APIRouter(
@@ -42,6 +44,32 @@ def _error(error: AgentModelPlaneError) -> JSONResponse:
             }
         },
     )
+
+
+class _OwnedModelStreamResponse(StreamingResponse):
+    """Own a primed producer even if ASGI send fails before body iteration."""
+
+    def __init__(self, source, first):
+        self._source = source
+
+        async def body():
+            yield first
+            async for chunk in source:
+                yield chunk
+
+        super().__init__(body(), media_type="text/event-stream",
+                         headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            async def close():
+                try:
+                    await self.body_iterator.aclose()
+                finally:
+                    await self._source.aclose()
+            await _finish_cleanup(asyncio.create_task(close()))
 
 
 @router.post("/responses")
@@ -80,15 +108,26 @@ async def responses(request: Request):
             error.status_code,
         )
         return _error(error)
-    return StreamingResponse(
-        plane.stream(
-            body=body,
-            turn_metadata=turn_metadata,
-            authorized_call=authorized,
-        ),
-        media_type="text/event-stream",
-        headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
-    )
+    source = plane.stream(body=body, turn_metadata=turn_metadata, authorized_call=authorized)
+    try:
+        # Admission and provider preflight must finish before the 200 headers.
+        first = await anext(source)
+    except CapacityRejected as exc:
+        await source.aclose()
+        response = _error(AgentModelPlaneError(exc.code, status_code=exc.status_code))
+        response.headers.update(exc.headers)
+        return response
+    except AgentModelPlaneError as exc:
+        await source.aclose()
+        return _error(exc)
+    except StopAsyncIteration:
+        await source.aclose()
+        return _error(AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_EMPTY", status_code=502))
+    except BaseException:
+        await _finish_cleanup(asyncio.create_task(source.aclose()))
+        raise
+    return _OwnedModelStreamResponse(source, first)
+
 
 
 __all__ = ["router"]

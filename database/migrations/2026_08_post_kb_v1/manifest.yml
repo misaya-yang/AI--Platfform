@@ -1,17 +1,51 @@
-# Epoch manifest for baseline 2026_08_post_kb_v1 (PRD ARC-03 §3C.10).
-#
-# This file is the machine carrier for post-baseline changes: every change
-# declares its full SHA-256, owner, transaction mode, rollback class,
-# pre/postconditions, timeout/lock budget and resume/repair handler.  The
-# runner and CI read this file only; they never infer intent from prose.
-#
-# The baseline itself is frozen at the end of the legacy chain
-# (112_kb_document_progress_retention.sql) plus the named post-KB schema
-# convergence change (baselines/2026_08_post_kb_v1/cutover_convergence.sql).
-# That convergence change runs during adoption only — init.sql already
-# carries the converged shape for fresh installs — so this epoch starts
-# with zero declared changes.  New post-baseline changes are appended here
-# as 001_<name>.sql, 002_<name>.sql, ... with contiguous sequences.
-baseline_id: 2026_08_post_kb_v1
-epoch: 1
-changes: []
+{
+  "baseline_id": "2026_08_post_kb_v1",
+  "epoch": 2,
+  "changes": [
+    {
+      "sequence": 1,
+      "name": "knowledge_tenant_permissions",
+      "file": "001_knowledge_tenant_permissions.sql",
+      "sha256": "8d25ee158f83a6194f1cf6688dd6cad01b0778177d785ef909b7c13897230c02",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT NOT EXISTS (SELECT 1 FROM knowledge.dataset_permissions p LEFT JOIN knowledge.datasets d ON d.dataset_id=p.dataset_id WHERE p.subject_type NOT IN ('user','role') OR (p.subject_type='role' AND (d.tenant_id IS NULL OR btrim(d.tenant_id)='' OR d.tenant_id<>btrim(d.tenant_id))))"
+      ],
+      "postconditions": [
+        "SELECT NOT EXISTS (SELECT 1 FROM knowledge.dataset_permissions WHERE subject_type='role')",
+        "SELECT count(*)=2 FROM pg_constraint WHERE conrelid='knowledge.dataset_permissions'::regclass AND conname IN ('dataset_permission_subject_scope','dataset_permission_tenant_fk')"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "ID-02/03: role grants bound to dataset tenant; old-reader/writer safe; Knowledge has no users/RBAC privileges. Public user/role ACL contract unchanged."
+    },
+    {
+      "sequence": 2,
+      "name": "gateway_eval_leases",
+      "file": "002_gateway_eval_leases.sql",
+      "sha256": "ec8a7735b07766c508b2a2d70b5b6659d91ce2cfc0368e214fa1f53aad8a2429",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('gateway.agent_trace_outbox') IS NOT NULL AND to_regclass('gateway.eval_experiment_run_cases') IS NOT NULL",
+        "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='gateway' AND table_name='agent_trace_outbox' AND column_name='claim_token')"
+      ],
+      "postconditions": [
+        "SELECT count(*)=4 FROM information_schema.columns WHERE table_schema='gateway' AND table_name='agent_trace_outbox' AND column_name IN ('owner_id','claim_token','lease_until','heartbeat_at')",
+        "SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='gateway' AND table_name='eval_experiment_run_cases' AND column_name IN ('runtime_handle','dispatch_state')",
+        "SELECT count(*)=3 FROM pg_constraint WHERE connamespace='gateway'::regnamespace AND conname IN ('eval_outbox_running_lease','eval_case_handle_object','eval_case_dispatch_state')",
+        "SELECT NOT EXISTS (SELECT 1 FROM gateway.agent_trace_outbox WHERE status='running' AND (owner_id IS NULL OR claim_token IS NULL OR lease_until IS NULL))"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "EV-02: quiesce legacy workers before applying; preserved running history becomes expired for handle reconciliation; all new worker writes fenced by owner and claim token. Requires epoch 2 reader/writer floor. Verification fingerprints must be generated on isolated authority DB, not inferred."
+    }
+  ]
+}

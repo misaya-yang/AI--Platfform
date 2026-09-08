@@ -118,6 +118,8 @@ class Container:
 
         # Redis 缓存
         self._providers["redis"] = Provider(self._create_redis, singleton=True)
+        self._providers["capacity_resolver"] = Provider(self._create_capacity_resolver, singleton=True)
+        self._providers["admission_controller"] = Provider(self._create_admission_controller, singleton=True)
 
         # ========== 存储层 ==========
 
@@ -252,6 +254,18 @@ class Container:
         return RedisStorage(
             url=self.settings.redis.url,
             enabled=self.settings.redis.enabled,
+        )
+
+    def _create_capacity_resolver(self):
+        from .core.gateway.capacity import CapacityResolver
+        return CapacityResolver()
+
+    def _create_admission_controller(self):
+        from .core.gateway.admission import CapacityAdmissionController
+        from .proxy.transparent_proxy import _load_shedder_from_env
+
+        return CapacityAdmissionController(
+            redis_client=self.redis.get_native_client(), load_shedder=_load_shedder_from_env(),
         )
 
     def _create_registry_storage(self):
@@ -420,6 +434,8 @@ class Container:
         from .core.gateway.dispatcher import GatewayDispatcher
 
         return GatewayDispatcher(
+            admission_controller=self.admission_controller,
+            capacity_resolver=self.capacity_resolver,
             registry=self._providers["service_registry"].get_sync(),
             validator=self._providers["validator"].get_sync(),
             rate_limiter=self._providers["rate_limiter"].get_sync(),
@@ -610,6 +626,8 @@ class Container:
         billing_interceptor = self._providers["billing_interceptor"].get_sync()
 
         proxy = TransparentProxy(
+            admission_controller=self.admission_controller,
+            capacity_resolver=self.capacity_resolver,
             config_loader=config_loader,
             context_injector=context_injector,
             billing_interceptor=billing_interceptor,
@@ -745,6 +763,14 @@ class Container:
     def redis(self):
         """获取 Redis 存储"""
         return self._providers["redis"].get_sync()
+
+    @property
+    def admission_controller(self):
+        return self._providers["admission_controller"].get_sync()
+
+    @property
+    def capacity_resolver(self):
+        return self._providers["capacity_resolver"].get_sync()
 
     @property
     def service_registry(self):

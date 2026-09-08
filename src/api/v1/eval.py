@@ -564,6 +564,41 @@ async def get_eval_experiment_run_results(
     )
 
 
+@router.post("/experiment-runs/{run_id}:cancel")
+async def cancel_eval_experiment_run(
+    run_id: str, request: Request, auth: AuthContext = Depends(get_auth_context),
+) -> dict[str, Any]:
+    _require_eval_run_access(request, auth)
+    repo = _get_trace_repository(request)
+    result = await repo.cancel_experiment_run(
+        tenant_id=auth.tenant_id, run_id=run_id, cancelled_by=auth.user_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    pending = 0
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    for case in result.pop("cases", []):
+        handle = case.get("runtime_handle") or {}
+        if not handle.get("turn_id") and handle.get("thread_id"):
+            handle = await repo.reconcile_candidate_handle(
+                tenant_id=auth.tenant_id, run_case_id=case["run_case_id"], handle=handle,
+            ) or handle
+        if not all(handle.get(key) for key in ("turn_id", "thread_id", "user_id")) or control is None:
+            pending += 1
+            continue
+        try:
+            await control.interrupt_turn(
+                runtime_thread_id=handle["thread_id"], turn_id=handle["turn_id"],
+                tenant_id=auth.tenant_id, user_id=handle["user_id"], session_id=case["run_case_id"],
+                reason="eval_run_cancelled",
+            )
+        except Exception:
+            # The durable cancellation/fence already succeeded; an unconfirmed
+            # Runtime interrupt remains visible and the endpoint can be retried.
+            pending += 1
+    return {**result, "runtime_interrupt_pending": pending}
+
+
 @router.get("/experiment-runs:compare", response_model=EvalExperimentRunComparisonResponse)
 async def compare_eval_experiment_runs(
     request: Request,
@@ -656,6 +691,10 @@ async def run_eval_experiment(
             **body.target_snapshot,
             "system_prompt_override": prompt_override,
         }
+        if str(execution_config.get("model_id") or "").strip() in {"", "current"}:
+            from ...services.assistant_entry import effective_chat_model_id
+
+            execution_config["model_id"] = effective_chat_model_id(request, None)
         public_target = {
             key: value
             for key, value in body.target_snapshot.items()

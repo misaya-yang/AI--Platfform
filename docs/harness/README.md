@@ -80,10 +80,11 @@ conflict before changing code.
   reduce agent task success);
 - relative links inside the harness docs resolve.
 
-It runs in CI as part of the *Compose and Harness* job. It does **not yet** prove that every
-`harness.yml` trigger maps to a CI result, that import boundaries are enforced, that a program's
-lifecycle is semantically valid, or that a green test exercised non-zero files without unexpected
-skips. Those are explicit first-wave requirements of the queued architecture convergence program.
+It runs in CI as part of the *Compose and Harness* job. Static imports and core ownership have their
+own `architecture-boundary-gate` and `core-boundary-gate`; affected-gate selection and CI enforcement
+also exist. The structural check alone does not prove their results, program lifecycle semantics,
+or non-zero collection without unexpected skips. The active `agent-platform-vnext` phase-one program
+owns the remaining exception, lifecycle and evidence conformance work.
 When the structural check fails, fix the harness — do not raise the budget.
 
 ## When to change the harness

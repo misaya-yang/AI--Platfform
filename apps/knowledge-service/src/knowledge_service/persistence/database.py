@@ -20,6 +20,7 @@ from typing import Any
 
 from . import datasets as _datasets
 from .knowledge_artifacts import KnowledgeArtifactPersistenceMixin
+from .schema_compatibility import require_compatible_schema
 
 try:
     import asyncpg
@@ -370,6 +371,13 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
         )
+        try:
+            async with self._pool.acquire() as conn:
+                await require_compatible_schema(conn)
+        except BaseException:
+            await self._pool.close()
+            self._pool = None
+            raise
         logger.info(
             f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}"
         )

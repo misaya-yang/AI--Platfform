@@ -15,6 +15,19 @@ _RETRIABLE_EXCEPTIONS = (
 )
 
 
+class UpstreamOutcomeUnknown(RuntimeError):
+    """The upstream may have accepted a side effect; replay needs reconciliation."""
+
+
+def outcome_is_unknown(exc: BaseException, *, method: str) -> bool:
+    if method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return False
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError,
+                        httpx.WriteError, httpx.RemoteProtocolError)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+
+
 @dataclass(frozen=True)
 class RetryPolicy:
     """Bounded retry policy for service-to-service HTTP calls.
@@ -32,9 +45,11 @@ class RetryPolicy:
         default_factory=lambda: frozenset({502, 503, 504})
     )
     idempotent_methods: frozenset[str] = field(
-        default_factory=lambda: frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+        default_factory=lambda: frozenset({"GET", "HEAD", "OPTIONS"})
     )
     jitter: bool = True
+    # Set only for a documented upstream deduplication contract. A header alone is insufficient.
+    idempotency_guaranteed: bool = False
 
     def can_retry_exception(
         self,
@@ -96,7 +111,7 @@ class RetryPolicy:
         normalized = method.upper()
         if normalized in self.idempotent_methods:
             return True
-        return bool(body_replayable and idempotency_key)
+        return bool(body_replayable and idempotency_key and self.idempotency_guaranteed)
 
 
 class RetryBudget:

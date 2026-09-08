@@ -7,12 +7,12 @@
     "verify",
     "decide"
   ],
-  "active_phase": "CLI-05",
-  "active_feature": "CLI-F006",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 3,
   "max_iterations": 3,
   "last_result": "CLI-02 and CLI-04 are complete: 46 source tests and required gates passed; Docker built and receipted Linux arm64 codex-cli from upstream 94cbbdd plus overlay 46158add; npm pack preview passed from the package directory; Linux/x64 publish staging removes stale native targets; real Direct Responses, Chat-only reasoning/text, tool auto-approval, resume, and SIGINT recovery journeys passed. Hosted tools fail closed while Chat-only Runtime config disables unsupported web search at source.",
-  "next_action": "Build and verify Darwin arm64 packaging and an explicit interactive denial journey before declaring cross-platform CANDIDATE_80; retain Darwin/Windows matrix work for RELEASE_100.",
+  "next_action": null,
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -182,5 +182,9 @@
       ],
       "passes": false
     }
-  ]
+  ],
+  "lifecycle": "superseded",
+  "status": "superseded",
+  "superseded_by": "agent-platform-vnext",
+  "superseded_at": "2026-09-07"
 }

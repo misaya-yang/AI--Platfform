@@ -176,6 +176,7 @@ class KBProxyClient:
             headers["X-User-Id"] = getattr(user, "user_id", "") or ""
             headers["X-Tenant-Id"] = getattr(user, "tenant_id", "") or ""
             headers["X-User-Tier"] = getattr(user, "tier", "") or ""
+            headers["X-User-Roles"] = ",".join(getattr(user, "roles", []) or [])
         return headers
 
     async def health_check(self) -> bool:
@@ -189,14 +190,29 @@ class KBProxyClient:
     async def list_datasets(self, user: Any) -> list[dict[str, Any]]:
         """List datasets from KB microservice."""
         try:
-            data = await self._get_service_client().request_json(
-                "GET",
-                "/api/v1/knowledge/datasets",
-                headers=self._user_headers(user),
-            )
-            if isinstance(data, list):
-                return data
-            return data.get("datasets", data.get("data", []))
+            datasets: dict[str, dict[str, Any]] = {}
+            cursor: str | None = None
+            seen: set[str] = set()
+            while True:
+                response = await self._get_service_client().request(
+                    "GET", "/api/v1/knowledge/datasets",
+                    query_params={"limit": "200", **({"cursor": cursor} if cursor else {})},
+                    headers=self._user_headers(user),
+                )
+                if response.status_code >= 400:
+                    raise InternalServiceHTTPError(response.status_code, response.text, service="knowledge-service")
+                data = response.json()
+                rows = data if isinstance(data, list) else data.get("datasets", data.get("data", []))
+                if not isinstance(rows, list):
+                    raise ValueError("invalid dataset catalog response")
+                for row in rows:
+                    datasets[str(row["dataset_id"])] = row
+                cursor = response.headers.get("X-Next-Cursor")
+                if not cursor:
+                    return list(datasets.values())
+                if cursor in seen or len(cursor) > 1024:
+                    raise ValueError("dataset pagination did not advance")
+                seen.add(cursor)
         except InternalServiceHTTPError as e:
             logger.warning("KB list_datasets failed: %s", e.status_code)
             raise

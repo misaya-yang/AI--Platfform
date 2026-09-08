@@ -35,6 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ai_gateway_contracts.database_revision import (
+    MAX_SUPPORTED_EPOCH_SEQUENCE,
+    MIN_REQUIRED_EPOCH_SEQUENCE,
+)
+
 from . import ledger, legacy
 from .adoption import (
     adopt_baseline,
@@ -74,7 +79,6 @@ from .runner import AuthorityBlockedError, AuthorityError, AuthorityPaths, Migra
 SUPPORTED_BASELINES = frozenset({DEFAULT_BASELINE_ID})
 # Applications built against the frozen baseline support epoch revisions up
 # to this sequence number.  Bump together with the compatibility manifest.
-MAX_SUPPORTED_EPOCH_SEQUENCE = 0
 
 
 @dataclass(frozen=True)
@@ -317,6 +321,12 @@ async def command_migrate(
                         reconciliation_evidence_out,
                     )
                     raise
+                epoch_dir = paths.epoch_dir(baseline_id)
+                manifest_path = epoch_dir / EPOCH_MANIFEST_NAME
+                if manifest_path.exists():
+                    epoch_manifest = load_epoch_manifest(manifest_path)
+                    for line in await authority.apply_epoch(conn, epoch_manifest, epoch_dir):
+                        log(f"authority: {line}")
                 result = MigrationCommandResult(0, reconciliation_receipt)
                 _write_migration_evidence(result, reconciliation_evidence_out)
                 return result
@@ -401,7 +411,7 @@ async def _cutover_and_adopt(
             role_prefix=authority.role_prefix,
             execution_role=owner_role,
         )
-        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
+        await verify_baseline_sql_file(conn, baseline_dir / "verify.sql", role_prefix=authority.role_prefix)
 
         await conn.execute(ledger.LEDGER_DDL)
         computed = await adopt_baseline(
@@ -672,7 +682,7 @@ async def command_verify(
     baseline_id: str = DEFAULT_BASELINE_ID,
     log: Any = print,
 ) -> int:
-    """Absolutely read-only fingerprint verification against the baseline."""
+    """Read-only verification against the exact adopted baseline/epoch."""
     paths = authority.paths
     if not baseline_ready(paths, baseline_id):
         raise AuthorityError(f"baseline {baseline_id} is not frozen; cannot verify")
@@ -686,27 +696,43 @@ async def command_verify(
         if adopted is not None:
             _validate_adoption_marker(adopted, baseline, manifest_sha)
 
+        from .epoch_verification import expected_epoch_fingerprints
+
+        applied = await authority.applied_changes(conn, baseline_id)
+        expected_fingerprints = expected_epoch_fingerprints(paths, baseline, applied)
+
         computed = await compute_fingerprints(
             conn, role_prefix=authority.role_prefix, reference_sets=baseline.reference_data
         )
         failures = []
         for name in ("structural", "acl", "extensions", "reference_data"):
-            expected = baseline.fingerprints[name]
+            expected = expected_fingerprints[name]
             actual = computed[name]
             status = "match" if expected == actual else "DRIFT"
             log(f"fingerprint {name}: {status}")
             if expected != actual:
                 failures.append(name)
 
-        checks = await verify_baseline_sql_file(
-            conn, paths.baseline_dir(baseline_id) / "verify.sql"
-        )
-        for check in checks:
-            log(f"verify check {check['check_name']}: match")
+        if applied:
+            # The frozen grant-matrix SELECT describes epoch zero. Exact epoch
+            # hashes replace that obsolete catalog oracle; migration data
+            # postconditions are still checked on the read-only connection.
+            epoch = load_epoch_manifest(paths.epoch_dir(baseline_id) / EPOCH_MANIFEST_NAME)
+            for change in epoch.changes:
+                if change.sequence in applied:
+                    await authority._evaluate_conditions(
+                        conn, change.postconditions, change_name=change.name, phase="verify",
+                    )
+        else:
+            checks = await verify_baseline_sql_file(
+                conn, paths.baseline_dir(baseline_id) / "verify.sql", role_prefix=authority.role_prefix,
+            )
+            for check in checks:
+                log(f"verify check {check['check_name']}: match")
 
         if failures:
             raise AuthorityError(f"verification failed for: {failures}")
-        log("verify: baseline fingerprints match; database is read-only-verified")
+        log(f"verify: baseline/epoch {max(applied, default=0)} fingerprints match; database is read-only-verified")
     finally:
         await conn.close()
     return 0
@@ -724,6 +750,7 @@ async def command_startup_check(
             conn,
             SUPPORTED_BASELINES,
             max_epoch_sequence=MAX_SUPPORTED_EPOCH_SEQUENCE,
+            min_epoch_sequence=MIN_REQUIRED_EPOCH_SEQUENCE,
         )
     finally:
         await conn.close()

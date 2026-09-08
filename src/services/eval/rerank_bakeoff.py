@@ -102,16 +102,13 @@ class IdentityAdapter:
 
 @dataclass
 class RerankerAdapter:
-    """Contestant backed by knowledge_service create_reranker providers.
-
-    The knowledge service is imported lazily so offline tooling and unit
-    tests never pull in FlagEmbedding/httpx provider stacks.
-    """
+    """Contestant using a factory injected by the standalone runner."""
 
     provider: str
     model: str | None = None
     api_key: str | None = None
     _reranker: Any = field(default=None, repr=False)
+    reranker_factory: Any = field(default=None, repr=False)
 
     @property
     def name(self) -> str:
@@ -119,11 +116,9 @@ class RerankerAdapter:
 
     async def score(self, case: BakeoffCase) -> list[float]:
         if self._reranker is None:
-            from knowledge_service.services.knowledge.text_reranker import (
-                create_reranker,
-            )
-
-            self._reranker = create_reranker(
+            if not callable(self.reranker_factory):
+                raise ValueError("a reranker factory must be supplied by the runner")
+            self._reranker = self.reranker_factory(
                 provider=self.provider, model=self.model, api_key=self.api_key
             )
         results = await self._reranker.rerank(

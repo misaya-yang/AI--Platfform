@@ -380,18 +380,17 @@ async def test_max_upload_envelope_cap_plus_one_is_rejected_before_upstream(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("idempotency_key", "expect_retry"),
+    "idempotency_key",
     [
-        pytest.param(None, False, id="missing-key"),
-        pytest.param("", False, id="empty-key"),
-        pytest.param("   ", False, id="whitespace-key"),
-        pytest.param("upload-operation-1", True, id="valid-key"),
+        pytest.param(None, id="missing-key"),
+        pytest.param("", id="empty-key"),
+        pytest.param("   ", id="whitespace-key"),
+        pytest.param("upload-operation-1", id="valid-key"),
     ],
 )
 async def test_accepted_upload_retries_only_with_nonempty_idempotency_key(
     monkeypatch: pytest.MonkeyPatch,
     idempotency_key: str | None,
-    expect_retry: bool,
 ) -> None:
     attempts: list[bytes] = []
 
@@ -437,25 +436,18 @@ async def test_accepted_upload_retries_only_with_nonempty_idempotency_key(
     )
 
     try:
-        if expect_retry:
-            response = await proxy_utils.proxy_to_kb_service(
+        # A client-supplied key is not proof that Knowledge deduplicates uploads.
+        with pytest.raises(HTTPException) as exc_info:
+            await proxy_utils.proxy_to_kb_service(
                 _request([b"upload-body"], headers=headers),
                 _user(),
                 path="datasets/ds-1/documents/upload",
             )
-            assert response.status_code == 200
-        else:
-            with pytest.raises(HTTPException) as exc_info:
-                await proxy_utils.proxy_to_kb_service(
-                    _request([b"upload-body"], headers=headers),
-                    _user(),
-                    path="datasets/ds-1/documents/upload",
-                )
-            assert exc_info.value.status_code == 502
+        assert exc_info.value.status_code == 502
     finally:
         await upstream_client.aclose()
 
-    assert len(attempts) == (2 if expect_retry else 1)
+    assert len(attempts) == 1
     assert attempts == [b"upload-body"] * len(attempts)
 
 

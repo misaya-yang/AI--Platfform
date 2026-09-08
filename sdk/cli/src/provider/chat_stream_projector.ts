@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerResponse } from "node:http";
 
-import { CompatibilityError, record } from "./chat_request_adapter.js";
+import { CompatibilityError, namespaceAlias, record } from "./chat_request_adapter.js";
 import { readSsePayloads } from "./sse_reader.js";
 
 interface ToolCallState {
@@ -13,11 +13,34 @@ interface ToolCallState {
 }
 
 export async function projectChatStream(
+  upstream: Response, output: ServerResponse, model: string, idleTimeoutMs: number, signal: AbortSignal,
+  aliases: ReadonlyMap<string, { namespace: string; name: string }> = new Map(),
+  allowedNames?: ReadonlySet<string>,
+): Promise<void> {
+  const disconnected = new AbortController();
+  const onClose = () => disconnected.abort(new CompatibilityError("consumer_disconnected"));
+  output.once("close", onClose);
+  try {
+    await projectBoundedChatStream(upstream, output, model, idleTimeoutMs, AbortSignal.any([signal, disconnected.signal]), aliases, allowedNames);
+  } finally {
+    output.off("close", onClose);
+    if (!upstream.body?.locked) await upstream.body?.cancel().catch(() => undefined);
+  }
+}
+
+function boundedAppend(current: string, delta: string, limit: number, code: string): string {
+  if (Buffer.byteLength(current) + Buffer.byteLength(delta) > limit) throw new CompatibilityError(code);
+  return current + delta;
+}
+
+async function projectBoundedChatStream(
   upstream: Response,
   output: ServerResponse,
   model: string,
   idleTimeoutMs: number,
   signal: AbortSignal,
+  aliases: ReadonlyMap<string, { namespace: string; name: string }>,
+  allowedNames?: ReadonlySet<string>,
 ): Promise<void> {
   const responseId = `resp_${randomUUID().replaceAll("-", "")}`;
   const messageId = `msg_${responseId.slice(5)}`;
@@ -33,13 +56,15 @@ export async function projectChatStream(
   let terminalSeen = false;
   let terminalFailure: string | undefined;
   const tools = new Map<number, ToolCallState>();
-  const emit = (type: string, payload: Record<string, unknown>) => {
-    writeSse(output, type, { type, sequence_number: sequence++, ...payload });
+  const callIds = new Map<string, number>();
+  const toolIdentity = (name: string) => aliases.get(name) ?? { name };
+  const emit = async (type: string, payload: Record<string, unknown>) => {
+    await writeSse(output, type, { type, sequence_number: sequence++, ...payload }, signal);
   };
-  const ensureMessageOpen = () => {
+  const ensureMessageOpen = async () => {
     if (messageOutputIndex !== undefined) return;
     messageOutputIndex = nextOutputIndex++;
-    emit("response.output_item.added", {
+    await emit("response.output_item.added", {
       output_index: messageOutputIndex,
       item: {
         id: messageId,
@@ -49,14 +74,14 @@ export async function projectChatStream(
         content: [],
       },
     });
-    emit("response.content_part.added", {
+    await emit("response.content_part.added", {
       item_id: messageId,
       output_index: messageOutputIndex,
       content_index: 0,
       part: { type: "output_text", text: "", annotations: [] },
     });
   };
-  const closeReasoning = () => {
+  const closeReasoning = async () => {
     if (reasoningOutputIndex === undefined || reasoningClosed) return;
     const item = {
       id: reasoningId,
@@ -64,19 +89,19 @@ export async function projectChatStream(
       status: "completed",
       summary: [{ type: "summary_text", text: reasoningOutput }],
     };
-    emit("response.reasoning_summary_text.done", {
+    await emit("response.reasoning_summary_text.done", {
       item_id: reasoningId,
       output_index: reasoningOutputIndex,
       summary_index: 0,
       text: reasoningOutput,
     });
-    emit("response.reasoning_summary_part.done", {
+    await emit("response.reasoning_summary_part.done", {
       item_id: reasoningId,
       output_index: reasoningOutputIndex,
       summary_index: 0,
       part: { type: "summary_text", text: reasoningOutput },
     });
-    emit("response.output_item.done", { output_index: reasoningOutputIndex, item });
+    await emit("response.output_item.done", { output_index: reasoningOutputIndex, item });
     reasoningClosed = true;
   };
   const responseObject = (status: string, error: Record<string, unknown> | null = null) => ({
@@ -89,8 +114,8 @@ export async function projectChatStream(
     output: [],
     usage,
   });
-  emit("response.created", { response: responseObject("in_progress") });
-  emit("response.in_progress", { response: responseObject("in_progress") });
+  await emit("response.created", { response: responseObject("in_progress") });
+  await emit("response.in_progress", { response: responseObject("in_progress") });
 
   try {
     for await (const payload of readSsePayloads(upstream.body!, idleTimeoutMs, signal)) {
@@ -122,10 +147,10 @@ export async function projectChatStream(
         throw new CompatibilityError("provider_content_delta_unsupported");
       }
       if (content) {
-        closeReasoning();
-        ensureMessageOpen();
-        textOutput += content;
-        emit("response.output_text.delta", {
+        await closeReasoning();
+        await ensureMessageOpen();
+        textOutput = boundedAppend(textOutput, content, 4 * 1024 * 1024, "provider_text_limit");
+        await emit("response.output_text.delta", {
           item_id: messageId,
           output_index: messageOutputIndex,
           content_index: 0,
@@ -141,7 +166,7 @@ export async function projectChatStream(
         if (rawReasoning) {
           if (reasoningOutputIndex === undefined) {
             reasoningOutputIndex = nextOutputIndex++;
-            emit("response.output_item.added", {
+            await emit("response.output_item.added", {
               output_index: reasoningOutputIndex,
               item: {
                 id: reasoningId,
@@ -150,15 +175,15 @@ export async function projectChatStream(
                 summary: [],
               },
             });
-            emit("response.reasoning_summary_part.added", {
+            await emit("response.reasoning_summary_part.added", {
               item_id: reasoningId,
               output_index: reasoningOutputIndex,
               summary_index: 0,
               part: { type: "summary_text", text: "" },
             });
           }
-          reasoningOutput += rawReasoning;
-          emit("response.reasoning_summary_text.delta", {
+          reasoningOutput = boundedAppend(reasoningOutput, rawReasoning, 4 * 1024 * 1024, "provider_reasoning_limit");
+          await emit("response.reasoning_summary_text.delta", {
             item_id: reasoningId,
             output_index: reasoningOutputIndex,
             summary_index: 0,
@@ -172,6 +197,7 @@ export async function projectChatStream(
           const index = Number(tool.index ?? 0);
           if (!Number.isInteger(index) || index < 0) throw new CompatibilityError("provider_tool_delta_invalid");
           const fn = tool.function && typeof tool.function === "object" ? record(tool.function, "provider_tool_delta_invalid") : {};
+          if (!tools.has(index) && tools.size >= 128) throw new CompatibilityError("provider_tool_count_limit");
           const current = tools.get(index) ?? {
             id: "",
             name: "",
@@ -181,26 +207,34 @@ export async function projectChatStream(
           };
           const wasAnnounced = current.announced;
           if (typeof tool.id === "string" && tool.id) {
-            if (current.announced && current.id !== tool.id) {
+            if (callIds.has(tool.id) && callIds.get(tool.id) !== index) throw new CompatibilityError("provider_tool_id_duplicate");
+            callIds.set(tool.id, index);
+            if (current.id && current.id !== tool.id) {
               throw new CompatibilityError("provider_tool_id_changed");
             }
             current.id = tool.id;
           }
-          if (typeof fn.name === "string") current.name += fn.name;
-          if (typeof fn.arguments === "string") current.arguments += fn.arguments;
-          if (!current.announced && current.name && current.id) {
-            emit("response.output_item.added", {
+          if (current.announced && fn.name) throw new CompatibilityError("provider_tool_name_changed");
+          if (typeof fn.name === "string") current.name = boundedAppend(current.name, fn.name, 256, "provider_tool_name_limit");
+          if (typeof fn.arguments === "string") {
+            const total = [...tools.values()].reduce((n, item) => n + Buffer.byteLength(item.arguments), 0);
+            if (total + Buffer.byteLength(fn.arguments) > 4 * 1024 * 1024) throw new CompatibilityError("provider_tool_arguments_total_limit");
+            current.arguments = boundedAppend(current.arguments, fn.arguments, 1024 * 1024, "provider_tool_arguments_limit");
+          }
+          const ambiguousPrefix = [...(allowedNames ?? []), ...aliases.keys()].some((name) => name !== current.name && name.startsWith(current.name));
+          if (!current.announced && !ambiguousPrefix && current.name && current.id && (!allowedNames || allowedNames.has(current.name) || (aliases.has(current.name) && allowedNames.has(namespaceAlias(aliases.get(current.name)!.namespace, aliases.get(current.name)!.name))))) {
+            await emit("response.output_item.added", {
               output_index: current.outputIndex,
-              item: { id: current.id, type: "function_call", status: "in_progress", call_id: current.id, name: current.name, arguments: "" },
+              item: { id: current.id, type: "function_call", status: "in_progress", call_id: current.id, ...toolIdentity(current.name), arguments: "" },
             });
             current.announced = true;
           }
           if (current.announced && current.arguments && !wasAnnounced) {
-            emit("response.function_call_arguments.delta", {
+            await emit("response.function_call_arguments.delta", {
               item_id: current.id, output_index: current.outputIndex, delta: current.arguments,
             });
           } else if (current.announced && typeof fn.arguments === "string" && fn.arguments) {
-            emit("response.function_call_arguments.delta", {
+            await emit("response.function_call_arguments.delta", {
               item_id: current.id, output_index: current.outputIndex, delta: fn.arguments,
             });
           }
@@ -215,7 +249,7 @@ export async function projectChatStream(
       return;
     }
     const code = error instanceof CompatibilityError ? error.code : "provider_stream_failed";
-    emit("response.failed", {
+    await emit("response.failed", {
       response: {
         ...responseObject("failed", { code, message: code, type: "server_error" }),
         output: [],
@@ -225,7 +259,7 @@ export async function projectChatStream(
     return;
   }
   if (!terminalSeen) {
-    emit("response.failed", {
+    await emit("response.failed", {
       response: {
         ...responseObject("failed", {
           code: "provider_stream_incomplete",
@@ -239,7 +273,7 @@ export async function projectChatStream(
     return;
   }
   if (terminalFailure) {
-    emit("response.failed", {
+    await emit("response.failed", {
       response: {
         ...responseObject("failed", {
           code: terminalFailure,
@@ -252,8 +286,19 @@ export async function projectChatStream(
     output.end();
     return;
   }
+  for (const tool of tools.values()) {
+    const identity = aliases.get(tool.name);
+    const allowed = !allowedNames || allowedNames.has(tool.name)
+      || (identity && allowedNames.has(namespaceAlias(identity.namespace, identity.name)));
+    if (!tool.announced && tool.id && tool.name && allowed) {
+      await emit("response.output_item.added", { output_index: tool.outputIndex,
+        item: { id: tool.id, type: "function_call", status: "in_progress", call_id: tool.id, ...toolIdentity(tool.name), arguments: "" } });
+      if (tool.arguments) await emit("response.function_call_arguments.delta", { item_id: tool.id, output_index: tool.outputIndex, delta: tool.arguments });
+      tool.announced = true;
+    }
+  }
   if ([...tools.values()].some((tool) => !tool.id || !tool.name || !tool.announced)) {
-    emit("response.failed", {
+    await emit("response.failed", {
       response: {
         ...responseObject("failed", {
           code: "provider_tool_identity_missing",
@@ -267,9 +312,9 @@ export async function projectChatStream(
     return;
   }
 
-  closeReasoning();
-  ensureMessageOpen();
-  emit("response.output_text.done", {
+  await closeReasoning();
+  await ensureMessageOpen();
+  await emit("response.output_text.done", {
     item_id: messageId,
     output_index: messageOutputIndex,
     content_index: 0,
@@ -277,7 +322,7 @@ export async function projectChatStream(
     logprobs: [],
   });
   const part = { type: "output_text", text: textOutput, annotations: [] };
-  emit("response.content_part.done", {
+  await emit("response.content_part.done", {
     item_id: messageId,
     output_index: messageOutputIndex,
     content_index: 0,
@@ -290,7 +335,7 @@ export async function projectChatStream(
     status: "completed",
     content: [part],
   };
-  emit("response.output_item.done", {
+  await emit("response.output_item.done", {
     output_index: messageOutputIndex,
     item: messageItem,
   });
@@ -309,11 +354,11 @@ export async function projectChatStream(
     });
   }
   for (const tool of [...tools.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
-    emit("response.function_call_arguments.done", {
-      item_id: tool.id, output_index: tool.outputIndex, name: tool.name, arguments: tool.arguments,
+    await emit("response.function_call_arguments.done", {
+      item_id: tool.id, output_index: tool.outputIndex, ...toolIdentity(tool.name), arguments: tool.arguments,
     });
-    const item = { id: tool.id, type: "function_call", status: "completed", call_id: tool.id, name: tool.name, arguments: tool.arguments };
-    emit("response.output_item.done", { output_index: tool.outputIndex, item });
+    const item = { id: tool.id, type: "function_call", status: "completed", call_id: tool.id, ...toolIdentity(tool.name), arguments: tool.arguments };
+    await emit("response.output_item.done", { output_index: tool.outputIndex, item });
     indexedOutput.push({ index: tool.outputIndex, item });
   }
   indexedOutput.sort((a, b) => a.index - b.index);
@@ -321,7 +366,7 @@ export async function projectChatStream(
     ...responseObject("completed"),
     output: indexedOutput.map(({ item }) => item),
   };
-  emit("response.completed", { response: completed });
+  await emit("response.completed", { response: completed });
   output.end();
 }
 
@@ -333,6 +378,23 @@ function normalizeUsage(value: Record<string, unknown>): Record<string, unknown>
   };
 }
 
-function writeSse(response: ServerResponse, type: string, payload: Record<string, unknown>): void {
-  response.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+async function writeSse(response: ServerResponse, type: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || response.destroyed) throw new CompatibilityError("consumer_disconnected");
+  if (response.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => finish(new CompatibilityError("consumer_backpressure_timeout")), 10_000);
+    const drained = () => finish();
+    const closed = () => finish(new CompatibilityError("consumer_disconnected"));
+    const finish = (error?: Error) => {
+      clearTimeout(timer);
+      response.off("drain", drained);
+      response.off("close", closed);
+      signal.removeEventListener("abort", closed);
+      if (error) reject(error); else resolve();
+    };
+    response.once("drain", drained);
+    response.once("close", closed);
+    signal.addEventListener("abort", closed, { once: true });
+    if (signal.aborted || response.destroyed) closed();
+  });
 }

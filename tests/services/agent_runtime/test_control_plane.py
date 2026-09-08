@@ -114,7 +114,8 @@ class _Database:
 
 
 class _ModelService:
-    async def get_model(self, tenant_id: str, model_id: str) -> dict[str, Any]:
+    async def get_model(self, tenant_id: str, model_id: str, *, provider_id: str | None = None) -> dict[str, Any]:
+        del provider_id
         assert tenant_id == "tenant-a"
         assert model_id == "qwen3.7-plus"
         profile = get_builtin_model_capabilities("dashscope", model_id)

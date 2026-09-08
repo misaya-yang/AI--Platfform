@@ -1,12 +1,12 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
-  "lifecycle": "active",
+  "lifecycle": "superseded",
   "goal": "Converge the platform onto ADR-008 with trustworthy gates, one Agent kernel, one database authority, explicit service ownership and evidence-backed release behavior.",
   "prd": "docs/plans/platform-architecture-convergence-prd-2026-08.md",
   "adr": "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
   "cycle": ["observe", "freeze", "act", "verify_direct", "review", "repair", "integrate_direct", "decide"],
-  "active_phase": "ARC-08",
-  "active_feature": "ARC-F08",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 10,
   "max_iterations": 10,
   "base_sha": "336851c107c659342ec79aa3aa298de77b1edc68",
@@ -14,7 +14,7 @@
   "tested_candidate_ahead_main": 127,
   "execution_model": "Single writer in the current checkout. No new worktree. Docker, database, E2E and provider work were serialized; host Cargo is prohibited. No further subagents are planned for closeout.",
   "last_result": "2026-08-30: core implementation, unit/integration gates and current-stack UI/Qwen/Knowledge/admin journeys passed. All services are healthy under the current checkout. Database baseline 2026_08_post_kb_v1 matches four fingerprints and 251 verification checks. The only Agent Studio code/test regression found was repaired and its 48-case route suite passed. Rollback stopped before mutation because the frozen image bundle is absent; hosted Rust CI/multi-arch, fresh-machine and one registry-dependent built-Nginx smoke remain unexecuted.",
-  "next_action": "Restore a digest-pinned frozen image bundle and provide hosted Rust CI/multi-arch plus fresh-machine execution, then run ARC-08 rollback/fresh/candidate-manifest gates. Do not mark these PASS until their receipts exist.",
+  "next_action": null,
   "blockers": [
     "BLOCKED_EXTERNAL_RUST_CI: no hosted fmt/check/changed-crate or multi-arch receipt for the tested SHA",
     "BLOCKED_EXTERNAL_ARTIFACT: rollback bundle references three frozen image IDs that are absent and have no registry reference",
@@ -61,5 +61,8 @@
     "cross_review_performed": true,
     "blocker_high_code_findings_open": 0,
     "release_evidence_blockers_open": 4
-  }
+  },
+  "status": "superseded",
+  "superseded_by": "agent-platform-vnext",
+  "superseded_at": "2026-09-07"
 }

@@ -384,3 +384,92 @@ def test_record_local_image_checks_labels_and_locks_only_target(
     assert runtime["image_ref"] == f"local-image://{image_digest}"
     assert runtime["platforms"] == ["linux/arm64"]
     assert lock["oci"]["artifacts"]["app_server"]["candidate_start_allowed"] is False
+
+
+def _locked_image_info(lock: dict, artifact_id: str) -> dict:
+    worker = artifact_id == "capability_worker"
+    prefix = (
+        "com.misaya.ai-platform.capability-worker"
+        if worker
+        else "com.misaya.ai-platform.agent-runtime"
+    )
+    return {
+        "Id": lock["oci"]["artifacts"][artifact_id]["image_digest"],
+        "Os": "linux",
+        "Architecture": "arm64",
+        "Config": {
+            "Labels": {
+                "org.opencontainers.image.revision": lock["source"]["fork_sha"],
+                f"{prefix}.schema-sha256": lock["build"][
+                    "capability_worker_schema_sha256" if worker else "app_server_schema_sha256"
+                ],
+                f"{prefix}.artifact": artifact_id,
+                f"{prefix}.binary": supply_chain.ARTIFACT_BINARIES[artifact_id],
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mismatch", [None, "worker_digest", "worker_source", "worker_platform", "runtime_digest"]
+)
+def test_selected_runtime_worker_pair_must_match_actual_locked_images(
+    tmp_path, monkeypatch, mismatch
+):
+    lock_path = _fixture(tmp_path, capability_worker_runnable=True)
+    lock = json.loads(lock_path.read_text())
+    images = {
+        "runtime:chosen": _locked_image_info(lock, "agent_runtime"),
+        "worker:chosen": _locked_image_info(lock, "capability_worker"),
+    }
+    if mismatch == "worker_digest":
+        images["worker:chosen"]["Id"] = "sha256:" + "0" * 64
+    elif mismatch == "runtime_digest":
+        images["runtime:chosen"]["Id"] = "sha256:" + "0" * 64
+    elif mismatch == "worker_source":
+        images["worker:chosen"]["Config"]["Labels"]["org.opencontainers.image.revision"] = "0" * 40
+    elif mismatch == "worker_platform":
+        images["worker:chosen"]["Architecture"] = "amd64"
+    monkeypatch.setattr(
+        supply_chain, "_run", lambda command, **_kwargs: json.dumps([images[command[-1]]])
+    )
+    before = lock_path.read_bytes()
+    if mismatch:
+        with pytest.raises(ContractError):
+            supply_chain.verify_local_images(
+                repo_root=tmp_path,
+                lock_path=lock_path,
+                runtime_image="runtime:chosen",
+                worker_image="worker:chosen",
+            )
+    else:
+        supply_chain.verify_local_images(
+            repo_root=tmp_path,
+            lock_path=lock_path,
+            runtime_image="runtime:chosen",
+            worker_image="worker:chosen",
+        )
+    assert lock_path.read_bytes() == before
+
+
+def test_missing_worker_lock_fails_before_docker_inspection(tmp_path, monkeypatch):
+    lock_path = _fixture(tmp_path, capability_worker_runnable=False)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("must reject the incomplete release unit before inspecting Docker")
+
+    monkeypatch.setattr(supply_chain, "_run", unexpected)
+    with pytest.raises(ContractError, match="capability_worker.*not locked"):
+        supply_chain.verify_local_images(repo_root=tmp_path, lock_path=lock_path)
+
+
+def test_worker_full_overlay_label_is_checked_before_locking_image(tmp_path):
+    lock_path = _fixture(tmp_path, capability_worker_runnable=True)
+    lock = json.loads(lock_path.read_text())
+    lock["build"]["overlay_sha256"] = "4" * 64
+    info = _locked_image_info(lock, "capability_worker")
+    labels = info["Config"]["Labels"]
+    labels["org.opencontainers.image.revision"] = lock["source"]["upstream_sha"] + "+" + "4" * 12
+    labels["com.misaya.ai-platform.capability-worker.overlay-sha256"] = "4" * 12 + "5" * 52
+    with pytest.raises(ContractError, match="labels"):
+        supply_chain._checked_image_identity(lock, "capability_worker", info)

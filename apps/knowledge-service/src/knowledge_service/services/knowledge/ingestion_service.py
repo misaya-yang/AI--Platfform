@@ -279,40 +279,10 @@ class IngestionService:
     def _parsing_cascade_config(
         index_config: dict[str, Any],
     ) -> tuple[Any, dict[str, Any]] | None:
-        """Resolve the opt-in T4 parser config without changing the default path.
+        """Use the same pure parser contract as Dataset configuration writes."""
+        from .parsing.config_validation import resolve_parsing_config
 
-        ``index_config.parsing.enabled`` is the feature flag.  The legacy
-        ingestion path remains byte-for-byte unchanged when it is absent or
-        false.  Once enabled, the text-layer adapter is forced into its
-        boundary-preserving version so an IR round trip cannot silently move
-        existing chunk boundaries.
-        """
-
-        raw = index_config.get("parsing")
-        if raw is None:
-            return None
-        if not isinstance(raw, dict):
-            raise ValidationFailedError("index_config.parsing must be an object")
-        if raw.get("enabled") is not True:
-            return None
-
-        from .parsing import CascadeConfig, default_cascade_config
-
-        cascade_value = raw.get("cascade")
-        if cascade_value is None:
-            config = default_cascade_config()
-        elif isinstance(cascade_value, dict):
-            config = CascadeConfig.from_dict(cascade_value)
-        else:
-            raise ValidationFailedError("index_config.parsing.cascade must be an object")
-        if not config.stages:
-            raise ValidationFailedError("enabled parsing cascade has no stages")
-
-        if any(stage.backend == "text_layer" for stage in config.stages):
-            text_options = dict(config.backend_options.get("text_layer") or {})
-            text_options["preserve_boundaries"] = True
-            config.backend_options["text_layer"] = text_options
-        return config, config.to_dict()
+        return resolve_parsing_config(index_config)
 
     async def _load_or_parse_document_ir(
         self,

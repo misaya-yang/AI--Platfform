@@ -7,12 +7,12 @@
     "verify",
     "decide"
   ],
-  "active_phase": "ARU-04",
-  "active_feature": "ARU-F005",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 7,
   "max_iterations": 8,
   "last_result": "candidate_complete: internal-browser Qwen chat/history/tool reject+approve, Agent Studio preview, and Eval Trace passed; public Responses 2/2 and live platform convergence 3/3 passed after repairing terminal-ledger closure before V2 terminal delivery. Offline release, web, CLI, source, Eval, LOC, image smoke, and package gates pass. User authorized merge and push despite the separately reported unavailable frozen bundle.",
-  "next_action": "Commit the final regression repairs and evidence, refresh origin/main, fast-forward main to this branch when topology remains clean, rerun final status checks, and push main normally.",
+  "next_action": null,
   "blockers": [
     "ARU-F005 full frozen-bundle rehearsal cannot run because the immutable bundle's exact Runtime image is absent and four other frozen service artifacts are absent or digest-mismatched. Candidate Runtime/Worker rollback to the previous locally available pair and back passed, but is not a substitute for the full release-unit rehearsal."
   ],
@@ -153,5 +153,9 @@
       ],
       "passes": false
     }
-  ]
+  ],
+  "lifecycle": "superseded",
+  "status": "superseded",
+  "superseded_by": "agent-platform-vnext",
+  "superseded_at": "2026-09-07"
 }

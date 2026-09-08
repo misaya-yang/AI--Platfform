@@ -13,7 +13,16 @@ from knowledge_service.api.routes.capability_plane import (
     _text_result,
     retrieve_capability,
 )
+from knowledge_service.core.auth.user_resolver import UserContext
 from starlette.datastructures import Headers
+
+
+@pytest.fixture(autouse=True)
+def actor_lookup(monkeypatch):
+    lookup = AsyncMock(return_value=UserContext(user_id="user-a", tenant_id="tenant-a", user_tier="admin", roles=["admin", "platform_admin"]))
+    monkeypatch.setattr("knowledge_service.api.routes.capability_plane.resolve_runtime_actor", lookup)
+    return lookup
+
 
 PROOF_SECRET = "p" * 32
 
@@ -106,7 +115,7 @@ async def test_route_calls_authoritative_retrieval_and_preserves_shape(monkeypat
     resolved_user = svc.require_dataset_access.await_args.args[0]
     assert resolved_user.tier == "admin"
     assert resolved_user.roles == ["admin", "platform_admin"]
-    svc.db.get_user.assert_awaited_once_with("user-a")
+    svc.db.get_user.assert_not_awaited()
     svc.retrieve.assert_awaited_once_with(
         user=svc.require_dataset_access.await_args.args[0],
         dataset_id="ds-a",

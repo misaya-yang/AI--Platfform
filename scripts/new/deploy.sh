@@ -99,11 +99,20 @@ cd "$PROJECT_ROOT"
 # Keep the Gateway and Runtime on the same immutable source/overlay identity.
 # This also upgrades older local env files that still have an empty revision
 # without writing secrets or mutating the environment file in place.
-if [ -z "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}" ]; then
-    export AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION="$(agent_runtime_kernel_revision)"
+if [ "$INFRA_ONLY" != true ]; then
+    expected_kernel_revision="$(agent_runtime_kernel_revision)"
+    if [ -n "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}" ] \
+        && [ "$AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION" != "$expected_kernel_revision" ]; then
+        log_error "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION does not match the selected source unit; update the configured revision before deploying."
+        exit 2
+    fi
+    export AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION="$expected_kernel_revision"
 fi
 if [ -z "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-}" ]; then
     export AI_PLATFORM_AGENT_RUNTIME_IMAGE="$(agent_runtime_image_tag)"
+fi
+if [ -z "${AGENT_CAPABILITY_WORKER_IMAGE:-}" ]; then
+    export AGENT_CAPABILITY_WORKER_IMAGE="$(agent_capability_worker_image_tag)"
 fi
 
 INFRA_SERVICES="$(topology_service_ids infrastructure)"
@@ -158,6 +167,15 @@ if [ "$BUILD" = true ]; then
                 log_error "Pinned Agent Runtime build did not report an image tag."
                 exit 1
             fi
+            log_step "Building matching capability worker image"
+            worker_build_output="$(bash scripts/harness/build_agent_capability_worker_image.sh)"
+            printf '%s\n' "$worker_build_output"
+            worker_image="$(printf '%s\n' "$worker_build_output" | awk -F= '$1 == "AGENT_CAPABILITY_WORKER_IMAGE_TAG" {print $2; exit}')"
+            if [ -z "$worker_image" ]; then
+                log_error "Capability worker build did not report an image tag."
+                exit 1
+            fi
+            export AGENT_CAPABILITY_WORKER_IMAGE="$worker_image"
         else
             log_info "Using Runtime and capability worker images built under the completed rust-build lease"
             for rust_artifact in agent_runtime capability_worker; do
@@ -179,7 +197,9 @@ if [ "$BUILD" = true ]; then
 fi
 
 if [ "$INFRA_ONLY" != true ]; then
-    assert_agent_runtime_image_locked "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-$(agent_runtime_image_tag)}"
+    assert_runtime_release_unit_locked \
+        "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-$(agent_runtime_image_tag)}" \
+        "${AGENT_CAPABILITY_WORKER_IMAGE:-$(agent_capability_worker_image_tag)}"
 fi
 
 # The authority wrapper is the schema owner. Stop app services first so a

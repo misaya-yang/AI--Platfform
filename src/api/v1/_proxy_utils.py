@@ -23,6 +23,7 @@ from starlette.responses import Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
 from ...services.eval.rag_trace_capture import is_retrieve_path, record_rag_retrieval_trace
+from ...services.knowledge_deletion_confirmation import prepare_knowledge_body
 
 KB_SERVICE_URL: Final[str] = os.getenv(
     "KB_SERVICE_URL", "http://knowledge-service:8092"
@@ -381,6 +382,8 @@ async def proxy_to_kb_service(
     try:
         if request.method.upper() in _BODY_METHODS:
             body = await _read_bounded_body(request, limit_bytes=limit_bytes)
+            if _request_body_kind(path) == "json":
+                body = await prepare_knowledge_body(request, user, path=path, body=body)
 
         upstream_path = f"{upstream_prefix}/{path}" if path else upstream_prefix
         user_headers = {

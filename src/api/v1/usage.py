@@ -60,7 +60,7 @@ class UsageSummaryResponse(BaseModel):
     """Usage summary response."""
 
     total_requests: int
-    success_rate: float
+    success_rate: float | None
     total_input_tokens: int
     total_output_tokens: int
     total_tokens: int
@@ -263,6 +263,12 @@ async def get_usage_summary(
         total_requests=summary.get("total_requests"),
     )
 
+    summary = dict(summary)
+    source_status = summary.pop("data_status", None)
+    if source_status in {"collection_error", "unavailable"}:
+        data_status = source_status
+    if not summary.get("total_requests"):
+        summary["success_rate"] = None
     return UsageSummaryResponse(
         **summary,
         data_status=data_status,

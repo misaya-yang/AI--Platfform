@@ -227,13 +227,13 @@ def test_initializer_refreshes_only_stale_local_runtime_identity(tmp_path: Path)
 
     assert result.returncode == 0, result.stdout + result.stderr
     values = _env_values(target)
-    expected = _env_values(ROOT / ".env.example")
-    assert values["AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION"] == expected[
-        "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION"
-    ]
-    assert values["AI_PLATFORM_AGENT_RUNTIME_IMAGE"] == expected[
-        "AI_PLATFORM_AGENT_RUNTIME_IMAGE"
-    ]
+    # Local source builds follow the current source receipt; the public
+    # .env.example can intentionally retain the published release identity.
+    receipt = json.loads((ROOT / "deploy/agent-runtime-source/source-receipt.json").read_text())
+    upstream = receipt["source"]["upstream_sha"]
+    overlay = receipt["overlay"]["sha256"]
+    assert values["AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION"] == f"{upstream}+{overlay[:12]}"
+    assert values["AI_PLATFORM_AGENT_RUNTIME_IMAGE"] == f"ai-gateway-agent-runtime:local-{upstream[:12]}-{overlay[:12]}"
 
 
 def test_generated_admin_password_is_hashed_before_database_bootstrap() -> None:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from ai_gateway_core.comm.retry import UpstreamOutcomeUnknown
 from ai_gateway_core.enums import (
     ContentType,
     InvocationMode,
@@ -55,6 +57,48 @@ def _build_dispatcher(adapter: MagicMock) -> GatewayDispatcher:
         task_manager=task_manager,
         session_manager=session_manager,
     )
+
+
+@pytest.mark.asyncio
+async def test_mutation_unknown_is_recorded_without_replaying_adapter():
+    adapter = MagicMock()
+    adapter.invoke = AsyncMock(side_effect=httpx.ReadTimeout("private upstream diagnostics"))
+    dispatcher = _build_dispatcher(adapter)
+    request = UnifiedRequest(request_id="once", service_id="agent_service", tenant_id="tenant", user_id="user", inputs=[])
+    recorder = AsyncMock()
+    with (patch("src.services.metrics.get_usage_recorder", return_value=recorder),
+          pytest.raises(UpstreamOutcomeUnknown, match="UPSTREAM_OUTCOME_UNKNOWN") as error):
+        await dispatcher.invoke(request, roles=["user"])
+    assert "private" not in str(error.value)
+    assert adapter.invoke.await_count == 1
+    assert recorder.record_usage.call_args.kwargs["status"] == "unknown"
+    assert all(row["inflight"] == 0 for row in dispatcher.admission_controller.snapshot().values())
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_close_closes_producer_and_releases_admission():
+    closed = []
+
+    async def stream(request):
+        try:
+            yield StreamChunk(request_id=request.request_id, chunk_index=0,
+                              content=ContentItem(type=ContentType.TEXT, data="part"))
+            yield StreamChunk(request_id=request.request_id, chunk_index=1,
+                              content=ContentItem(type=ContentType.TEXT, data="more"))
+        finally:
+            closed.append(True)
+
+    adapter = MagicMock()
+    adapter.stream = stream
+    dispatcher = _build_dispatcher(adapter)
+    request = UnifiedRequest(request_id="cancel", service_id="agent_service", tenant_id="tenant", user_id="user", inputs=[])
+    recorder = AsyncMock()
+    with patch("src.services.metrics.get_usage_recorder", return_value=recorder):
+        chunks = dispatcher.stream(request, roles=["user"])
+        await anext(chunks)
+        await chunks.aclose()
+    assert closed == [True]
+    assert all(row["inflight"] == 0 for row in dispatcher.admission_controller.snapshot().values())
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,10 @@
 //! dispatch per effect/kind, cancellation, and terminal event persistence.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use ai_platform_capability_contract::{
     CapabilityDescriptorV2, CapabilityEffect, CapabilityExecutionStatus, CapabilityScopeV2,
@@ -22,7 +25,7 @@ use crate::python_artifact_broker::{
     PythonArtifactBrokerError, PythonArtifactUploadContext, terminal_result,
 };
 use crate::python_code_execution::{
-    CodeInputAttachment, PythonCodeExecutionRequest, PythonSandboxBroker, PythonSandboxLimits,
+    CodeInputAttachment, PythonCodeExecutionRequest, PythonSandboxLimits,
 };
 use crate::read_capabilities::ReadCapabilityContext;
 use crate::write_capabilities::WriteCapabilityContext;
@@ -106,12 +109,12 @@ pub(super) async fn run_execution(
                 Ok(true) => {}
                 Ok(false) => {
                     tracing::warn!(%heartbeat_execution_id, "capability worker lease was lost");
-                    heartbeat_lease_lost.notify_waiters();
+                    heartbeat_lease_lost.notify_one();
                     return;
                 }
                 Err(error) => {
                     tracing::error!(%heartbeat_execution_id, %error, "failed to renew capability worker lease");
-                    heartbeat_lease_lost.notify_waiters();
+                    heartbeat_lease_lost.notify_one();
                     return;
                 }
             }
@@ -155,6 +158,8 @@ pub(super) async fn run_execution(
     }
     let timeout_ms = descriptor.timeout_ms.clamp(1, 120_000);
     let effect = descriptor.effect;
+    let python_cancelled = Arc::new(AtomicBool::new(false));
+    let python_running = AtomicBool::new(false);
     let operation = async {
         match effect {
             CapabilityEffect::Read => {
@@ -318,21 +323,26 @@ pub(super) async fn run_execution(
                         inputs,
                         limits,
                     };
+                    python_running.store(true, Ordering::Release);
                     let result = executor
-                        .execute(request)
-                        .await
-                        .map_err(|error| match error {
-                            crate::python_code_execution::CodeExecutionError::TimedOut => {
-                                OperationError::Failed("capability_timeout".into())
-                            }
-                            crate::python_code_execution::CodeExecutionError::Cancelled => {
-                                OperationError::Failed("cancelled".into())
-                            }
-                            crate::python_code_execution::CodeExecutionError::SideEffectUnknown => {
-                                OperationError::SideEffectUnknown
-                            }
-                            _ => OperationError::Failed(error.to_string()),
-                        })?;
+                        .execute_cancellable(request, python_cancelled.clone())
+                        .await;
+                    python_running.store(false, Ordering::Release);
+                    if python_cancelled.load(Ordering::Acquire) {
+                        return Err(OperationError::Failed("cancelled".into()));
+                    }
+                    let result = result.map_err(|error| match error {
+                        crate::python_code_execution::CodeExecutionError::TimedOut => {
+                            OperationError::Failed("capability_timeout".into())
+                        }
+                        crate::python_code_execution::CodeExecutionError::Cancelled => {
+                            OperationError::Failed("cancelled".into())
+                        }
+                        crate::python_code_execution::CodeExecutionError::SideEffectUnknown => {
+                            OperationError::SideEffectUnknown
+                        }
+                        _ => OperationError::Failed(error.to_string()),
+                    })?;
                     let Some(artifact_store) = &state.python_artifact_store else {
                         return Err(OperationError::Failed(
                             "python_artifact_store_unavailable".into(),
@@ -643,8 +653,11 @@ pub(super) async fn run_execution(
             )),
         }
     };
+    tokio::pin!(operation);
     let result = tokio::select! {
         _ = cancellation.notified() => {
+            python_cancelled.store(true, Ordering::Release);
+            if python_running.load(Ordering::Acquire) { let _ = (&mut operation).await; }
             if matches!(effect, CapabilityEffect::Read) {
                 Err(OperationError::Failed("cancelled".to_string()))
             } else {
@@ -652,20 +665,23 @@ pub(super) async fn run_execution(
             }
         },
         _ = lease_lost.notified() => {
+            python_cancelled.store(true, Ordering::Release);
+            if python_running.load(Ordering::Acquire) { let _ = (&mut operation).await; }
             if matches!(effect, CapabilityEffect::Read) {
                 Err(OperationError::Failed("capability_lease_lost".to_string()))
             } else {
                 Err(OperationError::SideEffectUnknown)
             }
         },
-        result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), operation) =>
-            result.unwrap_or_else(|_| {
-                if matches!(effect, CapabilityEffect::Read) {
-                    Err(OperationError::Failed("capability_timeout".to_string()))
-                } else {
-                    Err(OperationError::SideEffectUnknown)
-                }
-            }),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
+            python_cancelled.store(true, Ordering::Release);
+            if python_running.load(Ordering::Acquire) { let _ = (&mut operation).await; }
+            if matches!(effect, CapabilityEffect::Read) {
+                Err(OperationError::Failed("capability_timeout".to_string()))
+            } else { Err(OperationError::SideEffectUnknown) }
+        },
+        result = &mut operation => result,
+
     };
     heartbeat.abort();
     let mut payload = BTreeMap::new();

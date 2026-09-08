@@ -53,6 +53,20 @@ end
 return {shared_count, tenant_count}
 """
 
+# Renew only still-live ownership; never resurrect an expired or replaced lease.
+# ARGV = now_ms, expires_at_ms, member, ttl_ms.
+CAPACITY_RENEW_LUA = """
+for i = 1, #KEYS do
+  local score = redis.call('ZSCORE', KEYS[i], ARGV[3])
+  if not score or tonumber(score) <= tonumber(ARGV[1]) then return 0 end
+end
+for i = 1, #KEYS do
+  redis.call('ZADD', KEYS[i], 'XX', ARGV[2], ARGV[3])
+  redis.call('PEXPIRE', KEYS[i], ARGV[4])
+end
+return 1
+"""
+
 # KEYS[1..N] = capacity keys to release, ARGV[1] = member
 CAPACITY_RELEASE_LUA = """
 for i = 1, #KEYS do

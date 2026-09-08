@@ -145,6 +145,11 @@ def compare_arc01_to_published(
         actual = copy.deepcopy(current[key])
         expected = copy.deepcopy(published[key])
         for field, delta in INTENTIONAL_PUBLIC_OPERATION_DELTAS.get(key, {}).items():
+            # A published snapshot can consume an approved historical delta.
+            # Exact equality needs no exception; unequal values remain bound
+            # to both sides of the original explicit allowance below.
+            if expected.get(field) == actual.get(field):
+                continue
             if expected.get(field) != delta["published"]:
                 failures.append(
                     f"{key} intentional delta manifest has stale published {field!r}: "

@@ -6,8 +6,12 @@ import math
 import random
 import statistics
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
+
+from ai_gateway_core.billing import build_pricing_snapshot
 
 from .base import BaseRepository
 
@@ -355,8 +359,79 @@ def _coerce_timestamptz(value: Any) -> datetime | None:
     return None
 
 
+class EvalLeaseLost(RuntimeError):
+    """The job was cancelled, expired or reclaimed; stale writes are forbidden."""
+
+
+_OUTBOX_CLAIM: ContextVar[tuple[Any, dict[str, Any]] | None] = ContextVar("eval_outbox_claim", default=None)
+
+
 class AgentTraceRepository(BaseRepository):
     """Tenant-scoped persistence helper for Agent Trace Eval APIs."""
+
+    @contextmanager
+    def bind_outbox_claim(self, job: dict[str, Any]):
+        if not all(job.get(key) for key in ("job_id", "tenant_id", "owner_id", "claim_token")):
+            raise EvalLeaseLost("eval_outbox_claim_missing")
+        token = _OUTBOX_CLAIM.set((self, dict(job)))
+        try:
+            yield
+        finally:
+            _OUTBOX_CLAIM.reset(token)
+
+    async def _fenced_call(self, method: str, query: str, *args: Any) -> Any:
+        claim = _OUTBOX_CLAIM.get()
+        if claim is None or claim[0] is not self:
+            return await getattr(super(), method)(query, *args)
+        if not self.enabled:
+            raise EvalLeaseLost("eval_outbox_database_unavailable")
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_outbox_claim(conn)
+            # Validation and the domain write share the same short transaction;
+            # a concurrent reclaim/cancel cannot slip between these statements.
+            result = await getattr(conn, method)(query, *args)
+        if method == "fetchrow":
+            return dict(result) if result else None
+        if method == "fetch":
+            return [dict(row) for row in result]
+        return result
+
+    async def _lock_outbox_claim(self, conn: Any) -> None:
+        claim = _OUTBOX_CLAIM.get()
+        if claim is None or claim[0] is not self:
+            return
+        job = claim[1]
+        owned = await conn.fetchrow(
+            """SELECT job_id FROM agent_trace_outbox
+               WHERE job_id = $1::uuid AND tenant_id = $2 AND owner_id = $3
+               AND claim_token = $4::uuid AND status = 'running'
+               AND lease_until > clock_timestamp() FOR UPDATE""",
+            str(job["job_id"]), str(job["tenant_id"]), str(job["owner_id"]), str(job["claim_token"]),
+        )
+        if not owned:
+            raise EvalLeaseLost("eval_outbox_lease_lost")
+
+    async def abandon_outbox_claim(self) -> None:
+        claim = _OUTBOX_CLAIM.get()
+        if claim is None or claim[0] is not self:
+            raise EvalLeaseLost("eval_outbox_claim_missing")
+        await self.execute(
+            """UPDATE agent_trace_outbox SET status = 'queued', available_at = NOW(),
+               lease_until = NULL, updated_at = NOW() WHERE job_id = $1::uuid""",
+            str(claim[1]["job_id"]),
+        )
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        return await self._fenced_call("fetchrow", query, *args)
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        return await self._fenced_call("fetch", query, *args)
+
+    async def execute(self, query: str, *args: Any) -> str:
+        return await self._fenced_call("execute", query, *args)
+
+    async def executemany(self, query: str, args: list[tuple]) -> None:
+        await self._fenced_call("executemany", query, args)
 
     async def list_traces(
         self,
@@ -1441,6 +1516,64 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def resolve_eval_job_actor(self, *, tenant_id: str) -> dict[str, str]:
+        claim = _OUTBOX_CLAIM.get()
+        if claim is None or claim[0] is not self or claim[1].get("tenant_id") != tenant_id:
+            raise EvalLeaseLost("AGENT_EVAL_DELEGATION_CLAIM_REQUIRED")
+        job_id = str(claim[1]["job_id"])
+        row = await self.fetchrow(
+            """SELECT u.user_id, u.tenant_id, r.run_id
+               FROM agent_trace_outbox o JOIN eval_experiment_runs r
+                 ON r.run_id::text = o.payload->>'run_id' AND r.tenant_id = o.tenant_id
+               JOIN users u ON u.user_id = r.created_by AND u.tenant_id = r.tenant_id
+               WHERE o.job_id = $1::uuid AND o.tenant_id = $2 AND u.status = 'active'""",
+            job_id, tenant_id,
+        )
+        if not row:
+            raise RuntimeError("AGENT_EVAL_DELEGATION_SUBJECT_UNAVAILABLE")
+        return {"actor": "eval-worker", "subject": str(row["user_id"]),
+                "tenant_id": str(row["tenant_id"]), "run_id": str(row["run_id"]), "job_id": job_id}
+
+    async def freeze_eval_model_ref(
+        self, *, tenant_id: str, model_id: str, provider_id: str | None = None,
+    ) -> dict[str, Any]:
+        rows = await self.fetch(
+            """SELECT model_id, provider_id, capability_revision, input_price_per_1k, output_price_per_1k
+               FROM llm_models WHERE tenant_id = $1 AND model_id = $2 AND is_enabled = TRUE
+               AND ($3::text IS NULL OR provider_id = $3) LIMIT 2""", tenant_id, model_id, provider_id,
+        )
+        if len(rows) != 1:
+            raise ValueError("eval_model_provider_required" if len(rows) > 1 else "eval_model_unavailable")
+        row = rows[0]
+        receipt = build_pricing_snapshot(
+            tenant_id=tenant_id, provider_id=row["provider_id"], model_id=row["model_id"],
+            input_price_per_1k=row["input_price_per_1k"], output_price_per_1k=row["output_price_per_1k"],
+        )
+        return {"tenant_id": tenant_id, "model_id": row["model_id"], "provider_id": row["provider_id"],
+                "capability_revision": int(row["capability_revision"] or 1),
+                "price_version": receipt["version"], "pricing_snapshot": receipt}
+
+    async def freeze_eval_judge(self, *, tenant_id: str, evaluator: dict[str, Any]) -> dict[str, Any]:
+        if evaluator.get("evaluator_type") not in {"llm", "composite"}:
+            return evaluator
+        metadata = dict(evaluator.get("metadata") or {})
+        ref = await self.freeze_eval_model_ref(
+            tenant_id=tenant_id, model_id=str(metadata.get("judge_model_id") or "qwen3.7-plus"),
+            provider_id=metadata.get("judge_provider_id"),
+        )
+        return {**evaluator, "metadata": {**metadata, "judge_model_id": ref["model_id"],
+                "judge_provider_id": ref["provider_id"], "judge_model_ref": ref}}
+
+    async def pin_outbox_evaluator(self, *, tenant_id: str, evaluator: dict[str, Any]) -> dict[str, Any]:
+        evaluator = await self.freeze_eval_judge(tenant_id=tenant_id, evaluator=evaluator)
+        claim = _OUTBOX_CLAIM.get()
+        if claim is not None and claim[0] is self:
+            await self.execute(
+                """UPDATE agent_trace_outbox SET payload = jsonb_set(payload, '{evaluator_snapshot}', $2::jsonb)
+                   WHERE job_id = $1::uuid""", str(claim[1]["job_id"]), self._json_dumps(evaluator),
+            )
+        return evaluator
+
     async def enqueue_evaluator_run(
         self,
         *,
@@ -1449,6 +1582,10 @@ class AgentTraceRepository(BaseRepository):
         created_by: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        evaluator = await self.get_evaluator(tenant_id=tenant_id, evaluator_id=evaluator_id)
+        if evaluator is None:
+            raise ValueError("eval_evaluator_not_found")
+        evaluator = await self.freeze_eval_judge(tenant_id=tenant_id, evaluator=evaluator)
         target_snapshot = dict(payload.get("target_snapshot") or {})
         trace_id = payload.get("trace_id")
         if trace_id and "trace_id" not in target_snapshot:
@@ -1458,45 +1595,50 @@ class AgentTraceRepository(BaseRepository):
             target_snapshot.setdefault("metadata", metadata)
         if not target_snapshot and trace_id:
             target_snapshot = {"trace_id": trace_id, "metadata": metadata or {}}
-        run = await self.fetchrow(
-            """
-            INSERT INTO eval_experiment_runs (
-                experiment_id, tenant_id, evaluator_id, dataset_id, status,
-                target_snapshot, metrics, created_by
-            ) VALUES (
-                $1::uuid, $2, $3::uuid, $4::uuid, 'queued',
-                $5::jsonb, $6::jsonb, $7
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_outbox_claim(conn)
+            run = await conn.fetchrow(
+                """
+                INSERT INTO eval_experiment_runs (
+                    experiment_id, tenant_id, evaluator_id, dataset_id, status,
+                    target_snapshot, metrics, created_by
+                ) VALUES (
+                    $1::uuid, $2, $3::uuid, $4::uuid, 'queued',
+                    $5::jsonb, $6::jsonb, $7
+                )
+                RETURNING *
+                """,
+                payload.get("experiment_id"),
+                tenant_id,
+                evaluator_id,
+                payload.get("dataset_id"),
+                self._json_dumps(target_snapshot),
+                self._json_dumps({}),
+                created_by,
             )
-            RETURNING *
-            """,
-            payload.get("experiment_id"),
-            tenant_id,
-            evaluator_id,
-            payload.get("dataset_id"),
-            self._json_dumps(target_snapshot),
-            self._json_dumps({}),
-            created_by,
-        )
-        decoded_run = self._decode_eval_row(run) if run else {}
-        target_snapshot = payload.get("target_snapshot") or {}
-        trace_family = "assistant"
-        if isinstance(target_snapshot, dict):
-            family = str(target_snapshot.get("trace_family") or "").strip()
-            if family in {"assistant", "langgraph_proxy", "rag"}:
-                trace_family = family
-        job = await self.create_outbox_job(
-            tenant_id=tenant_id,
-            job_type="eval.evaluator.run",
-            payload={
-                "run_id": decoded_run.get("run_id"),
-                "evaluator_id": evaluator_id,
-                "experiment_id": payload.get("experiment_id"),
-                "dataset_id": payload.get("dataset_id"),
-                "trace_id": payload.get("trace_id"),
-                "trace_family": trace_family,
-                "target_snapshot": target_snapshot if isinstance(target_snapshot, dict) else {},
-            },
-        )
+            decoded_run = self._decode_eval_row(run) if run else {}
+            target_snapshot = payload.get("target_snapshot") or {}
+            trace_family = "assistant"
+            if isinstance(target_snapshot, dict):
+                family = str(target_snapshot.get("trace_family") or "").strip()
+                if family in {"assistant", "langgraph_proxy", "rag"}:
+                    trace_family = family
+            job_payload = {
+                    "run_id": decoded_run.get("run_id"),
+                    "evaluator_id": evaluator_id,
+                    "evaluator_snapshot": evaluator,
+                    "experiment_id": payload.get("experiment_id"),
+                    "dataset_id": payload.get("dataset_id"),
+                    "trace_id": payload.get("trace_id"),
+                    "trace_family": trace_family,
+                    "target_snapshot": target_snapshot if isinstance(target_snapshot, dict) else {},
+            }
+            job = await conn.fetchrow(
+                """INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+                   VALUES ($1, 'eval.evaluator.run', $2::jsonb) RETURNING *""",
+                tenant_id, self._json_dumps(job_payload),
+            )
+
         return {"job_id": job["job_id"], "status": "queued", "run_id": decoded_run.get("run_id")}
 
     async def enqueue_live_experiment_run(
@@ -1570,12 +1712,24 @@ class AgentTraceRepository(BaseRepository):
             "dataset_manifest_hash": dataset_manifest_hash,
             "evaluator_suite_hash": evaluator_suite_hash,
         }
+        candidate_ref = await self.freeze_eval_model_ref(
+            tenant_id=tenant_id, model_id=str(execution_config.get("model_id") or ""),
+            provider_id=execution_config.get("provider_id"),
+        )
+        evaluator_manifest = [await self.freeze_eval_judge(tenant_id=tenant_id, evaluator=item)
+                              for item in evaluator_manifest]
+        evaluator_suite_hash = _canonical_hash(evaluator_manifest)
+        public_snapshot["evaluator_suite_hash"] = evaluator_suite_hash
+        execution_config = {**execution_config, "model_id": candidate_ref["model_id"],
+                            "provider_id": candidate_ref["provider_id"], "model_ref": candidate_ref}
+        candidate_fingerprint = {**candidate_fingerprint, "model_ref": candidate_ref}
         private_config = {
             **execution_config,
             "evaluators": evaluator_manifest,
         }
 
         async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_outbox_claim(conn)
             run = await conn.fetchrow(
                 """
                 INSERT INTO eval_experiment_runs (
@@ -1693,6 +1847,8 @@ class AgentTraceRepository(BaseRepository):
         candidate_trace_id: str | None = None,
         observed_metrics: dict[str, Any] | None = None,
         error_message: str | None = None,
+        runtime_handle: dict[str, Any] | None = None,
+        dispatch_state: str | None = None,
     ) -> dict[str, Any] | None:
         row = await self.fetchrow(
             """
@@ -1701,6 +1857,8 @@ class AgentTraceRepository(BaseRepository):
                 candidate_trace_id = COALESCE($4::uuid, candidate_trace_id),
                 observed_metrics = COALESCE($5::jsonb, observed_metrics),
                 error_message = $6,
+                runtime_handle = COALESCE($7::jsonb, runtime_handle),
+                dispatch_state = COALESCE($8, dispatch_state),
                 updated_at = NOW()
             WHERE tenant_id = $1 AND run_case_id = $2::uuid
             RETURNING *
@@ -1711,6 +1869,8 @@ class AgentTraceRepository(BaseRepository):
             candidate_trace_id,
             self._json_dumps(observed_metrics) if observed_metrics is not None else None,
             error_message,
+            self._json_dumps(runtime_handle) if runtime_handle is not None else None,
+            dispatch_state,
         )
         return self._decode_eval_row(row) if row else None
 
@@ -1734,40 +1894,115 @@ class AgentTraceRepository(BaseRepository):
         return self._decode_eval_row(row) if row else {}
 
     async def claim_outbox_jobs(
-        self,
-        *,
-        limit: int = 8,
-        max_attempts: int = 5,
+        self, *, limit: int = 1, max_attempts: int = 5,
+        owner_id: str, lease_seconds: int = 60,
     ) -> list[dict[str, Any]]:
         if not self.enabled:
             return []
         async with self._pool.acquire() as conn, conn.transaction():
-            rows = await conn.fetch(
-                """
-                WITH picked AS (
-                    SELECT job_id
-                    FROM agent_trace_outbox
-                    WHERE status = 'queued'
-                      AND available_at <= NOW()
-                      AND attempts < $2
-                    ORDER BY available_at ASC, created_at ASC
-                    LIMIT $1
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE agent_trace_outbox o SET
-                    status = 'running',
-                    attempts = o.attempts + 1,
-                    updated_at = NOW()
-                FROM picked
-                WHERE o.job_id = picked.job_id
-                RETURNING o.*
-                """,
-                limit,
+            # Exhausted expired claims must become terminal, never stranded running.
+            await conn.execute(
+                """WITH expired AS (
+                    UPDATE agent_trace_outbox SET status = 'failed',
+                        last_error = 'eval_outbox_attempts_exhausted', updated_at = NOW()
+                    WHERE status = 'running' AND lease_until <= NOW() AND attempts >= $1
+                    RETURNING tenant_id, payload, job_type
+                ) UPDATE eval_experiment_runs r SET status = 'failed', finished_at = NOW(),
+                    error_message = 'eval_outbox_attempts_exhausted', updated_at = NOW()
+                  FROM expired e WHERE e.job_type = 'eval.evaluator.run'
+                  AND r.tenant_id = e.tenant_id AND r.run_id::text = e.payload->>'run_id'""",
                 max_attempts,
+            )
+            rows = await conn.fetch(
+                """WITH picked AS (
+                    SELECT job_id FROM agent_trace_outbox
+                    WHERE ((status = 'queued' AND available_at <= NOW())
+                        OR (status = 'running' AND lease_until <= NOW())) AND attempts < $2
+                    ORDER BY available_at, created_at LIMIT $1 FOR UPDATE SKIP LOCKED
+                ) UPDATE agent_trace_outbox o SET status = 'running', attempts = o.attempts + 1,
+                    owner_id = $3, claim_token = gen_random_uuid(),
+                    lease_until = NOW() + ($4::int * INTERVAL '1 second'),
+                    heartbeat_at = NOW(), updated_at = NOW()
+                  FROM picked WHERE o.job_id = picked.job_id RETURNING o.*""",
+                limit, max_attempts, owner_id, max(lease_seconds, 3),
             )
         return [self._decode_eval_row(dict(row)) for row in rows]
 
+    async def renew_outbox_claim(self, job: dict[str, Any], *, lease_seconds: int = 60) -> bool:
+        if not self.enabled:
+            return False
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE agent_trace_outbox
+                   SET lease_until = NOW() + ($5::int * INTERVAL '1 second'), heartbeat_at = NOW()
+                   WHERE job_id = $1::uuid AND tenant_id = $2 AND owner_id = $3
+                   AND claim_token = $4::uuid AND status = 'running'
+                   AND lease_until > clock_timestamp() RETURNING job_id""",
+                str(job["job_id"]), str(job["tenant_id"]), str(job["owner_id"]),
+                str(job["claim_token"]), max(lease_seconds, 3),
+            )
+        return bool(row)
+
+    async def get_candidate_runtime_evidence(
+        self, *, tenant_id: str, run_case_id: str, run_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the issued model identity and actual calls for one Eval case."""
+        row = await self.fetchrow(
+            """SELECT s.tenant_id, s.session_id, s.run_id,
+                      l.provider_id, l.model_id, l.capability_revision,
+                      s.snapshot->>'kernel_revision' AS runtime_revision,
+                      s.snapshot->'pricing'->'snapshot' AS pricing_snapshot,
+                      s.snapshot->'parameters' AS parameters,
+                      s.snapshot->'limits' AS limits
+               FROM assistant_runtime_snapshots s
+               JOIN assistant_runtime_model_leases l
+                 ON l.snapshot_id = s.snapshot_id AND l.run_id = s.run_id
+                AND l.tenant_id = s.tenant_id AND l.session_id = s.session_id
+                AND l.user_id = s.user_id
+               WHERE s.tenant_id = $1 AND s.session_id = $2 AND s.run_id = $3::uuid""",
+            tenant_id, run_case_id, run_id,
+        )
+        if row is None:
+            return None
+        result = dict(row)
+        for key in ("pricing_snapshot", "parameters", "limits"):
+            result[key] = self._decode_json(result.get(key), default={})
+        result["calls"] = await self.fetch(
+            """SELECT call_id, status, input_tokens, output_tokens, cost_microusd,
+                      dispatched_at, completed_at, error_code
+               FROM assistant_runtime_model_calls
+               WHERE tenant_id = $1 AND session_id = $2 AND run_id = $3::uuid
+               ORDER BY reserved_at, call_id""",
+            tenant_id, run_case_id, run_id,
+        )
+        return result
+
+    async def reconcile_candidate_handle(
+        self, *, tenant_id: str, run_case_id: str, handle: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        # A snapshot is persisted before Runtime dispatch. Reattach to its run;
+        # absence does NOT prove POST was unsent, so callers must never replay it.
+        rows = await self.fetch(
+            """SELECT run_id, runtime_thread_id FROM assistant_runtime_snapshots
+               WHERE tenant_id = $1 AND session_id = $2 AND user_id = $3
+               AND runtime_thread_id = $4::uuid ORDER BY created_at LIMIT 2""",
+            tenant_id, run_case_id, str(handle.get("user_id") or ""),
+            str(handle.get("thread_id") or ""),
+        )
+        if len(rows) != 1:
+            return None
+        run_id = str(rows[0]["run_id"])
+        thread_id = str(rows[0]["runtime_thread_id"])
+        return {**handle, "turn_id": run_id,
+                "events_url": f"/api/v2/agent/threads/{thread_id}/events?after_sequence=0&turn_id={run_id}"}
+
+    def _require_outbox_claim(self, job_id: str) -> None:
+        claim = _OUTBOX_CLAIM.get()
+        if claim is None or claim[0] is not self or str(claim[1].get("job_id")) != job_id:
+            raise EvalLeaseLost("eval_outbox_claim_missing")
+
     async def mark_outbox_succeeded(self, job_id: str) -> None:
+        self._require_outbox_claim(job_id)
         await self.execute(
             """
             UPDATE agent_trace_outbox
@@ -1785,6 +2020,7 @@ class AgentTraceRepository(BaseRepository):
         retry_after_seconds: int | None = None,
         max_attempts: int = 5,
     ) -> None:
+        self._require_outbox_claim(job_id)
         if retry_after_seconds is not None:
             await self.execute(
                 """
@@ -1878,6 +2114,50 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def cancel_experiment_run(
+        self, *, tenant_id: str, run_id: str, cancelled_by: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn, conn.transaction():
+            run = await conn.fetchrow(
+                "SELECT * FROM eval_experiment_runs WHERE tenant_id = $1 AND run_id = $2::uuid",
+                tenant_id, run_id,
+            )
+            if not run:
+                return None
+            if run["status"] == "succeeded":
+                return {"run_id": run_id, "status": run["status"], "cases": []}
+            # Lock jobs before domain rows, matching the worker fencing order.
+            await conn.execute(
+                """UPDATE agent_trace_outbox SET status = 'cancelled', lease_until = NULL,
+                   updated_at = NOW() WHERE tenant_id = $1 AND payload->>'run_id' = $2
+                   AND status IN ('queued', 'running')""", tenant_id, run_id,
+            )
+            await conn.execute(
+                """UPDATE eval_experiment_runs SET status = 'cancelled', finished_at = NOW(),
+                   metrics = metrics || jsonb_build_object('cancelled_by', $3::text), updated_at = NOW()
+                   WHERE tenant_id = $1 AND run_id = $2::uuid AND status IN ('queued', 'running', 'failed', 'cancelled')""",
+                tenant_id, run_id, cancelled_by,
+            )
+            current = await conn.fetchrow(
+                "SELECT status FROM eval_experiment_runs WHERE tenant_id = $1 AND run_id = $2::uuid",
+                tenant_id, run_id,
+            )
+            if current and current["status"] == "succeeded":
+                return {"run_id": run_id, "status": "succeeded", "cases": []}
+            await conn.execute(
+                """UPDATE eval_experiment_run_cases SET status = 'skipped',
+                   observed_metrics = observed_metrics || '{"execution_outcome":"cancelled"}'::jsonb,
+                   error_message = 'eval_run_cancelled', updated_at = NOW()
+                   WHERE tenant_id = $1 AND run_id = $2::uuid AND status IN ('queued', 'running')""",
+                tenant_id, run_id,
+            )
+            cases = await conn.fetch(
+                "SELECT run_case_id, runtime_handle, dispatch_state FROM eval_experiment_run_cases "
+                "WHERE tenant_id = $1 AND run_id = $2::uuid AND dispatch_state <> 'not_started'",
+                tenant_id, run_id,
+            )
+        return {"run_id": run_id, "status": "cancelled", "cases": [self._decode_eval_row(dict(row)) for row in cases]}
+
     async def get_experiment_run(
         self,
         *,
@@ -1927,6 +2207,7 @@ class AgentTraceRepository(BaseRepository):
         expected_previous_baseline_run_id: str | None = None,
     ) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_outbox_claim(conn)
             experiment = await conn.fetchrow(
                 """
                 SELECT baseline_run_id
@@ -3369,7 +3650,7 @@ class AgentTraceRepository(BaseRepository):
 
     def _decode_score_row(self, row: dict[str, Any]) -> dict[str, Any]:
         decoded = dict(row)
-        for key in ("score_id", "trace_id", "span_id"):
+        for key in ("score_id", "trace_id", "span_id", "evaluator_id"):
             if decoded.get(key) is not None:
                 decoded[key] = str(decoded[key])
         decoded["metadata"] = self._decode_json(decoded.get("metadata"), default={})
@@ -3395,6 +3676,7 @@ class AgentTraceRepository(BaseRepository):
             "candidate_fingerprint",
             "execution_config",
             "observed_metrics",
+            "runtime_handle",
             "payload",
         ):
             if key in decoded:

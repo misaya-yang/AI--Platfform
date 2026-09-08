@@ -270,8 +270,8 @@ async def stream(
         and item.get("type") in {"function_call", "function_call_output"}
         for item in raw_input
     )
-    effective_tool_choice = "auto" if has_tool_transcript else tool_choice
-    effective_parallel_tool_calls = True if has_tool_transcript else parallel_tool_calls
+    effective_tool_choice = "auto" if has_tool_transcript and tool_choice != "none" else tool_choice
+    effective_parallel_tool_calls = parallel_tool_calls
     if effective_tool_choice == "none":
         chat_tools = []
     chat_names = {

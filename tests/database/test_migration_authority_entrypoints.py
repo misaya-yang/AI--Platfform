@@ -133,6 +133,7 @@ def test_runtime_manifests_run_authority_before_applications() -> None:
     assert "psql" not in volume_init
     assert "schema.sql" not in volume_init
     assert "database.authority" not in volume_init
+    assert "COPY packages/ai-gateway-contracts/src/ai_gateway_contracts /app/ai_gateway_contracts" in migrate_dockerfile
     assert "COPY database /app/database" in migrate_dockerfile
     assert 'ENTRYPOINT ["python", "-m", "database.authority"]' in migrate_dockerfile
     assert "database.authority" in helm_job

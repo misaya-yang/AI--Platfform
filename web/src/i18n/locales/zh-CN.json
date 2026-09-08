@@ -268,6 +268,7 @@
     },
     "sources": "个来源",
     "stopGenerating": "停止生成",
+    "modelNeedsNewConversation": "所选模型的工具配置与当前对话不同，请新建对话后继续。",
     "streamInterrupted": "回复流意外中断，已保留上方生成内容；请重试。",
     "styleHint": "从上面选择一个风格，定制 AI 的回复风格。",
     "styleTitle": "自定义回复风格",

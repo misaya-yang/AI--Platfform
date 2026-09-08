@@ -225,7 +225,7 @@ function buildProviderRows(
   Object.entries(healthProviders || {}).forEach(([providerKey, provider]) => {
     const row = ensureProviderRow(rows, providerKey, "health", provider.name);
     row.configured = row.configured || Boolean(provider.configured);
-    row.status = row.configured ? "configured" : "not_configured";
+    row.status = provider.status;
     row.model_count = Math.max(row.model_count, Number(provider.model_count) || 0);
     row.enabled_model_count = Math.max(row.enabled_model_count, Number(provider.model_count) || 0);
     row.last_check = provider.last_check || row.last_check;
@@ -237,7 +237,7 @@ function buildProviderRows(
       provider.is_enabled !== false &&
       (provider.has_api_key || provider.allow_environment_credentials)
     );
-    row.status = row.configured ? "configured" : "not_configured";
+    if (!row.sources.includes("health")) row.status = row.configured ? "unverified" : "not_configured";
   });
 
   const modelCounts = new Map<string, { all: number; enabled: number; sources: Set<ProviderDataSource> }>();
@@ -325,37 +325,18 @@ function providerSourceLabel(sources: ProviderDataSource[], t: TFunction) {
   return t("services.providersStatus.sources.unknown");
 }
 
-// ── HealthBar: 10 small vertical bars ──────────────────────────────
-function HealthBar({ score }: { score: number | null }) {
-  const { darkMode } = useAppStore();
-  const c = getColors(darkMode);
-  if (score === null) return <span style={{ color: c.textFaint }}>—</span>;
-  const dots = Math.round(score / 10);
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <div style={{ display: "flex", gap: 2.5 }}>
-        {Array.from({ length: 10 }).map((_, i) => (
-          <span
-            key={i}
-            style={{
-              width: 4,
-              height: 12,
-              borderRadius: 1,
-              background: i < dots ? c.success : c.divider,
-            }}
-          />
-        ))}
-      </div>
-      <span style={{
-        fontSize: 12,
-        color: c.textPrimary,
-        fontWeight: 500,
-        fontFeatureSettings: '"tnum"',
-      }}>
-        {score.toFixed(0)}%
-      </span>
-    </div>
-  );
+function ProviderProbe({ status, lastCheck }: { status: ProviderStatus["status"]; lastCheck?: string }) {
+  const { i18n } = useTranslation();
+  const zh = i18n.language.startsWith("zh");
+  const labels = {
+    healthy: zh ? "连接已验证" : "Connection verified",
+    unhealthy: zh ? "连接失败" : "Connection failed",
+    stale: zh ? "探测已过期" : "Probe stale",
+    unverified: zh ? "尚未探测" : "Not probed",
+    configured: zh ? "尚未探测" : "Not probed",
+    not_configured: zh ? "未配置" : "Not configured",
+  };
+  return <span title={lastCheck || undefined}>{labels[status]}</span>;
 }
 
 // ── Status badge ───────────────────────────────────────────────────
@@ -870,11 +851,8 @@ export function ProviderStatusCard() {
             color: c.textMuted,
             letter: (p.name?.[0] || key[0] || "?").toUpperCase(),
           };
-          const usage = usageMap[key.toLowerCase()];
-          const hasUsage = !!usage && usage.requests > 0;
           const on = p.configured;
           const ready = p.configured && p.enabled_model_count > 0;
-          const health = p.sources.includes("health") ? (ready ? 100 : p.configured ? 35 : null) : null;
           const isLast = i === list.length - 1;
 
           return (
@@ -924,7 +902,7 @@ export function ProviderStatusCard() {
                   }
                 />
               </span>
-              <span><HealthBar score={health} /></span>
+              <span><ProviderProbe status={p.status} lastCheck={p.last_check} /></span>
               <span style={{
                 color: c.textFaint,
                 fontFamily: FONT_FAMILY.mono,
@@ -933,10 +911,10 @@ export function ProviderStatusCard() {
                 —
               </span>
               <span style={{
-                color: hasUsage ? c.textPrimary : c.textFaint,
+                color: c.textFaint,
                 fontFeatureSettings: '"tnum"',
               }}>
-                {hasUsage ? "100.0%" : "—"}
+                —
               </span>
               <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                 {on && (

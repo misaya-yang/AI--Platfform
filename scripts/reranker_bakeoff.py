@@ -77,7 +77,9 @@ def _parse_adapter(spec: str):
     if provider == "identity":
         return IdentityAdapter()
     if provider in {"bge", "dashscope", "cohere"}:
-        return RerankerAdapter(provider=provider, model=model)
+        from knowledge_service.services.knowledge.text_reranker import create_reranker
+
+        return RerankerAdapter(provider=provider, model=model, reranker_factory=create_reranker)
     if provider == "jina":
         return HttpRerankAdapter(
             name=f"jina:{model or JINA_DEFAULT_MODEL}",

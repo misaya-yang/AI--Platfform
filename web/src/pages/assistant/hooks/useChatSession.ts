@@ -291,7 +291,8 @@ async function restoreLatestRun(
     const approvalId = nonEmptyString(checkpoint?.approval_id) ?? durableApproval?.approvalId;
     const current = next[targetIndex];
     const base = current.processSummary!;
-    if ((phase === "approval_pending" || durableApproval) && approvalId) {
+    const terminal = ["succeeded", "completed", "failed", "cancelled"].includes(status);
+    if (!terminal && (phase === "approval_pending" || durableApproval) && approvalId) {
       const pendingTool = asRecord(checkpoint?.pending_tool);
       next[targetIndex] = {
         ...current,
@@ -335,7 +336,7 @@ async function restoreLatestRun(
       };
     }
     const blocksComposer =
-      ((phase === "approval_pending" || Boolean(durableApproval)) && Boolean(approvalId)) ||
+      (!terminal && (phase === "approval_pending" || Boolean(durableApproval)) && Boolean(approvalId)) ||
       status === "running" ||
       status === "queued" ||
       status === "awaiting_approval";
@@ -3393,8 +3394,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         closeStreamTrace("completed", { reason: "awaiting_approval" });
       } else if (!userCancelled) {
         const finishedAtMs = Date.now();
+        const needsNewThread = error.response?.data?.detail?.code ===
+          "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED";
+        const startFailureMessage = needsNewThread
+          ? t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")
+          : undefined;
+        if (startFailureMessage) {
+          streamTurnState = { ...streamTurnState, content: startFailureMessage };
+        }
         const accepted = settleRunTerminal("failed", finishedAtMs, {
-          error: error.message || "Unknown error",
+          error: startFailureMessage || error.message || "Unknown error",
+          ...(startFailureMessage ? { showInterruptionNotice: false } : {}),
         });
         if (accepted) {
           setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {

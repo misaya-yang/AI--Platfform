@@ -52,6 +52,13 @@ stages and verifies Linux x64. Darwin and Windows hosted native build jobs are
 still release work; the package must not be represented as supporting a target
 until its binary and receipt are assembled into the corresponding directory.
 
+Each target directory also carries the upstream `LICENSE` and `NOTICE`, platform
+attribution, the source SBOM, and source receipt. Their hashes are recorded in
+`artifact.json` and checked against the same source lock by `verify:native`.
+Missing binaries/materials, a changed binary, a non-executable file, the wrong
+ELF architecture, or a stale overlay fail packaging. These checks establish
+package identity; executing the native binary in Docker remains a separate gate.
+
 Host Cargo is not an accepted build or verification path in this repository.
 
 ## Configure

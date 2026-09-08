@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...config import get_settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...services.gateway_actor import resolve_runtime_actor
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ..deps import get_knowledge_service
 
@@ -77,39 +78,8 @@ async def _runtime_user(request: Request, svc: KnowledgeService) -> UserContext:
     }
     if not all(values.values()) or any(len(value) > 255 for value in values.values()):
         raise HTTPException(status_code=403, detail="capability identity invalid")
-    # The Worker proof binds tenant/user/session, but it intentionally carries
-    # no role claims. Rebuild roles from the Knowledge service's authoritative
-    # user row so tenant admins keep the same dataset access they had when the
-    # Gateway admitted the Runtime snapshot. Hard-coding ``["user"]`` made a
-    # dataset selectable in the UI and then rejected the exact same identity at
-    # capability execution time.
-    roles = ["user"]
-    tier = "normal"
-    get_user = getattr(getattr(svc, "db", None), "get_user", None)
-    if callable(get_user):
-        try:
-            record = await get_user(values["user_id"])
-        except Exception:
-            record = None
-        if isinstance(record, dict):
-            record_tenant = str(record.get("tenant_id") or "").strip()
-            if record_tenant and record_tenant != values["tenant_id"]:
-                raise HTTPException(status_code=403, detail="capability identity invalid")
-            if str(record.get("status") or "active").lower() != "active":
-                raise HTTPException(status_code=403, detail="capability identity invalid")
-            resolved_roles = record.get("roles")
-            if isinstance(resolved_roles, list):
-                roles = [str(role).strip() for role in resolved_roles if str(role).strip()] or roles
-            tier = str(record.get("tier") or tier)
-    # Session is a runtime lease binding rather than a UserContext field; the
-    # service still receives the immutable tenant/user identity for ACL checks.
-    return UserContext(
-        user_id=values["user_id"],
-        tenant_id=values["tenant_id"],
-        user_tier=tier,
-        user_type="runtime",
-        roles=roles,
-    )
+    return await resolve_runtime_actor(tenant_id=values["tenant_id"], user_id=values["user_id"])
+
 
 
 def _text_result(result: Any) -> dict[str, Any]:

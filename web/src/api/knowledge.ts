@@ -44,8 +44,21 @@ import type {
 // ============================================================
 
 export async function listDatasets() {
-  const { data } = await api.get<Dataset[]>("/api/v1/knowledge/datasets");
-  return data;
+  const datasets = new Map<string, Dataset>();
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const response = await api.get<Dataset[]>("/api/v1/knowledge/datasets", {
+      params: { limit: 200, ...(cursor ? { cursor } : {}) },
+    });
+    response.data.forEach((dataset) => datasets.set(dataset.dataset_id, dataset));
+    const next = response.headers["x-next-cursor"] as string | undefined;
+    if (!next) break;
+    if (seen.has(next)) throw new Error("Dataset pagination did not advance");
+    seen.add(next);
+    cursor = next;
+  } while (cursor);
+  return [...datasets.values()];
 }
 
 export async function createDataset(payload: DatasetCreateRequest) {

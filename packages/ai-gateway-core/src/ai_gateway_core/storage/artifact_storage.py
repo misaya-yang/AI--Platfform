@@ -28,10 +28,8 @@ from .image_storage import (
 )
 
 if TYPE_CHECKING:
-    # Phase 5f Batch C will move ``DatabaseStorage`` into ai_gateway_core. Until
-    # then keep the static-analysis hint pointing at the gateway location; the
-    # ``from __future__ import annotations`` above keeps this out of runtime.
-    from src.persistence.database import DatabaseStorage  # type: ignore[import]
+    from ai_gateway_core.persistence.database import DatabaseStorage
+
 
 logger = logging.getLogger(__name__)
 

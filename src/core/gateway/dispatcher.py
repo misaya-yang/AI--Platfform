@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
+from ai_gateway_core.comm.retry import RetryPolicy, UpstreamOutcomeUnknown, outcome_is_unknown
 from ai_gateway_core.enums import ContentType, StreamEventType
 from ai_gateway_core.exceptions import RateLimitExceededError, ServiceNotFoundError
 
@@ -22,6 +23,8 @@ from ...services.session.session_manager import SessionManager
 from ...services.task.task_manager import TaskManager
 from ..auth.rbac import RBAC
 from ..utils import estimate_tokens
+from .admission import CapacityAdmissionController, _finish_cleanup
+from .capacity import CapacityResolver
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
 from .validator import RequestValidator
@@ -38,6 +41,8 @@ class GatewayDispatcher:
         rbac: RBAC,
         task_manager: TaskManager,
         session_manager: SessionManager,
+        admission_controller: CapacityAdmissionController | None = None,
+        capacity_resolver: CapacityResolver | None = None,
     ):
         self.registry = registry
         self.validator = validator
@@ -46,7 +51,8 @@ class GatewayDispatcher:
         self.task_manager = task_manager
         self.session_manager = session_manager
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
-        self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self.admission_controller = admission_controller or CapacityAdmissionController()
+        self.capacity_resolver = capacity_resolver or CapacityResolver()
 
     def _inputs_to_text(self, request: UnifiedRequest) -> str:
         parts: list[str] = []
@@ -200,13 +206,17 @@ class GatewayDispatcher:
             )
         return self._circuit_breakers[service.service_id]
 
-    def _get_semaphore(self, service: ServiceDefinition) -> asyncio.Semaphore | None:
-        limit = service.concurrency_limit
-        if not limit:
-            return None
-        if service.service_id not in self._semaphores:
-            self._semaphores[service.service_id] = asyncio.Semaphore(limit)
-        return self._semaphores[service.service_id]
+    async def _admit(self, request: UnifiedRequest, service: ServiceDefinition, request_class: str):
+        budgets = await self.capacity_resolver.resolve(
+            tenant_id=request.tenant_id or "default", service_id=service.service_id,
+            request_class=request_class, upstream_group=None, provider_id=None,
+            service_config=service,
+        )
+        return await self.admission_controller.acquire(
+            budgets=budgets, tenant_id=request.tenant_id or "default",
+            user_id=request.user_id or "anonymous", service_id=service.service_id,
+            request_class=request_class, request_id=request.request_id or "",
+        )
 
     async def _record_rate_limit_event(self, request: UnifiedRequest, service_id: str) -> None:
         try:
@@ -256,34 +266,45 @@ class GatewayDispatcher:
                 await self.session_manager.add_message(session_id, "user", user_text)
 
         adapter = self.registry.get_adapter(service)
-        semaphore = self._get_semaphore(service)
         circuit = self._get_circuit_breaker(service)
-
-        async def do_call() -> UnifiedResponse:
-            return await adapter.invoke(request)
-
-        async def guarded() -> UnifiedResponse:
-            if semaphore:
-                async with semaphore:
-                    return await do_call()
-            return await do_call()
+        connector = service.connector_config or {}
+        mapping = connector.get("request_mapping") or {}
+        method = str(mapping.get("method") or connector.get("method") or "POST").upper()
+        policy = RetryPolicy(max_attempts=max(1, min(int(service.max_retries), 3)))
 
         async def with_retries() -> UnifiedResponse:
-            last_exc: Exception | None = None
-            for attempt in range(service.max_retries):
+            for attempt in range(policy.max_attempts):
                 try:
-                    return await guarded()
+                    lease = await self._admit(request, service, "sync")
+                    async with lease:
+                        return await asyncio.wait_for(adapter.invoke(request), timeout=service.timeout)
                 except Exception as exc:
-                    last_exc = exc
-                    if attempt + 1 >= service.max_retries:
+                    if outcome_is_unknown(exc, method=method) or (
+                        isinstance(exc, TimeoutError) and method not in {"GET", "HEAD", "OPTIONS"}
+                    ):
+                        raise UpstreamOutcomeUnknown("UPSTREAM_OUTCOME_UNKNOWN") from exc
+                    if attempt + 1 >= policy.max_attempts or not policy.can_retry_exception(
+                        exc, method=method, body_replayable=True,
+                        # No adapter currently declares a verified upstream idempotency contract.
+                        idempotency_key=False,
+                    ):
                         raise
-                    await asyncio.sleep(service.retry_delay)
-            raise last_exc or RuntimeError("invoke failed")
+                    await asyncio.sleep(policy.delay_seconds(attempt + 1))
+            raise RuntimeError("invoke_failed")
 
-        if service.circuit_breaker_enabled:
-            resp = await circuit.call(with_retries)
-        else:
-            resp = await with_retries()
+        try:
+            if service.circuit_breaker_enabled:
+                resp = await circuit.call(with_retries)
+            else:
+                resp = await with_retries()
+        except BaseException as exc:
+            status = "unknown" if isinstance(exc, UpstreamOutcomeUnknown) else "error"
+            await self._record_usage_event(
+                request=request, service=service, payload={},
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                request_type="invoke", status=status, output_text="",
+            )
+            raise
         t_end = time.perf_counter()
 
         # Ensure callers always receive the effective session_id if sessioning is enabled.
@@ -421,8 +442,11 @@ class GatewayDispatcher:
         stream_status = "success"
         record_stats: dict[str, Any] = {}
 
+        lease = await self._admit(request, service, "stream")
+        lease.bind_owner()
+        producer = adapter.stream(request)
         try:
-            async for chunk in adapter.stream(request):
+            async for chunk in producer:
                 event_type = None
                 if first_chunk:
                     t_first_chunk = time.perf_counter()
@@ -543,10 +567,21 @@ class GatewayDispatcher:
                 event_type=StreamEventType.STREAM_END,
                 metadata={"usage": stats} if stats else None,
             )
-        except Exception:
-            stream_status = "error"
+        except BaseException as exc:
+            stream_status = (
+                "unknown" if outcome_is_unknown(exc, method="POST")
+                or isinstance(exc, (asyncio.CancelledError, GeneratorExit)) else "error"
+            )
             raise
         finally:
+            async def close_producer() -> None:
+                try:
+                    close = getattr(producer, "aclose", None)
+                    if close is not None:
+                        await close()
+                finally:
+                    await lease.release()
+            await _finish_cleanup(asyncio.create_task(close_producer()))
             logger.info(
                 f"[STREAM FINALLY] session_id={session_id}, session_enabled={service.session_enabled if service else 'N/A'}, acc_text_len={len(acc_text)}"
             )

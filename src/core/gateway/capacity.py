@@ -174,17 +174,22 @@ def capacity_config_from_service(service_config: Any | None) -> dict[str, Any]:
         return {}
     if isinstance(service_config, dict):
         raw = service_config.get("capacity") or service_config.get("capacity_config") or {}
-        return dict(raw) if isinstance(raw, dict) else {}
-
-    capacity_config = getattr(service_config, "capacity_config", None)
-    if isinstance(capacity_config, dict):
-        return dict(capacity_config)
-
-    metadata = getattr(service_config, "metadata", None)
-    if isinstance(metadata, dict):
-        raw = metadata.get("capacity") or metadata.get("capacity_config") or {}
-        return dict(raw) if isinstance(raw, dict) else {}
-    return {}
+        result = dict(raw) if isinstance(raw, dict) else {}
+        legacy_limit = service_config.get("concurrency_limit")
+    else:
+        raw = getattr(service_config, "capacity_config", None)
+        config = getattr(service_config, "service_config", None)
+        if not isinstance(raw, dict) and config is not None:
+            capacity = getattr(config, "capacity", None)
+            raw = asdict(capacity) if capacity is not None else None
+        metadata = getattr(service_config, "metadata", None)
+        if not isinstance(raw, dict) and isinstance(metadata, dict):
+            raw = metadata.get("capacity") or metadata.get("capacity_config")
+        result = dict(raw) if isinstance(raw, dict) else {}
+        legacy_limit = getattr(service_config, "concurrency_limit", None)
+    if legacy_limit is not None and result.get("concurrency_limit") is None:
+        result["concurrency_limit"] = legacy_limit
+    return result
 
 
 def service_upstream_group(service_id: str, configured_group: Any = None) -> str | None:
@@ -247,17 +252,30 @@ class CapacityResolver:
         provider_id: str | None,
         is_admin_read: bool = False,
         service_config: Any | None = None,
+        resource_kind: str = "request",
     ) -> list[CapacityBudget]:
         del tenant_id
         capacity_config = capacity_config_from_service(service_config)
-        budgets: list[CapacityBudget] = [DEFAULT_UAT_CAPACITY_BUDGETS["gateway.total_inflight"]]
-
-        request_class_key = (
-            "gateway.stream_inflight"
-            if str(request_class or "").lower() == "stream"
-            else "gateway.non_stream_inflight"
-        )
-        budgets.append(DEFAULT_UAT_CAPACITY_BUDGETS[request_class_key])
+        if resource_kind not in {"request", "run", "provider", "capability", "job", "sse"}:
+            raise ValueError("unknown_capacity_resource_kind")
+        if resource_kind == "request":
+            budgets = [DEFAULT_UAT_CAPACITY_BUDGETS["gateway.total_inflight"]]
+            request_class_key = (
+                "gateway.stream_inflight" if request_class == "stream"
+                else "gateway.non_stream_inflight"
+            )
+            budgets.append(DEFAULT_UAT_CAPACITY_BUDGETS[request_class_key])
+        else:
+            # Parent runs and callbacks own distinct resources. A callback must
+            # never need the same final slot held by the run awaiting it.
+            limits = {"run": 8, "provider": 32, "capability": 16, "job": 4, "sse": 64}
+            budgets = [CapacityBudget(
+                key=f"gateway.{resource_kind}_inflight", limit=limits[resource_kind],
+                queue_max=32, queue_timeout_ms=3000, scope=resource_kind,
+                source="default", enforced=True, shared=resource_kind != "sse",
+            )]
+        if resource_kind == "sse":
+            return budgets
 
         if is_admin_read:
             return self._dedupe(budgets)
@@ -272,12 +290,18 @@ class CapacityResolver:
             if default is not None:
                 budgets.append(_apply_override(default, capacity_config))
             else:
-                budgets.append(self._missing_budget(key))
+                budgets.append(self._configured_or_missing(key, capacity_config))
         else:
-            budgets.append(self._missing_budget(f"service.{service_id or 'unknown'}"))
+            budgets.append(self._configured_or_missing(f"service.{service_id or 'unknown'}", capacity_config))
 
+        if resource_kind != "request":
+            budgets = [
+                CapacityBudget(**{**asdict(budget), "key": f"{resource_kind}.{budget.key}"})
+                if budget.scope in {"upstream", "service"} else budget
+                for budget in budgets
+            ]
         provider_key = provider_budget_key(provider_id)
-        if provider_key:
+        if provider_key and resource_kind in {"request", "provider"}:
             budgets.append(DEFAULT_UAT_CAPACITY_BUDGETS[provider_key])
 
         return self._dedupe(budgets)
@@ -296,6 +320,17 @@ class CapacityResolver:
             )
         return rows
 
+
+    @classmethod
+    def _configured_or_missing(cls, key: str, config: dict[str, Any]) -> CapacityBudget:
+        missing = cls._missing_budget(key)
+        if config.get("concurrency_limit", config.get("limit")) is None:
+            return missing
+        configured = CapacityBudget(**{
+            **asdict(missing), "enforced": True, "shared": True, "source_status": "real",
+            "queue_max": 16, "queue_timeout_ms": 3000,
+        })
+        return _apply_override(configured, config)
 
     @staticmethod
     def _missing_budget(key: str) -> CapacityBudget:

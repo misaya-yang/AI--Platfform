@@ -14,6 +14,7 @@ import httpx
 from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 
+from ...core.gateway.admission import _finish_cleanup
 from .capability_catalog import (
     CapabilityCatalogClient,
     HttpCapabilityCatalogClient,
@@ -22,6 +23,7 @@ from .capability_catalog import (
 from .control import (
     approvals,
     capability_catalog,
+    capacity,
     event_stream,
     memory_context,
     run_ledger,
@@ -79,11 +81,18 @@ class AgentRuntimeControlPlane:
         memory_service: Any | None = None,
         http_client: httpx.AsyncClient | None = None,
         capability_catalog_client: CapabilityCatalogClient | None = None,
+        admission_controller: Any | None = None,
+        capacity_resolver: Any | None = None,
     ) -> None:
         if not runtime_url or not runtime_internal_token or not model_plane_base_url:
             raise ValueError("Agent Runtime control-plane endpoints and token are required")
         if not kernel_revision:
             raise ValueError("Agent Runtime kernel revision is required")
+        self.admission_controller = admission_controller
+        self.capacity_resolver = capacity_resolver
+        self._run_capacity_leases: dict[str, Any] = {}
+        self._run_capacity_tasks: dict[str, Any] = {}
+        self._run_capacity_contexts: dict[str, Any] = {}
         self.database = database
         self.model_service = model_service
         self.provider_service = provider_service
@@ -156,6 +165,7 @@ class AgentRuntimeControlPlane:
         self._capability_plane_url = normalized
 
     async def close(self) -> None:
+        await capacity.close(self)
         if self._owns_http_client:
             await self.http_client.aclose()
 
@@ -419,28 +429,57 @@ class AgentRuntimeControlPlane:
         memory_profile: str | None = None,
         enable_dynamic_tools: bool = True,
     ) -> AgentTurn:
-        return await turn_start.start_turn(
-            self,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            message=message,
-            model_id=model_id,
-            reasoning_option=reasoning_option,
-            legacy_thinking_level=legacy_thinking_level,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            readonly_capabilities=readonly_capabilities,
-            resolved_agent_snapshot=resolved_agent_snapshot,
-            resolved_agent_launch=resolved_agent_launch,
-            developer_instructions=developer_instructions,
-            style_guidance=style_guidance,
-            memory_mode=memory_mode,
-            memory_profile=memory_profile,
-            enable_dynamic_tools=enable_dynamic_tools,
-            _logger=logger,
-            _provider_revision_func=_provider_revision,
+        lease = await capacity.acquire(self, tenant_id=tenant_id, user_id=user_id,
+                                       kind="run", request_id=str(uuid.uuid4()))
+        pending: dict[str, Any] = {}
+        capture = capacity.PENDING_START.set(pending)
+        try:
+            turn = await turn_start.start_turn(
+                self,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                message=message,
+                model_id=model_id,
+                reasoning_option=reasoning_option,
+                legacy_thinking_level=legacy_thinking_level,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                readonly_capabilities=readonly_capabilities,
+                resolved_agent_snapshot=resolved_agent_snapshot,
+                resolved_agent_launch=resolved_agent_launch,
+                developer_instructions=developer_instructions,
+                style_guidance=style_guidance,
+                memory_mode=memory_mode,
+                memory_profile=memory_profile,
+                enable_dynamic_tools=enable_dynamic_tools,
+                _logger=logger,
+                _provider_revision_func=_provider_revision,
         )
+        except BaseException as exc:
+            if lease is not None:
+                pending_turn = pending.get("turn")
+                if pending_turn is None or isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                    await lease.release()
+                else:
+                    scope = {"tenant_id": tenant_id, "user_id": user_id, "session_id": session_id}
+                    self._run_capacity_leases[pending_turn.run_id] = lease
+                    self._run_capacity_contexts[pending_turn.run_id] = (pending_turn, scope)
+                    if await _finish_cleanup(asyncio.create_task(capacity.stop_run(self, pending_turn, scope))):
+                        await capacity.release_run(self, pending_turn.run_id)
+            raise
+        finally:
+            capacity.PENDING_START.reset(capture)
+        if lease is not None:
+            self._run_capacity_leases[turn.run_id] = lease
+            self._run_capacity_contexts[turn.run_id] = (turn, {
+                "tenant_id": tenant_id, "user_id": user_id, "session_id": session_id,
+            })
+            self._run_capacity_tasks[turn.run_id] = asyncio.create_task(capacity.watch_run(
+                self, turn, lease, tenant_id=tenant_id, user_id=user_id, session_id=session_id,
+            ))
+        return turn
+
 
     async def stream_events(
         self,
@@ -450,15 +489,18 @@ class AgentRuntimeControlPlane:
         user_id: str,
         session_id: str,
     ) -> AsyncIterator[bytes]:
-        async for frame in event_stream.stream_events(
-            self,
-            turn=turn,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            _logger=logger,
-        ):
-            yield frame
+        lease = await capacity.acquire(self, tenant_id=tenant_id, user_id=user_id,
+                                       kind="sse", request_id=str(uuid.uuid4()))
+        chunks = event_stream.stream_events(
+            self, turn=turn, tenant_id=tenant_id, user_id=user_id, session_id=session_id, _logger=logger,
+        )
+        try:
+            async with contextlib.aclosing(chunks):
+                async for frame in chunks:
+                    yield frame
+        finally:
+            if lease is not None:
+                await lease.release()
 
     async def stream_thread_events(
         self,
@@ -471,18 +513,26 @@ class AgentRuntimeControlPlane:
         limit: int = 1000,
         turn_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        async for envelope in event_stream.stream_thread_events(
-            self,
-            runtime_thread_id=runtime_thread_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            after_sequence=after_sequence,
-            limit=limit,
-            turn_id=turn_id,
-            _projector=_project_child_runtime_event,
-        ):
-            yield envelope
+        lease = await capacity.acquire(self, tenant_id=tenant_id, user_id=user_id,
+                                       kind="sse", request_id=str(uuid.uuid4()))
+        chunks = event_stream.stream_thread_events(
+                self,
+                runtime_thread_id=runtime_thread_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                after_sequence=after_sequence,
+                limit=limit,
+                turn_id=turn_id,
+                _projector=_project_child_runtime_event,
+        )
+        try:
+            async with contextlib.aclosing(chunks):
+                async for envelope in chunks:
+                    yield envelope
+        finally:
+            if lease is not None:
+                await lease.release()
 
     async def interrupt_turn(
         self,
@@ -542,6 +592,7 @@ class AgentRuntimeControlPlane:
 
     async def _complete_run(self, run_id: uuid.UUID, terminal_status: str) -> None:
         await run_ledger.complete_run(self, run_id, terminal_status)
+        await capacity.release_run(self, str(run_id))
 
     async def _fail_run(self, run_id: uuid.UUID, snapshot_id: uuid.UUID, reason: str) -> None:
         await run_ledger.fail_run(self, run_id, snapshot_id, reason)

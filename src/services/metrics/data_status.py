@@ -13,7 +13,7 @@ def compute_data_status(
         now = datetime.now(timezone.utc)
 
     if last_ingested_at is None:
-        return "delayed", 9999
+        return ("empty" if total_requests == 0 else "delayed"), 9999
 
     # 确保时区一致：如果 last_ingested_at 是 offset-naive，假定为 UTC
     if last_ingested_at.tzinfo is None:

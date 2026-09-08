@@ -8,15 +8,29 @@ export async function* readSsePayloads(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let wireBytes = 0;
+  let framesSeen = 0;
+  const started = Date.now();
+  const maxFrameBytes = 1024 * 1024;
+  const maxWireBytes = 64 * 1024 * 1024;
+  const maxDurationMs = 300_000;
   try {
     while (true) {
-      const result = await readWithTimeout(reader, idleTimeoutMs, signal);
+      const remaining = maxDurationMs - (Date.now() - started);
+      if (remaining <= 0) throw new CompatibilityError("provider_stream_deadline");
+      const result = await readWithTimeout(reader, Math.min(idleTimeoutMs, remaining), signal);
       if (result.done) break;
       if (!result.value) continue;
+      wireBytes += result.value.byteLength;
+      if (wireBytes > maxWireBytes) throw new CompatibilityError("provider_stream_bytes_limit");
+      if (result.value.byteLength > 2 * maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
       buffer += decoder.decode(result.value, { stream: true });
       const frames = buffer.split(/\r?\n\r?\n/);
       buffer = frames.pop() ?? "";
+      if (Buffer.byteLength(buffer) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
       for (const frame of frames) {
+        if (Buffer.byteLength(frame) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
+        if (++framesSeen > 100_000) throw new CompatibilityError("provider_event_limit");
         const data = frame.split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trimStart())
