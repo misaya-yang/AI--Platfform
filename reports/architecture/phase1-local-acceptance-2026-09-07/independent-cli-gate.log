@@ -1,0 +1,22 @@
+
+> ai-gateway-cli@1.5.0 typecheck
+> tsc --noEmit
+
+
+> ai-gateway-cli@1.5.0 test
+> vitest run --passWithNoTests
+
+
+ RUN  v4.1.9 /Users/yang/projects/AI--Platfform/sdk/cli
+
+
+ Test Files  8 passed (8)
+      Tests  72 passed (72)
+   Start at  22:30:16
+   Duration  590ms (transform 483ms, setup 0ms, import 713ms, tests 705ms, environment 0ms)
+
+
+> ai-gateway-cli@1.5.0 build
+> node esbuild.config.js
+
+Built dist/cli.js

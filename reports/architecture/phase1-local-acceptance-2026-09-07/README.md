@@ -25,7 +25,7 @@
 
 `results.json` 保存各项观察；同目录日志与截图对应具体执行。源码热更新后的容器由 `live-source-identity.json` 比对确认，不能仅凭旧基础镜像 tag 认定源码版本。完整 frozen release unit/数据库回切、独立 fresh machine、公开 registry、外部 Rust CI 及其他 OS/架构发行仍未验证。当前数据库 epoch floor/ceiling 为 2；禁止直接回退到恢复旧 ACL 或 Knowledge 用户表权限的旧二进制。
 
-原始本地凭据、`.env`、provider key 均不进入本目录。Linux arm64 native CLI已在Docker内构建并执行`--version`及`exec --help`，来源、可执行格式、许可证/NOTICE/SBOM材料校验通过；真实native exec另通过本地受控Responses端点返回`P1_NATIVE_CLI_OK`与`turn.completed`（`native-cli-exec.json`），npm pack预览13文件包含ELF与全部材料；未跑原生CLI真实provider任务，也未运行发布目标Linux x64矩阵。真实Eval HTTP已完成候选运行和终态，详见`eval-http.json`；后续修复回归631 passed、3 skipped，详见`repair-regression.log`。Git结果由提交和合并后的记录补充。
+原始本地凭据、`.env`、provider key 均不进入本目录。Linux arm64 native CLI已在Docker内构建并执行`--version`及`exec --help`，来源、可执行格式、许可证/NOTICE/SBOM材料校验通过；真实native exec另通过本地受控Responses端点返回`P1_NATIVE_CLI_OK`与`turn.completed`（`native-cli-exec.json`），npm pack预览13文件包含ELF与全部材料；未跑原生CLI真实provider任务，也未运行发布目标Linux x64矩阵。真实Eval HTTP已完成候选运行和终态，详见`eval-http.json`；后续修复回归631 passed、3 skipped，详见`repair-regression.log`。实现提交`5f36974df3a9`已快进合并到本地`main`，未push；随后仅补存本次验收证据。
 
 
 ## 最后评测闭环
@@ -35,3 +35,7 @@
 另两次temperature 0/max_tokens 512运行未通过marker质量断言，仍保留为失败；其输入完整，原因未归结为模型随机，也未以正常配置通过覆盖它。评测任务处理完成、样本质量通过、发行gate通过是不同状态。本轮证明平台能执行、捕获并如实区分这些结果，不保证任意模型/采样预算都满足质量目标。
 
 最终容器上的内置浏览器对比页已验证，显示失败基线0分与正常配置候选1分；回归Gate仍为fail，原因包括原完整prompt/tool指纹缺失、采样变化和仅一对样本证据不足。未点击提升Baseline，也不把单样本正向smoke冒充正式质量发布门禁。该完整对比证据属于后续发行要求，见`eval-comparison.png`。
+
+## Git收尾
+
+实现提交：`5f36974df3a9a58ca6b4fe907389399c32e8a537`。分支`codex/agent-platform-vnext-phase1`已快进合并本地`main`；未推送。已有`docs/plans/agent-runtime-post-upgrade-core-fixes-2026-08.md`保持原始字节，作为原有未跟踪草稿保留，不纳入本轮提交。

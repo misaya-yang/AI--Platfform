@@ -1,0 +1,13 @@
+Harness contract check
+-- structural lint --
+  required docs           : 18
+  budgeted files          : 2
+  relative links resolved : 112
+  workspace files scanned : 3342
+-- semantic validation --
+  make targets referenced : 55
+  gate schemas validated  : 37
+  programs inspected      : 17
+  WARN  program deploy/runbooks/kb-rag-ui-t5 declares unknown loop-state schema (none)
+
+Harness contract OK.

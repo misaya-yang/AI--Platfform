@@ -17,5 +17,6 @@
     "native CLI real-provider task and published Linux x64 matrix",
     "formal Eval regression promotion: legacy full prompt/tool fingerprint plus adequate paired sample evidence"
   ],
-  "path_base": "repository_root"
+  "path_base": "repository_root",
+  "implementation_commit": "5f36974df3a9a58ca6b4fe907389399c32e8a537"
 }

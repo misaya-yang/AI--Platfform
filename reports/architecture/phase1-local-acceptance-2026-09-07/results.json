@@ -92,7 +92,14 @@
     },
     "trace_get_http_status": 200
   },
-  "merge": "not yet performed",
+  "merge": {
+    "status": "PASS",
+    "strategy": "fast-forward",
+    "source_branch": "codex/agent-platform-vnext-phase1",
+    "target_branch": "main",
+    "implementation_commit": "5f36974df3a9a58ca6b4fe907389399c32e8a537",
+    "pushed": false
+  },
   "source_verification": {
     "gateway_python_files": 452,
     "knowledge_api_python_files": 271,
@@ -115,5 +122,6 @@
     "details": "eval-low-budget-failed.json",
     "scope": "actual run completed, expected marker absent; original failure preserved. Not attributed to randomness or claimed fixed."
   },
-  "docker_final": "PASS: final Gateway, Knowledge API/worker, Frontend source layers and paired Runtime/Worker healthy; migration exit0"
+  "docker_final": "PASS: final Gateway, Knowledge API/worker, Frontend source layers and paired Runtime/Worker healthy; migration exit0",
+  "text_log_normalization": "ANSI styling and trailing whitespace removed for committed reports; original command logs remain in tmp/agent-platform-vnext-phase1; outcomes unchanged."
 }

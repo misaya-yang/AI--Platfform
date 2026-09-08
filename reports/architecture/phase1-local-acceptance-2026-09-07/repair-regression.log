@@ -1,0 +1,100 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.15, pytest-9.1.0, pluggy-1.6.0
+rootdir: /Users/yang/projects/AI--Platfform
+configfile: pyproject.toml
+plugins: langsmith-0.8.16, anyio-4.14.0, cov-7.1.0, asyncio-1.4.0, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 634 items
+
+tests/services/eval/test_agent_observation_adapter.py .................. [  2%]
+........................                                                 [  6%]
+tests/services/eval/test_agent_publish_gate.py ....                      [  7%]
+tests/services/eval/test_agent_runtime_eval_contract.py ........         [  8%]
+tests/services/eval/test_agent_version_candidate.py .............        [ 10%]
+tests/services/eval/test_assistant_capability_contract.py .........      [ 11%]
+tests/services/eval/test_assistant_trace_capture.py .                    [ 12%]
+tests/services/eval/test_candidate_handle_recovery.py ...                [ 12%]
+tests/services/eval/test_candidate_runner.py .......                     [ 13%]
+tests/services/eval/test_coding_parallel_fixture.py ....ss.......s....   [ 16%]
+tests/services/eval/test_cra_compliance_research_fixture.py ............ [ 18%]
+..                                                                       [ 18%]
+tests/services/eval/test_drive_shipped_entrypoints.py ...                [ 19%]
+tests/services/eval/test_eval_candidate_client.py .........              [ 20%]
+tests/services/eval/test_eval_candidate_identity.py .................... [ 23%]
+....                                                                     [ 24%]
+tests/services/eval/test_eval_delegation.py ..                           [ 24%]
+tests/services/eval/test_eval_lease_fencing.py ......                    [ 25%]
+tests/services/eval/test_eval_llm_client.py .....                        [ 26%]
+tests/services/eval/test_eval_permissions.py ....                        [ 27%]
+tests/services/eval/test_evaluator_executor.py ......................... [ 31%]
+............................................                             [ 38%]
+tests/services/eval/test_experiment_statistics.py .....                  [ 38%]
+tests/services/eval/test_golden_regression_gate.py ..................... [ 42%]
+.............                                                            [ 44%]
+tests/services/eval/test_ingest_roundtrip.py ..                          [ 44%]
+tests/services/eval/test_kb_ragas_client.py ..........                   [ 46%]
+tests/services/eval/test_kb_ragas_service.py ..........                  [ 47%]
+tests/services/eval/test_online_sampling.py ..........                   [ 49%]
+tests/services/eval/test_outbox_worker.py .........                      [ 50%]
+tests/services/eval/test_rag_regression_gate.py ........................ [ 54%]
+...........                                                              [ 56%]
+tests/services/eval/test_real_finance_salesforce_eval.py ..............  [ 58%]
+tests/services/eval/test_rerank_bakeoff.py ........................      [ 62%]
+tests/services/eval/test_rerank_bakeoff_cases.py .....                   [ 62%]
+tests/services/eval/test_retrieval_metrics.py ........................   [ 66%]
+tests/services/eval/test_runtime_model_evidence.py ..........            [ 68%]
+tests/services/eval/test_search_indexes.py ..                            [ 68%]
+tests/services/eval/test_stateful_agent_eval.py ........................ [ 72%]
+.............................................                            [ 79%]
+tests/services/eval/test_trace_capture_helpers.py ................       [ 82%]
+tests/services/eval/test_trace_feedback.py .......                       [ 83%]
+tests/services/eval/test_trace_retention_scheduler.py ..                 [ 83%]
+tests/api/test_eval_traces.py .......................................... [ 90%]
+....                                                                     [ 90%]
+tests/api/test_eval_run_cancel.py ...                                    [ 91%]
+tests/services/agent_runtime/test_capacity_lifecycle.py .......          [ 92%]
+tests/proxy/test_capacity_lease_lifecycle.py ..........                  [ 93%]
+tests/core/gateway/test_circuit_breaker.py ............                  [ 95%]
+tests/core/gateway/test_validator.py ..........                          [ 97%]
+tests/scripts/test_open_source_container_distribution.py ............... [ 99%]
+..                                                                       [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID passthrough_api_v1_langgraph__full_path__delete for function passthrough at /Users/yang/projects/AI--Platfform/src/api/v1/langgraph.py
+    warnings.warn(message, stacklevel=1)
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID transparent_proxy_handler_api_v1_proxy__service_name___path__delete for function transparent_proxy_handler at /Users/yang/projects/AI--Platfform/src/api/v1/proxy.py
+    warnings.warn(message, stacklevel=1)
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID transparent_proxy_root_handler_api_v1_proxy__service_name__delete for function transparent_proxy_root_handler at /Users/yang/projects/AI--Platfform/src/api/v1/proxy.py
+    warnings.warn(message, stacklevel=1)
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID proxy_knowledge_api_v1_knowledge__path__delete for function proxy_knowledge at /Users/yang/projects/AI--Platfform/src/api/v1/knowledge.py
+    warnings.warn(message, stacklevel=1)
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID proxy_kb_tools_api_v1_kb_tools__path__delete for function proxy_kb_tools at /Users/yang/projects/AI--Platfform/src/api/v1/kb_tools.py
+    warnings.warn(message, stacklevel=1)
+
+tests/api/test_eval_traces.py::test_eval_openapi_paths_are_registered
+tests/api/test_eval_traces.py::test_eval_openapi_and_web_types_expose_shared_trace_contract
+  /Users/yang/projects/AI--Platfform/.venv/lib/python3.11/site-packages/fastapi/openapi/utils.py:252: UserWarning: Duplicate Operation ID proxy_knowledge_v1_knowledge__path__delete for function proxy_knowledge at /Users/yang/projects/AI--Platfform/src/api/v1/knowledge.py
+    warnings.warn(message, stacklevel=1)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [3] tests/services/eval/test_coding_parallel_fixture.py:53: pinned coding sandbox image is not available locally
+================= 631 passed, 3 skipped, 13 warnings in 5.93s ==================

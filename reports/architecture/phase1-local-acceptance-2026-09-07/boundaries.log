@@ -1,0 +1,16 @@
+[ok] all 7 synthetic violations detected, 13 files scanned
+[ok] legal imports (gateway->core, app->core, core->contracts, relative) produce nothing
+[ok] matching dated allowlist entry suppresses exactly its violation
+[ok] stale allowlist entry flagged
+[ok] expired allowlist entry flagged as violation
+SELFTEST OK: synthetic boundary violations fail closed, legal imports pass
+scanned 599 files; 0 violation(s), 0 allowlisted, 0 expired allowlist entry(ies), 0 stale entry(ies)
+OK: import boundary intact (evidence: tmp/gate-evidence/architecture-boundary-gate.json)
+self-test OK: all fabricated violations were detected
+core boundary gate OK — 11 contracts modules within allowlist, 133 core modules (no growth), knowledge→core = 13 (baseline 13), 5 shims + 1 mixed exports tracked; baseline source=1d25e67937dd387a572e8006607d859d0991f977
+[ok] safe singleton plus scalable stateless/worker topology passes
+[ok] replicaCount=2 is rejected
+[ok] topology cannot self-bless Gateway scale
+[ok] values-driven replicas, HPA, and rollout overlap are rejected
+SELFTEST OK: single-instance guard negative cases detected
+OK: Gateway and Agent Runtime remain fail-closed single-instance; evidence=tmp/gate-evidence/single-instance-guard.json

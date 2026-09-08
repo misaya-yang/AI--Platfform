@@ -1,0 +1,6 @@
+ WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+
+> ai-gateway-cli@1.5.0 verify:native /Users/yang/projects/AI--Platfform/sdk/cli
+> node scripts/verify-native-package.mjs
+
+Verified 1 native CLI package target(s): linux-arm64

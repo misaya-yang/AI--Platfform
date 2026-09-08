@@ -1,0 +1,25 @@
+
+=== Docker Compose Services ===
+NAME                                   IMAGE                                                                COMMAND                  SERVICE                   CREATED             STATUS                            PORTS
+ai-gateway-agent-capability-worker-1   ai-gateway-agent-capability-worker:local-94cbbddafc17-80992c9505b0   "ai-platform-capabil…"   agent-capability-worker   About an hour ago   Up 20 seconds (healthy)           8095/tcp
+ai-gateway-agent-runtime               ai-gateway-agent-runtime:local-94cbbddafc17-80992c9505b0             "ai-platform-agent-r…"   agent-runtime             About an hour ago   Up 14 seconds (healthy)           8094/tcp
+ai-gateway-backend                     ai-gateway-gateway-local-42e86fbb5b10:2.0.0                          "python -m uvicorn s…"   gateway                   28 seconds ago      Up 9 seconds (healthy)            127.0.0.1:8080->8080/tcp
+ai-gateway-frontend                    ai-gateway-frontend-local-4919e4f264ff:2.0.0                         "/docker-entrypoint.…"   frontend                  28 seconds ago      Up 3 seconds (health: starting)   127.0.0.1:8081->80/tcp
+ai-gateway-knowledge-service           ai-gateway-knowledge-local-f3c50c535bf1:2.0.0                        "python -m uvicorn k…"   knowledge-service         28 seconds ago      Up 25 seconds (healthy)           127.0.0.1:8092->8092/tcp
+ai-gateway-knowledge-worker-1          ai-gateway-knowledge-local-f3c50c535bf1:2.0.0                        "python -m uvicorn k…"   knowledge-worker          28 seconds ago      Up 25 seconds (healthy)           8092/tcp
+ai-gateway-pg                          postgres:16-alpine                                                   "docker-entrypoint.s…"   postgres                  8 days ago          Up 6 hours (healthy)              127.0.0.1:5432->5432/tcp
+ai-gateway-qdrant                      qdrant/qdrant:v1.18.2                                                "./entrypoint.sh"        qdrant                    8 days ago          Up 6 hours (healthy)              127.0.0.1:6333-6334->6333-6334/tcp
+ai-gateway-redis                       redis:7-alpine                                                       "docker-entrypoint.s…"   redis                     8 days ago          Up 6 hours (healthy)              127.0.0.1:6379->6379/tcp
+
+=== Health Checks ===
+  PostgreSQL:        Healthy
+  Redis:             Healthy
+  Qdrant:            Healthy
+  Knowledge:         Healthy
+  Knowledge worker:  Healthy
+  Gateway:           Healthy
+  Gateway metrics:   Healthy
+  Frontend:          Healthy
+  Agent Runtime:     Healthy
+  Capability worker: Healthy
+  Topology replicas: Healthy

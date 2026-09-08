@@ -11,7 +11,7 @@
   "active_feature": "P1-F011",
   "iteration": 2,
   "max_iterations": 5,
-  "last_result": "P1 local integration verified: code, regression, paired Docker runtime, in-app browser and real-provider journeys; external release obligations remain NOT_VERIFIED.",
+  "last_result": "P1 local integration verified and implementation fast-forward merged into local main; external release and formal Eval promotion remain unverified.",
   "next_action": "本地集成收尾；如启动公开发行，先补独立fresh-machine、完整冻结回滚与目标平台证据。",
   "blockers": [],
   "confirmation": null,
@@ -366,5 +366,7 @@
     "Darwin/Windows and full multi-architecture native distribution",
     "native CLI real-provider task and published Linux x64 matrix",
     "formal Eval regression promotion: legacy full prompt/tool fingerprint plus adequate paired sample evidence"
-  ]
+  ],
+  "merged_implementation_commit": "5f36974df3a9a58ca6b4fe907389399c32e8a537",
+  "current_branch": "main"
 }
