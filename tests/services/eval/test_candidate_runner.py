@@ -141,7 +141,7 @@ async def test_candidate_runner_persists_v2_trace_before_loading_detail(
                 trace_id=trace_id,
                 output="EVAL-V2-OK",
                 usage={"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
-                trace_payload={"trace_id": trace_id, "trace_family": "assistant"},
+                trace_payload={"trace_id": trace_id, "trace_family": "assistant", "user_id": "eval-user"},
             )
 
     repository = Repository()
@@ -162,7 +162,7 @@ async def test_candidate_runner_persists_v2_trace_before_loading_detail(
 
     assert result["trace_id"] == trace_id
     assert len(repository.ingested) == 1
-    assert repository.ingested[0]["created_by"] == "eval-candidate"
+    assert repository.ingested[0]["created_by"] == "eval-user"
     assert repository.ingested[0]["enqueue"] is False
 
 

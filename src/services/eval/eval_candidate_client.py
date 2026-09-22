@@ -23,6 +23,7 @@ from .assistant_trace_capture import build_assistant_runtime_trace
 
 V2_THREADS_PATH = "/api/v2/agent/threads"
 AUTH_IDENTITY_PATH = "/api/v1/auth/me"
+# Legacy trace lookup only; new traces use the authenticated candidate subject.
 EVAL_CANDIDATE_USER_ID = "eval-candidate"
 
 
@@ -308,7 +309,7 @@ class EvalCandidateClient:
                         if trace_id and on_run_started is not None:
                             await on_run_started(trace_id)
                     elif event_type == "context_budget" and isinstance(data, dict):
-                        fingerprint = candidate_fingerprint_from_context(data)
+                        fingerprint.update(candidate_fingerprint_from_context(data))
                     elif event_type == "text_delta":
                         if first_token_at is None:
                             first_token_at = time.time()
@@ -359,7 +360,7 @@ class EvalCandidateClient:
                 run_id=trace_id,
                 request_id=run_case_id,
                 tenant_id=tenant_id,
-                user_id=EVAL_CANDIDATE_USER_ID,
+                user_id=identity["user_id"],
                 session_id=run_case_id,
                 message=message,
                 snapshot={

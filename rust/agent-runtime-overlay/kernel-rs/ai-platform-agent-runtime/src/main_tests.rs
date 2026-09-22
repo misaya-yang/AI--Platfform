@@ -29,3 +29,15 @@ fn isolated_agent_home_rejects_foreign_or_forbidden_state() {
     fs::write(marked.path().join("AGENTS.md"), "untrusted").expect("fixture write");
     assert!(prepare_isolated_agent_home(marked.path()).is_err());
 }
+
+#[test]
+fn gateway_catalog_keeps_all_upstream_models_on_supported_responses_wire() {
+    let home = TempDir::new().expect("test home");
+    let path = super::prepare_gateway_model_catalog(home.path()).expect("catalog");
+    let actual: codex_protocol::openai_models::ModelsResponse =
+        serde_json::from_slice(&fs::read(path).expect("catalog file")).expect("catalog JSON");
+    let upstream = codex_models_manager::bundled_models_response().expect("upstream catalog");
+    assert_eq!(actual.models.len(), upstream.models.len());
+    assert!(!actual.models.is_empty());
+    assert!(actual.models.iter().all(|model| !model.use_responses_lite));
+}

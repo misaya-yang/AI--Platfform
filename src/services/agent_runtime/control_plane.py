@@ -319,12 +319,13 @@ class AgentRuntimeControlPlane:
         tenant_id: str,
         user_id: str,
         session_id: str,
-        model_id: str,
+        model_id: str | None,
         base_instructions: str | None = BASE_AGENT_INSTRUCTIONS_V1,
         developer_instructions: str | None = None,
         model_context_window: int | None = None,
         auto_compact_token_limit: int | None = None,
-        native_web_search_enabled: bool = False,
+        native_web_search_enabled: bool | None = False,
+        tool_policy: dict[str, Any] | None = None,
     ) -> None:
         await thread_lifecycle.resume_thread(
             self,
@@ -338,6 +339,7 @@ class AgentRuntimeControlPlane:
             model_context_window=model_context_window,
             auto_compact_token_limit=auto_compact_token_limit,
             native_web_search_enabled=native_web_search_enabled,
+            tool_policy=tool_policy,
         )
 
     async def verify_thread(

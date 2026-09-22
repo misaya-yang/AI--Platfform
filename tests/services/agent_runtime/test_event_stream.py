@@ -148,3 +148,30 @@ async def test_whole_thread_stream_continues_after_each_turn_terminal() -> None:
     finally:
         await stream.aclose()
         await client.aclose()
+
+
+@pytest.mark.parametrize("event_type,status", [("run_finished", "succeeded"), ("cancelled", "cancelled")])
+async def test_v1_parent_terminal_is_durable_before_client_disconnect(event_type: str, status: str) -> None:
+    from src.services.agent_runtime.control.types import AgentTurn
+
+    run_id, child_id, thread_id = (str(uuid.uuid4()) for _ in range(3))
+    child = {"event_type": "run_finished", "data": {"run_id": child_id, "status": "succeeded"}}
+    parent = {"event_type": event_type, "data": {"run_id": run_id, "status": status}}
+    content = "".join(f"event: {event['event_type']}\ndata: {json.dumps(event)}\n\n" for event in (child, parent))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request, content=content)))
+    complete = AsyncMock()
+    plane = SimpleNamespace(runtime_url="http://runtime.test", runtime_internal_token="runtime-token",
+                            http_client=client, _complete_run=complete)
+    turn = AgentTurn(thread_id, run_id, str(uuid.uuid4()), str(uuid.uuid4()), 0, "auto", "auto", "adapter", 1, None)
+    from src.services.agent_runtime.control.event_stream import stream_events
+    stream = stream_events(plane, turn=turn, tenant_id="tenant", user_id="user", session_id="session")
+    try:
+        await anext(stream)
+        complete.assert_not_awaited()
+        await anext(stream)
+        complete.assert_awaited_once_with(uuid.UUID(run_id), status)
+        await stream.aclose()
+        complete.assert_awaited_once()
+    finally:
+        await stream.aclose()
+        await client.aclose()

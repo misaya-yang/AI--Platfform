@@ -214,9 +214,14 @@ def test_source_refresh_invalidates_every_image(tmp_path: Path) -> None:
         assert artifact["image_ref"] is None
 
 
+@pytest.mark.parametrize(
+    "manifest_schema",
+    ["ai-platform/agent-runtime-overlay/v1", "ai-platform/agent-runtime-overlay/v2"],
+)
 def test_refresh_overlay_rebuilds_manifest_receipt_lock_and_dependency_sbom(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    manifest_schema: str,
 ) -> None:
     lock_path = _fixture(tmp_path)
     overlay_root = tmp_path / "rust/agent-runtime-overlay"
@@ -238,7 +243,7 @@ def test_refresh_overlay_rebuilds_manifest_receipt_lock_and_dependency_sbom(
     _write_json(
         overlay_root / "manifest.json",
         {
-            "schema_version": "ai-platform/agent-runtime-overlay/v1",
+            "schema_version": manifest_schema,
             "upstream_sha": "0" * 40,
             "source_revision": "0" * 40,
             "file_count": 0,
@@ -327,6 +332,16 @@ def test_refresh_overlay_rebuilds_manifest_receipt_lock_and_dependency_sbom(
     }
     assert len(sbom["dependencies"]) == 3
     assert lock["release_state"] == "local_source_locked"
+    if manifest_schema == "ai-platform/agent-runtime-overlay/v2":
+        original_manifest = (overlay_root / "manifest.json").read_bytes()
+        assert lock["build"]["overlay_manifest_sha256"] == sha256_file(
+            overlay_root / "manifest.json"
+        )
+        manifest["schema_version"] = "ai-platform/agent-runtime-overlay/v1"
+        _write_json(overlay_root / "manifest.json", manifest)
+        with pytest.raises(ContractError, match="upstream-base manifest is not pinned"):
+            validate_lock(repo_root=tmp_path, lock_path=lock_path)
+        (overlay_root / "manifest.json").write_bytes(original_manifest)
     assert all(
         not artifact["candidate_start_allowed"]
         and artifact["image_digest"] is None
@@ -334,6 +349,11 @@ def test_refresh_overlay_rebuilds_manifest_receipt_lock_and_dependency_sbom(
         for artifact in lock["oci"]["artifacts"].values()
     )
     validate_lock(repo_root=tmp_path, lock_path=lock_path)
+
+    supply_chain.refresh_source_lock(repo_root=tmp_path, lock_path=lock_path)
+    refreshed = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert refreshed["build"]["overlay_file_count"] == actual["file_count"]
+    assert refreshed["build"]["overlay_cargo_lock_sha256"] == overlay_lock_sha
 
     (cargo_workspace / "Cargo.lock").write_text("stale composed lock\n", encoding="utf-8")
     with pytest.raises(ContractError, match="current overlay Cargo.lock"):

@@ -3,42 +3,51 @@
     "component_count": 619,
     "format": "CycloneDX-1.5",
     "path": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "sha256": "d6611ee35a697917c5966b073b50efee5f16aa329bc7ad8c5a6d81bf19f12313"
+    "sha256": "5e42d03814730efa95f0f37b07d08af6f6cbf726fc46528f95eecef302c11702"
   },
   "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
+  "evidence_provenance": {
+    "dockerfile_sha256": "819850ca7e84a0d24965c887240974963ccb187d1ee77762602cc6943ea5f105",
+    "metadata_file_sha256": "73be523d1fe7c339f3c2e82d79932ce275a5efb2644ab852fe3d0e8964dca782",
+    "method": "production Dockerfile.runtime source-evidence-export",
+    "runtime_compiled": true,
+    "schema_generated_by_compiled_protocol_library": true
+  },
   "license": {
     "license_sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
     "spdx": "Apache-2.0",
     "upstream_notice_sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
   },
   "overlay": {
-    "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
-    "file_count": 107,
-    "sha256": "80992c9505b06a2e9993980efc739ce33ee79c1fcc79b60914c894b2f62129ba",
-    "source_revision": "94cbbddafc1776d5e377bca1b05932c697e82238",
-    "upstream_sha": "94cbbddafc1776d5e377bca1b05932c697e82238"
+    "cargo_lock_sha256": "ca24c78377d16f522d7c0233a81045f880fe981f6c1127f779d08432c7e0fea8",
+    "file_count": 119,
+    "manifest_schema": "ai-platform/agent-runtime-overlay/v2",
+    "manifest_sha256": "4de951a5d56c9aa386bfb35bfc46daeb77382e793d25beb329bddc8fe7af9880",
+    "sha256": "5dc36c43638a48bc63e7069d4513ccc3c4f45ad9d930092c88c4a4a75c3b2e85",
+    "source_revision": "279ba894152b2c01c5294cc0723b463b209bdca4",
+    "upstream_sha": "279ba894152b2c01c5294cc0723b463b209bdca4"
   },
   "sbom": {
-    "component_count": 1518,
+    "component_count": 1626,
     "format": "CycloneDX-1.5",
-    "sha256": "183f270c8c148f4e0d1f15ddfb0c8494697f7b2a412625da5299a6f19a7804ba"
+    "sha256": "525cb5fc3f271e6760e1a5da96d55140d2ea5aba016e940bd1ae77b5eb678a94"
   },
   "schema_bundle": {
-    "file_count": 1005,
-    "sha256": "ec57a2516f9dfd89d56fafd84bfbaa1a9b19fc03507867f123a03c03ddcc837b",
-    "total_bytes": 4122713
+    "file_count": 1054,
+    "sha256": "0bbd1819a6f910bd40f4143022897a502156d26011736e9f0455476b6d2492ab",
+    "total_bytes": 4017931
   },
   "schema_version": "ai-platform/agent-runtime-source-receipt/v1",
   "source": {
     "branch": "upstream/main",
-    "fork_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
-    "git_tree_sha": "2b39fe175db641c8ac6ee87356a2f5db2765c835",
-    "upstream_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
+    "fork_sha": "279ba894152b2c01c5294cc0723b463b209bdca4",
+    "git_tree_sha": "0d32f51cd9fd27839dcaf93e435e855a6880f154",
+    "upstream_sha": "279ba894152b2c01c5294cc0723b463b209bdca4",
     "upstream_url": "https://github.com/openai/codex.git"
   },
   "toolchain": {
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
-    "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
+    "cargo_lock_sha256": "ca24c78377d16f522d7c0233a81045f880fe981f6c1127f779d08432c7e0fea8",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
   }

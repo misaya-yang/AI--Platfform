@@ -23,19 +23,22 @@ export async function* readSsePayloads(
       if (!result.value) continue;
       wireBytes += result.value.byteLength;
       if (wireBytes > maxWireBytes) throw new CompatibilityError("provider_stream_bytes_limit");
-      if (result.value.byteLength > 2 * maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
-      buffer += decoder.decode(result.value, { stream: true });
-      const frames = buffer.split(/\r?\n\r?\n/);
-      buffer = frames.pop() ?? "";
-      if (Buffer.byteLength(buffer) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
-      for (const frame of frames) {
-        if (Buffer.byteLength(frame) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
-        if (++framesSeen > 100_000) throw new CompatibilityError("provider_event_limit");
-        const data = frame.split(/\r?\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (data) yield data;
+      // Fetch chunks are transport boundaries, not SSE frame boundaries. Decode
+      // bounded slices so coalesced valid frames do not become one huge string.
+      for (let offset = 0; offset < result.value.byteLength; offset += 64 * 1024) {
+        buffer += decoder.decode(result.value.subarray(offset, offset + 64 * 1024), { stream: true });
+        const frames = buffer.split(/\r?\n\r?\n/);
+        buffer = frames.pop() ?? "";
+        if (Buffer.byteLength(buffer) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
+        for (const frame of frames) {
+          if (Buffer.byteLength(frame) > maxFrameBytes) throw new CompatibilityError("provider_frame_limit");
+          if (++framesSeen > 100_000) throw new CompatibilityError("provider_event_limit");
+          const data = frame.split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n");
+          if (data) yield data;
+        }
       }
     }
     buffer += decoder.decode();

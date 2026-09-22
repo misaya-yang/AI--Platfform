@@ -44,7 +44,8 @@ export function namespaceBindings(body: ResponsesRequest): Map<string, { namespa
     if (tool.type !== "namespace") continue;
     const namespace = text(tool.name, "responses_tool_invalid");
     for (const rawChild of Array.isArray(tool.tools) ? tool.tools : []) {
-      const name = text(record(rawChild, "responses_tool_invalid").name, "responses_tool_invalid");
+      const child = record(rawChild, "responses_tool_invalid");
+      const name = text((child.function ?? child).name, "responses_tool_invalid");
       const identity = { namespace, name };
       aliases.set(namespaceAlias(namespace, name), identity);
       bare.set(name, [...(bare.get(name) ?? []), identity]);
@@ -69,9 +70,10 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
   };
   if (body.temperature !== undefined) chat.temperature = finiteNumber(body.temperature, "responses_temperature_invalid");
   if (body.max_output_tokens !== undefined) chat.max_tokens = positiveInteger(body.max_output_tokens, "responses_max_tokens_invalid");
-  if (body.reasoning !== undefined) {
+  if (body.reasoning !== undefined && body.reasoning !== null) {
     const reasoning = record(body.reasoning, "responses_reasoning_unsupported");
-    if (reasoning.effort !== undefined) chat.reasoning_effort = text(reasoning.effort, "responses_reasoning_unsupported");
+    if (reasoning.effort !== undefined && reasoning.effort !== null) chat.reasoning_effort = text(reasoning.effort, "responses_reasoning_unsupported");
+    if (reasoning.context !== undefined && reasoning.context !== null) throw new CompatibilityError("responses_reasoning_context_unsupported");
   }
   if (body.service_tier !== undefined && body.service_tier !== null) {
     chat.service_tier = text(body.service_tier, "responses_service_tier_invalid");
@@ -114,6 +116,9 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
       } else throw new CompatibilityError("responses_tool_unsupported");
     }
     const toolChoice = chatToolChoice(body.tool_choice);
+    if (typeof toolChoice === "object" && !projectedNames.has(toolChoice.function.name)) {
+      throw new CompatibilityError("responses_tool_choice_unavailable");
+    }
     if (toolChoice === "none") projectedTools.length = 0;
     if (!projectedTools.length && !["auto", "none"].includes(String(toolChoice))) {
       throw new CompatibilityError("responses_tool_choice_requires_tools");
@@ -164,6 +169,13 @@ function responsesInputToMessages(input: unknown, instructions: unknown): Array<
   if (typeof input === "string") return [...messages, { role: "user", content: input }];
   if (!Array.isArray(input)) throw new CompatibilityError("responses_input_invalid");
   const pendingCalls = new Map<string, string>();
+  const callIds = new Set<string>();
+  let assistant: Record<string, any> | undefined;
+  const assistantMessage = () => assistant ??= { role: "assistant", content: "" };
+  const flushAssistant = () => {
+    if (assistant) messages.push(assistant);
+    assistant = undefined;
+  };
   for (const raw of input) {
     const item = record(raw, "responses_input_item_unsupported");
     const type = item.type ?? "message";
@@ -172,29 +184,60 @@ function responsesInputToMessages(input: unknown, instructions: unknown): Array<
       if (!["user", "assistant", "system", "developer"].includes(String(role))) {
         throw new CompatibilityError("responses_message_role_unsupported");
       }
-      messages.push({
-        role: role === "developer" ? "system" : role,
-        content: responseContentText(item.content),
-      });
+      const content = responseContentText(item.content);
+      if (role === "assistant") {
+        if (pendingCalls.size && !assistant) throw new CompatibilityError("responses_function_output_missing");
+        assistantMessage().content += content;
+      }
+      else {
+        if (pendingCalls.size) throw new CompatibilityError("responses_function_output_missing");
+        flushAssistant();
+        messages.push({ role: role === "developer" ? "system" : role, content });
+      }
       continue;
     }
-    if (type === "agent_message" || type === "reasoning") {
-      throw new CompatibilityError("responses_input_item_unsupported");
+    if (type === "reasoning") {
+      if (pendingCalls.size && !assistant) throw new CompatibilityError("responses_function_output_missing");
+      // Replay the plain Chat reasoning we projected on the previous request.
+      // Opaque Responses state cannot be translated to Chat reasoning text.
+      if (item.encrypted_content != null || (item.content != null && (!Array.isArray(item.content) || item.content.length))) {
+        throw new CompatibilityError("responses_reasoning_history_unsupported");
+      }
+      if (!Array.isArray(item.summary)) throw new CompatibilityError("responses_reasoning_history_unsupported");
+      const summary = item.summary.map((rawPart: unknown) => {
+        const part = record(rawPart, "responses_reasoning_history_unsupported");
+        if (part.type !== "summary_text") throw new CompatibilityError("responses_reasoning_history_unsupported");
+        return text(part.text, "responses_reasoning_history_unsupported");
+      }).join("");
+      if (summary) {
+        const message = assistantMessage();
+        message.reasoning_content = (message.reasoning_content ?? "") + summary;
+      }
+      continue;
     }
     if (type === "function_call") {
+      if (pendingCalls.size && !assistant) throw new CompatibilityError("responses_function_output_missing");
       const id = text(item.call_id ?? item.id, "responses_function_call_invalid");
       const originalName = text(item.name, "responses_function_call_invalid");
       const name = typeof item.namespace === "string" ? namespaceAlias(item.namespace, originalName) : originalName;
       const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {});
-      if (pendingCalls.has(id)) throw new CompatibilityError("responses_function_call_duplicate");
+      if (callIds.has(id)) throw new CompatibilityError("responses_function_call_duplicate");
+      callIds.add(id);
       pendingCalls.set(id, name);
-      messages.push({ role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: args } }] });
+      const message = assistantMessage();
+      (message.tool_calls ??= []).push({ id, type: "function", function: { name, arguments: args } });
       continue;
     }
     if (type === "function_call_output") {
       const id = text(item.call_id, "responses_function_output_invalid");
       const name = pendingCalls.get(id);
       if (!name) throw new CompatibilityError("responses_function_output_unmatched");
+      if (item.name !== undefined && item.name !== null) {
+        const outputName = text(item.name, "responses_function_output_invalid");
+        const identity = typeof item.namespace === "string" ? namespaceAlias(item.namespace, outputName) : outputName;
+        if (identity !== name) throw new CompatibilityError("responses_function_output_identity_mismatch");
+      }
+      flushAssistant();
       messages.push({ role: "tool", tool_call_id: id, name, content: functionOutputText(item.output) });
       pendingCalls.delete(id);
       continue;
@@ -202,6 +245,7 @@ function responsesInputToMessages(input: unknown, instructions: unknown): Array<
     throw new CompatibilityError("responses_input_item_unsupported");
   }
   if (pendingCalls.size) throw new CompatibilityError("responses_function_output_missing");
+  flushAssistant();
   if (!messages.length) throw new CompatibilityError("responses_input_empty");
   return messages;
 }
@@ -228,14 +272,16 @@ function responseContentText(content: unknown): string {
   }).join("");
 }
 
-function chatToolChoice(choice: unknown): unknown {
+function chatToolChoice(choice: unknown): "auto" | "none" | "required" | { type: "function"; function: { name: string } } {
   if (choice === undefined || choice === null) return "auto";
-  if (["auto", "none", "required"].includes(String(choice))) return choice;
+  if (choice === "auto" || choice === "none" || choice === "required") return choice;
   const value = record(choice, "responses_tool_choice_unsupported");
   if (value.type !== "function") throw new CompatibilityError("responses_tool_choice_unsupported");
   const functionValue = value.function && typeof value.function === "object"
     ? record(value.function, "responses_tool_choice_unsupported") : value;
-  return { type: "function", function: { name: text(functionValue.name, "responses_tool_choice_unsupported") } };
+  const name = text(functionValue.name, "responses_tool_choice_unsupported");
+  const namespace = functionValue.namespace ?? value.namespace;
+  return { type: "function", function: { name: namespace == null ? name : namespaceAlias(text(namespace, "responses_tool_choice_unsupported"), name) } };
 }
 
 export function record(value: unknown, code: string): Record<string, any> {
@@ -261,7 +307,7 @@ function positiveInteger(value: unknown, code: string): number {
 }
 
 export class CompatibilityError extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: string, readonly status = 400) {
     super(code);
     this.name = "CompatibilityError";
   }

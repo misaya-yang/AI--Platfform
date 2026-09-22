@@ -38,6 +38,7 @@ pub(super) struct CreateThreadRequest {
     /// the kernel's native thread/memoryMode/set request after the durable
     /// root identity is reserved.
     memory_mode: Option<ThreadMemoryMode>,
+    tool_policy: Option<crate::tool_policy::PlatformToolPolicy>,
     /// Model capability data from the immutable platform snapshot. These are
     /// converted to the kernel's config keys before thread creation so child
     /// threads inherit the same context/compaction policy.
@@ -54,7 +55,17 @@ pub(super) async fn create_thread(
     if body.start.ephemeral == Some(true) {
         return Err(RuntimeError::bad_request("ephemeral_thread_not_supported"));
     }
+    let tool_policy = body
+        .tool_policy
+        .ok_or_else(|| RuntimeError::bad_request("platform_tool_policy_required"))?
+        .normalized()
+        .map_err(RuntimeError::from_store)?;
     let mut start = body.start;
+    let config = start.config.get_or_insert_with(HashMap::new);
+    crate::tool_policy::apply_managed_feature_profile(config);
+    if !tool_policy.allows_native_search() {
+        config.insert("web_search".to_string(), serde_json::json!("disabled"));
+    }
     apply_model_limits(
         &mut start,
         body.model_context_window,
@@ -73,6 +84,15 @@ pub(super) async fn create_thread(
         ))
         .await
         .map_err(RuntimeError::from_store)?;
+    state
+        .store
+        .stage_host_startup(
+            root_thread_id,
+            tool_policy.clone(),
+            start.dynamic_tools.clone().unwrap_or_default(),
+        )
+        .await
+        .map_err(RuntimeError::from_store)?;
     let result = state
         .requests
         .request_thread_start(
@@ -80,11 +100,21 @@ pub(super) async fn create_thread(
                 request_id: RequestId::String(format!("thread-start-{root_thread_id}")),
                 params: start,
             },
-            codex_app_server::host_runtime::AppServerThreadStartOptions::new(root_thread_id),
+            codex_app_server::host_runtime::AppServerThreadStartOptions::new(root_thread_id)
+                .with_tool_policy(tool_policy.kernel_policy()),
         )
-        .await
+        .await;
+    if !matches!(&result, Ok(Ok(_))) {
+        state.store.clear_host_startup(root_thread_id).await;
+    }
+    let result = result
         .map_err(|_| RuntimeError::unavailable("agent_kernel_unavailable"))?
         .map_err(|_| RuntimeError::bad_request("agent_thread_start_rejected"))?;
+    state
+        .store
+        .resolve_tool_policy(root_thread_id, Some(tool_policy))
+        .await
+        .map_err(RuntimeError::from_store)?;
     if let Some(mode) = memory_mode {
         state
             .requests

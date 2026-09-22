@@ -34,8 +34,32 @@ pub(super) async fn persist_projected_events(
     else {
         return;
     };
-    let Ok(identity) = store.identity_for_kernel_thread(kernel_thread_id).await else {
-        return;
+    let identity = match store.identity_for_kernel_thread(kernel_thread_id).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _: codex_thread_store::ThreadStoreResult<()> =
+                store.record_write_result(kernel_thread_id, Err(error));
+            // A database outage must not strand a connected turn. Cached scope
+            // is used exclusively to address a failed, non-durable notification.
+            if let codex_app_server_protocol::ServerNotification::TurnCompleted(completed) =
+                notification
+                && let Some(identity) = store.cached_terminal_identity(kernel_thread_id)
+            {
+                let context = V1ProjectionContext {
+                    tenant_id: identity.tenant_id,
+                    user_id: identity.user_id,
+                    session_id: identity.session_id,
+                };
+                let _ = events.send(RuntimeBroadcastEvent {
+                    root_thread_id: identity.runtime_thread_id,
+                    event: SequencedAssistantTurnEventV1 {
+                        sequence: i64::MAX,
+                        event: terminal_admission_failure_event(completed, &context),
+                    },
+                });
+            }
+            return;
+        }
     };
     let context = V1ProjectionContext {
         tenant_id: identity.tenant_id.clone(),
@@ -55,19 +79,18 @@ pub(super) async fn persist_projected_events(
             Ok(recovered) => recovered,
             Err(error) => {
                 warn!(%error, turn_id = %completed.turn.id, "terminal admission failed");
-                // Persistence is the authority for normal event sequencing,
-                // but a failed admission must not leave the connected client
-                // waiting forever. Broadcast one explicitly non-durable,
-                // failed terminal at the maximum sequence. Eval rejects any
-                // missing tool receipts; the Gateway also marks the run failed.
-                let event = terminal_admission_failure_event(completed, &context);
-                let _ = events.send(RuntimeBroadcastEvent {
-                    root_thread_id: identity.runtime_thread_id,
-                    event: SequencedAssistantTurnEventV1 {
-                        sequence: i64::MAX,
-                        event,
-                    },
-                });
+                // If PG has recovered, durably record the explicit failure.
+                // If it is still unavailable, release the connected client via
+                // the established non-durable terminal path; never emit success.
+                publish_terminal_failure(
+                    completed,
+                    &context,
+                    kernel_thread_id,
+                    identity.runtime_thread_id,
+                    store,
+                    events,
+                )
+                .await;
                 return;
             }
         };
@@ -121,9 +144,56 @@ pub(super) async fn persist_projected_events(
                     event: SequencedAssistantTurnEventV1 { sequence, event },
                 });
             }
-            Err(error) => warn!(%error, "failed to persist projected Agent event"),
+            Err(error) => {
+                warn!(%error, "failed to persist projected Agent event");
+                if let codex_app_server_protocol::ServerNotification::TurnCompleted(completed) =
+                    notification
+                {
+                    publish_terminal_failure(
+                        completed,
+                        &context,
+                        kernel_thread_id,
+                        identity.runtime_thread_id,
+                        store,
+                        events,
+                    )
+                    .await;
+                    return;
+                }
+            }
         }
     }
+}
+
+async fn publish_terminal_failure(
+    completed: &codex_app_server_protocol::TurnCompletedNotification,
+    context: &V1ProjectionContext,
+    kernel_thread_id: ThreadId,
+    root_thread_id: ThreadId,
+    store: &PostgresThreadStore,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+) {
+    let mut event = terminal_admission_failure_event(completed, context);
+    event.timestamp = completed.turn.completed_at.unwrap_or_default() as f64;
+    event.data["durable"] = true.into();
+    let key = format!(
+        "compat/terminal-admission-failed/{kernel_thread_id}/{}",
+        completed.turn.id
+    );
+    let sequence = match store
+        .append_v1_event(kernel_thread_id, stable_event_id(&key), &key, &event)
+        .await
+    {
+        Ok(sequence) => sequence,
+        Err(_) => {
+            event.data["durable"] = false.into();
+            i64::MAX
+        }
+    };
+    let _ = events.send(RuntimeBroadcastEvent {
+        root_thread_id,
+        event: SequencedAssistantTurnEventV1 { sequence, event },
+    });
 }
 
 fn stable_event_id(event_key: &str) -> Uuid {

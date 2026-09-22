@@ -56,6 +56,7 @@ use crate::error_code::OVERLOADED_ERROR_CODE;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::host_runtime::AppServerHostRuntime;
+use crate::host_runtime::AppServerThreadResumeOptions;
 use crate::host_runtime::AppServerThreadStartOptions;
 use crate::host_runtime::AppServerTurnStartOptions;
 use crate::message_processor::ConnectionSessionState;
@@ -66,6 +67,7 @@ use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
@@ -116,6 +118,7 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
         ServerNotification::TurnCompleted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item: ThreadItem::AgentMessage {
@@ -191,7 +194,9 @@ enum InProcessClientMessage {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
         response_tx: oneshot::Sender<PendingClientRequestResponse>,
+        cancellation: tokio_util::sync::CancellationToken,
     },
     Notification {
         notification: ClientNotification,
@@ -214,6 +219,8 @@ enum ProcessorCommand {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
+        cancellation: tokio_util::sync::CancellationToken,
     },
     Notification(ClientNotification),
 }
@@ -227,6 +234,7 @@ impl InProcessClientSender {
     pub async fn request(&self, request: ClientRequest) -> IoResult<PendingClientRequestResponse> {
         self.request_inner(
             request, /*thread_start_options*/ None, /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
         )
         .await
     }
@@ -243,8 +251,13 @@ impl InProcessClientSender {
                 "host thread-start options require a thread/start request",
             ));
         }
-        self.request_inner(request, Some(options), /*turn_start_options*/ None)
-            .await
+        self.request_inner(
+            request,
+            Some(options),
+            /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
+        )
+        .await
     }
 
     /// Sends one `turn/start` request with a host-reserved run identity.
@@ -259,8 +272,28 @@ impl InProcessClientSender {
                 "host turn-start options require a turn/start request",
             ));
         }
-        self.request_inner(request, /*thread_start_options*/ None, Some(options))
-            .await
+        self.request_inner(
+            request,
+            /*thread_start_options*/ None,
+            Some(options),
+            /*thread_resume_options*/ None,
+        )
+        .await
+    }
+
+    /// Resumes a thread with the freshly authenticated host tool ceiling.
+    pub async fn request_thread_resume(
+        &self,
+        request: ClientRequest,
+        options: AppServerThreadResumeOptions,
+    ) -> IoResult<PendingClientRequestResponse> {
+        if !matches!(&request, ClientRequest::ThreadResume { .. }) {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "host thread-resume options require a thread/resume request",
+            ));
+        }
+        self.request_inner(request, None, None, Some(options)).await
     }
 
     async fn request_inner(
@@ -268,13 +301,18 @@ impl InProcessClientSender {
         request: ClientRequest,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
     ) -> IoResult<PendingClientRequestResponse> {
         let (response_tx, response_rx) = oneshot::channel();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
         self.try_send_client_message(InProcessClientMessage::Request {
             request: Box::new(request),
             thread_start_options,
             turn_start_options,
+            thread_resume_options,
             response_tx,
+            cancellation,
         })?;
         response_rx.await.map_err(|err| {
             IoError::new(
@@ -362,6 +400,15 @@ impl InProcessClientHandle {
         options: AppServerTurnStartOptions,
     ) -> IoResult<PendingClientRequestResponse> {
         self.client.request_turn_start(request, options).await
+    }
+
+    /// Resumes a thread with a host-supplied immutable tool ceiling.
+    pub async fn request_thread_resume(
+        &self,
+        request: ClientRequest,
+        options: AppServerThreadResumeOptions,
+    ) -> IoResult<PendingClientRequestResponse> {
+        self.client.request_thread_resume(request, options).await
     }
 
     /// Sends a typed client notification into the in-process runtime.
@@ -569,16 +616,21 @@ async fn start_uninitialized(
                 state_db: args.state_db,
                 config_warnings: args.config_warnings,
                 session_source: args.session_source,
+                user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+                    &auth_manager,
+                ))),
                 auth_manager,
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
-                plugin_startup_tasks: crate::PluginStartupTasks::Start,
+                plugin_startup_tasks: Some(PluginStartupConfig::Current),
                 host_runtime,
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
-            let session = Arc::new(ConnectionSessionState::new());
+            let session = Arc::new(ConnectionSessionState::new(
+                crate::transport::ConnectionOrigin::InProcess,
+            ));
             let mut listen_for_threads = true;
 
             loop {
@@ -589,6 +641,8 @@ async fn start_uninitialized(
                                 request,
                                 thread_start_options,
                                 turn_start_options,
+                                thread_resume_options,
+                                cancellation,
                             }) => {
                                 let was_initialized = session.initialized();
                                 processor
@@ -599,6 +653,8 @@ async fn start_uninitialized(
                                         &outbound_initialized,
                                         thread_start_options,
                                         turn_start_options,
+                                        thread_resume_options,
+                                        cancellation,
                                     )
                                     .await;
                                 let opted_out_notification_methods_snapshot =
@@ -674,7 +730,9 @@ async fn start_uninitialized(
                             request,
                             thread_start_options,
                             turn_start_options,
+                            thread_resume_options,
                             response_tx,
+                            cancellation,
                         }) => {
                             let request = *request;
                             let request_id = request.id().clone();
@@ -694,6 +752,8 @@ async fn start_uninitialized(
                                 request: Box::new(request),
                                 thread_start_options,
                                 turn_start_options,
+                                thread_resume_options,
+                                cancellation,
                             }) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -733,12 +793,12 @@ async fn start_uninitialized(
                         }
                         Some(InProcessClientMessage::ServerRequestResponse { request_id, result }) => {
                             outgoing_message_sender
-                                .notify_client_response(request_id, result)
+                                .notify_client_response(IN_PROCESS_CONNECTION_ID, request_id, result)
                                 .await;
                         }
                         Some(InProcessClientMessage::ServerRequestError { request_id, error }) => {
                             outgoing_message_sender
-                                .notify_client_error(request_id, error)
+                                .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
                                 .await;
                         }
                         Some(InProcessClientMessage::Shutdown { done_tx }) => {
@@ -807,7 +867,7 @@ async fn start_uninitialized(
                                     _ => unreachable!("we just sent a ServerRequest variant"),
                                 };
                                 outgoing_message_sender
-                                    .notify_client_error(request_id, error)
+                                    .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
                                     .await;
                             }
                         }
@@ -896,6 +956,8 @@ mod tests {
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+    use codex_app_server_protocol::ThreadAttachmentOperation;
+    use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
     use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
@@ -1097,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn guaranteed_delivery_helpers_cover_terminal_server_notifications() {
+    fn guaranteed_delivery_helpers_cover_required_server_notifications() {
         assert!(server_notification_requires_delivery(
             &ServerNotification::TurnCompleted(TurnCompletedNotification {
                 thread_id: "thread-1".to_string(),
@@ -1127,6 +1189,15 @@ mod tests {
             )
         ));
         assert!(server_notification_requires_delivery(
+            &ServerNotification::ThreadAttachmentUpdated(ThreadAttachmentUpdatedNotification {
+                thread_id: "thread-1".to_string(),
+                attachment_type: "pull_request".to_string(),
+                identity_key: r#"["github.com","openai","codex",123]"#.to_string(),
+                attachment_id: "attachment-1".to_string(),
+                operation: ThreadAttachmentOperation::Deleted,
+            })
+        ));
+        assert!(server_notification_requires_delivery(
             &ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item: ThreadItem::AgentMessage {
                     id: "item-1".to_string(),
@@ -1134,6 +1205,7 @@ mod tests {
                     phase: None,
                     memory_citation: None,
                     delivery: Some(AgentMessageDelivery::Async),
+                    questions: None,
                 },
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),

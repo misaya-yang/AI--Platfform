@@ -1,27 +1,29 @@
 {
   "build": {
-    "app_server_schema_file_count": 1005,
-    "app_server_schema_sha256": "ec57a2516f9dfd89d56fafd84bfbaa1a9b19fc03507867f123a03c03ddcc837b",
+    "app_server_schema_file_count": 1054,
+    "app_server_schema_sha256": "0bbd1819a6f910bd40f4143022897a502156d26011736e9f0455476b6d2492ab",
     "capability_worker_sbom": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "capability_worker_sbom_sha256": "d6611ee35a697917c5966b073b50efee5f16aa329bc7ad8c5a6d81bf19f12313",
+    "capability_worker_sbom_sha256": "5e42d03814730efa95f0f37b07d08af6f6cbf726fc46528f95eecef302c11702",
     "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
-    "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
+    "cargo_lock_sha256": "ca24c78377d16f522d7c0233a81045f880fe981f6c1127f779d08432c7e0fea8",
     "local_image_profile": "dev-small",
-    "overlay_cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
-    "overlay_file_count": 107,
+    "overlay_cargo_lock_sha256": "ca24c78377d16f522d7c0233a81045f880fe981f6c1127f779d08432c7e0fea8",
+    "overlay_file_count": 119,
     "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
-    "overlay_sha256": "80992c9505b06a2e9993980efc739ce33ee79c1fcc79b60914c894b2f62129ba",
+    "overlay_manifest_schema": "ai-platform/agent-runtime-overlay/v2",
+    "overlay_manifest_sha256": "4de951a5d56c9aa386bfb35bfc46daeb77382e793d25beb329bddc8fe7af9880",
+    "overlay_sha256": "5dc36c43638a48bc63e7069d4513ccc3c4f45ad9d930092c88c4a4a75c3b2e85",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/agent-runtime-source/sbom.cdx.json",
-    "sbom_sha256": "183f270c8c148f4e0d1f15ddfb0c8494697f7b2a412625da5299a6f19a7804ba",
+    "sbom_sha256": "525cb5fc3f271e6760e1a5da96d55140d2ea5aba016e940bd1ae77b5eb678a94",
     "source_receipt": "deploy/agent-runtime-source/source-receipt.json",
-    "source_receipt_sha256": "c867e29082c7e8ebd83d7bf8c56603a7cf8dce78ca63317bffcd35a60d792a57"
+    "source_receipt_sha256": "238f8e1d5082baf8643567beda66c6192d87ca94b935e3e96e40ace0758f6f73"
   },
   "license": {
     "notice": "deploy/agent-runtime-source/NOTICE.md",
-    "notice_sha256": "87e497f9aeef8b35848fac983a0466f813322dd0712dd3c16acf221b038155ad",
+    "notice_sha256": "d8179c160883f446307d2c94caf536765b92943bb5d9cd61d934305ad5b0ce4c",
     "spdx": "Apache-2.0",
     "upstream_license_sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
     "upstream_notice_sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
@@ -31,8 +33,8 @@
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:6f364bbe35eb44fca3ac14c12368150d9989233a652c3a4fb2c93791ccd44981",
-        "image_ref": "local-image://sha256:6f364bbe35eb44fca3ac14c12368150d9989233a652c3a4fb2c93791ccd44981",
+        "image_digest": "sha256:1555865da7494318adfb12eecde2682e606c891d1162b684450608657ef2b3ca",
+        "image_ref": "local-image://sha256:1555865da7494318adfb12eecde2682e606c891d1162b684450608657ef2b3ca",
         "platforms": [
           "linux/arm64"
         ],
@@ -51,8 +53,8 @@
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:592036aadd8c3088f4d0d01ae42a660f03ac0556934c317db7fa4ca68fecd001",
-        "image_ref": "local-image://sha256:592036aadd8c3088f4d0d01ae42a660f03ac0556934c317db7fa4ca68fecd001",
+        "image_digest": "sha256:2152148bf14fb8716bb10a0a86a525ac425199276bb9b942f9790224a878ba13",
+        "image_ref": "local-image://sha256:2152148bf14fb8716bb10a0a86a525ac425199276bb9b942f9790224a878ba13",
         "platforms": [
           "linux/arm64"
         ],
@@ -65,9 +67,9 @@
   "source": {
     "branch": "upstream/main",
     "fork_repository": "local://AI--Platfform-codex-harness-composed-source",
-    "fork_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
-    "git_tree_sha": "2b39fe175db641c8ac6ee87356a2f5db2765c835",
-    "upstream_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
+    "fork_sha": "279ba894152b2c01c5294cc0723b463b209bdca4",
+    "git_tree_sha": "0d32f51cd9fd27839dcaf93e435e855a6880f154",
+    "upstream_sha": "279ba894152b2c01c5294cc0723b463b209bdca4",
     "upstream_url": "https://github.com/openai/codex.git"
   }
 }

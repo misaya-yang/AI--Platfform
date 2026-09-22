@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use codex_core::config::Config;
+use codex_extension_api::CommandStartInput;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -106,47 +107,60 @@ impl PlatformLifecycleContributor {
             })
     }
 
-    /// Dynamic capabilities have their own effect-aware lifecycle in the
-    /// Runtime HTTP broker. The upstream generic hook sees every dynamic tool
-    /// as read-only and would otherwise write conflicting receipts before the
-    /// broker can request approval. Query the immutable turn snapshot so each
-    /// call has exactly one lifecycle owner.
+    /// The immutable thread catalog identifies calls owned by the dynamic
+    /// broker. Classify by structured namespace/name, including inherited child
+    /// catalogs, before the broker applies the current turn's narrower snapshot.
     async fn is_dynamic_capability(
         &self,
         thread_id: ThreadId,
-        turn_id: &str,
-        tool_name: &str,
-    ) -> bool {
-        let Ok(turn_id) = uuid::Uuid::parse_str(turn_id) else {
-            return false;
-        };
-        let Ok(thread_id) = uuid::Uuid::parse_str(&thread_id.to_string()) else {
-            return false;
-        };
-        sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                  FROM assistant_runtime_snapshots AS snapshot
-                  CROSS JOIN LATERAL jsonb_array_elements(
-                      COALESCE(snapshot.snapshot->'readonly_capabilities'->'tools', '[]'::jsonb)
-                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'mcp', '[]'::jsonb)
-                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'deferred', '[]'::jsonb)
-                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'attachment_tools', '[]'::jsonb)
-                  ) AS descriptor
-                 WHERE snapshot.run_id = $1
-                   AND snapshot.runtime_thread_id = $2
-                   AND descriptor->>'name' = $3
-            )
-            "#,
+        tool_name: &codex_extension_api::ToolName,
+    ) -> Result<bool, ToolDispatchError> {
+        let thread_id =
+            uuid::Uuid::parse_str(&thread_id.to_string()).map_err(|_| ToolDispatchError {
+                code: "AI_PLATFORM_AGENT_RUNTIME_SCOPE_INVALID".to_string(),
+                message: "tool scope is invalid".to_string(),
+            })?;
+        let catalog: Option<Value> = sqlx::query_scalar(
+            "SELECT member.metadata->'dynamic_tools' FROM assistant_runtime_thread_members AS member JOIN assistant_runtime_threads AS root ON root.runtime_thread_id=member.runtime_thread_id AND root.deleted_at IS NULL WHERE member.kernel_thread_id=$1",
         )
-        .bind(turn_id)
         .bind(thread_id)
-        .bind(tool_name)
-        .fetch_one(&self.store.pool)
+        .fetch_optional(&self.store.pool)
         .await
-        .unwrap_or(false)
+        .map_err(|_| catalog_unavailable())?
+        .flatten();
+        let raw: Vec<Value> = serde_json::from_value(catalog.unwrap_or_else(|| json!([])))
+            .map_err(|_| catalog_unavailable())?;
+        let tools = codex_protocol::dynamic_tools::normalize_dynamic_tool_specs(raw)
+            .map_err(|_| catalog_unavailable())?;
+        Ok(dynamic_catalog_contains(&tools, tool_name))
     }
+}
+
+fn catalog_unavailable() -> ToolDispatchError {
+    ToolDispatchError {
+        code: "AI_PLATFORM_AGENT_RUNTIME_CATALOG_UNAVAILABLE".to_string(),
+        message: "tool lifecycle owner could not be verified".to_string(),
+    }
+}
+
+fn dynamic_catalog_contains(
+    tools: &[codex_protocol::dynamic_tools::DynamicToolSpec],
+    name: &codex_extension_api::ToolName,
+) -> bool {
+    use codex_protocol::dynamic_tools::{DynamicToolNamespaceTool, DynamicToolSpec};
+    tools.iter().any(|tool| match tool {
+        DynamicToolSpec::Function(function) => {
+            name.is_default_namespace() && name.name == function.name
+        }
+        DynamicToolSpec::Namespace(namespace) => {
+            let namespace_matches = name.namespace.as_deref() == Some(namespace.name.as_str())
+                || (name.is_default_namespace() && namespace.name == "functions");
+            namespace_matches
+                && namespace.tools.iter().any(|tool| match tool {
+                    DynamicToolNamespaceTool::Function(function) => name.name == function.name,
+                })
+        }
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -331,6 +345,28 @@ fn is_internal_agent_control_tool(tool_name: &str) -> bool {
 }
 
 impl ThreadLifecycleContributor<Config> for PlatformLifecycleContributor {
+    fn resolve_host_thread_startup<'a>(
+        &'a self,
+        thread_id: Option<ThreadId>,
+        parent_thread_id: Option<ThreadId>,
+        forked_from_thread_id: Option<ThreadId>,
+    ) -> ExtensionFuture<
+        'a,
+        Result<Option<codex_extension_api::HostThreadStartupData>, ToolDispatchError>,
+    > {
+        Box::pin(async move {
+            self.store
+                .resolve_host_startup(thread_id, parent_thread_id, forked_from_thread_id)
+                .await
+                .map(Some)
+                .map_err(|_| ToolDispatchError {
+                    code: "AI_PLATFORM_AGENT_RUNTIME_STARTUP_AUTHORITY_UNAVAILABLE".to_string(),
+                    message: "authenticated thread startup authority could not be restored"
+                        .to_string(),
+                })
+        })
+    }
+
     fn on_thread_resume<'a>(&'a self, input: ThreadResumeInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
@@ -365,9 +401,15 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                     message: "tool scope is invalid".to_string(),
                 }
             })?;
+            self.store
+                .check_write_health(thread_id)
+                .map_err(|_| ToolDispatchError {
+                    code: "AI_PLATFORM_AGENT_RUNTIME_PERSISTENCE_FAILED".to_string(),
+                    message: "tool dispatch blocked after thread persistence failure".to_string(),
+                })?;
             if self
-                .is_dynamic_capability(thread_id, input.turn_id, &tool_name)
-                .await
+                .is_dynamic_capability(thread_id, input.tool_name)
+                .await?
             {
                 return Ok(());
             }
@@ -383,6 +425,9 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                     "turn_id": input.turn_id,
                     "tool_call_id": input.call_id,
                     "tool_name": tool_name,
+                    "tool_namespace": input.tool_name.namespace,
+                    "originating_item_id": input.originating_item_id,
+                    "root_turn_id": input.root_turn_id,
                     "arguments_sha256": arguments_sha256,
                     "lifecycle": "published",
                     "dispatch_state": "published",
@@ -459,6 +504,9 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                     "turn_id": input.turn_id,
                     "tool_call_id": input.call_id,
                     "tool_name": input.tool_name.to_string(),
+                    "tool_namespace": input.tool_name.namespace,
+                    "originating_item_id": input.originating_item_id,
+                    "root_turn_id": input.root_turn_id,
                     "arguments_sha256": arguments_sha256,
                     "lifecycle": "dispatched",
                     "dispatch_state": "dispatched",
@@ -473,16 +521,46 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
         Box::pin(async {})
     }
 
+    fn on_command_start<'a>(&'a self, input: CommandStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
+                return;
+            };
+            // Hash the final executor-qualified command without reading the
+            // executor's paths on the Runtime host or persisting plaintext argv.
+            let Ok(command) = serde_json::to_vec(input.command) else {
+                return;
+            };
+            let argv_sha256 = format!("{:x}", Sha256::digest(command));
+            let cwd_sha256 = format!("{:x}", Sha256::digest(input.cwd.to_string().as_bytes()));
+            let _ = self
+                .append(PlatformLifecycleEvent {
+                    kernel_thread_id: thread_id,
+                    turn_id: input.turn_id.to_string(),
+                    item_id: Some(input.call_id.to_string()),
+                    event_key: format!("command-executor/{}/{}", input.turn_id, input.call_id),
+                    item_type: "command_executor".to_string(),
+                    status: "prepared".to_string(),
+                    payload: json!({
+                        "schema_version": "agent-runtime-command-executor/v1",
+                        "turn_id": input.turn_id,
+                        "tool_call_id": input.call_id,
+                        "argv_sha256": argv_sha256,
+                        "executor_cwd_sha256": cwd_sha256,
+                    }),
+                })
+                .await;
+        })
+    }
+
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
             let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
                 return;
             };
-            if self
-                .is_dynamic_capability(thread_id, input.turn_id, &input.tool_name.to_string())
-                .await
-            {
-                return;
+            match self.is_dynamic_capability(thread_id, input.tool_name).await {
+                Ok(false) => {}
+                Ok(true) | Err(_) => return,
             }
             let persisted = if matches!(
                 input.outcome,
@@ -558,6 +636,33 @@ mod tests {
     use codex_extension_api::ToolCallOutcome;
     use codex_tools::ToolPayload;
     use serde_json::json;
+
+    #[test]
+    fn lifecycle_owner_matches_nested_and_legacy_dynamic_namespaces() {
+        for raw in [
+            vec![
+                json!({"type":"namespace", "name":"alpha", "description":"", "tools":[
+                    {"type":"function", "name":"lookup", "description":"", "inputSchema":{}}
+                ]}),
+            ],
+            vec![json!({"namespace":"alpha", "name":"lookup", "description":"", "inputSchema":{}})],
+        ] {
+            let catalog =
+                codex_protocol::dynamic_tools::normalize_dynamic_tool_specs(raw).expect("catalog");
+            assert!(super::dynamic_catalog_contains(
+                &catalog,
+                &codex_extension_api::ToolName::namespaced("alpha", "lookup")
+            ));
+            assert!(!super::dynamic_catalog_contains(
+                &catalog,
+                &codex_extension_api::ToolName::namespaced("beta", "lookup")
+            ));
+            assert!(!super::dynamic_catalog_contains(
+                &catalog,
+                &codex_extension_api::ToolName::plain("lookup")
+            ));
+        }
+    }
 
     #[test]
     fn restart_recovery_classifies_every_unpaired_published_call() {

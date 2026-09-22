@@ -220,12 +220,21 @@ fn preview_and_existing_edit_preserve_unknown_parts_by_content() {
             output.start_file(name, options).expect("file");
             std::io::Write::write_all(&mut output, &content).expect("write");
         }
-        output.start_file("custom/unknown.bin", options).expect("unknown");
+        output
+            .start_file("custom/unknown.bin", options)
+            .expect("unknown");
         std::io::Write::write_all(&mut output, b"preserve-me").expect("unknown content");
         source = output.finish().expect("finish").into_inner();
     }
-    let preview = generator.preview(DocumentFormat::Docx, &source).expect("preview");
-    assert!(preview.unknown_parts.iter().any(|name| name == "custom/unknown.bin"));
+    let preview = generator
+        .preview(DocumentFormat::Docx, &source)
+        .expect("preview");
+    assert!(
+        preview
+            .unknown_parts
+            .iter()
+            .any(|name| name == "custom/unknown.bin")
+    );
     let edited = generator
         .modify_existing(
             DocumentFormat::Docx,
@@ -254,9 +263,11 @@ fn preview_rejects_zip_slip_parts_before_unpacking() {
         .expect("file");
     std::io::Write::write_all(&mut output, b"unsafe").expect("content");
     let bytes = output.finish().expect("finish").into_inner();
-    assert!(DocumentGenerator::new()
-        .preview(DocumentFormat::Docx, &bytes)
-        .is_err());
+    assert!(
+        DocumentGenerator::new()
+            .preview(DocumentFormat::Docx, &bytes)
+            .is_err()
+    );
 }
 
 #[test]

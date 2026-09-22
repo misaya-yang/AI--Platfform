@@ -4,7 +4,7 @@ AI Gateway's candidate Agent Runtime is derived from OpenAI Codex, licensed
 under the Apache License 2.0.
 
 - Upstream project: <https://github.com/openai/codex>
-- Audited upstream revision: `93c54bca38996b56d344a2ca65f01627b1953b27`
+- Audited upstream revision: `279ba894152b2c01c5294cc0723b463b209bdca4`
 - Upstream LICENSE SHA-256: `d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc`
 - Upstream NOTICE SHA-256: `9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915`
 

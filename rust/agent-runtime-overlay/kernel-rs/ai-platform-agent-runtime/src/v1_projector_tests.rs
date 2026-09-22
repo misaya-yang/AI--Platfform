@@ -213,7 +213,7 @@ fn collaboration_item_projects_stable_child_lifecycle() {
             .iter()
             .filter(|event| event.event_type == "subagent_finished")
             .count(),
-        2
+        0
     );
     assert_eq!(
         completed
@@ -332,7 +332,7 @@ fn collaboration_item_projects_stable_child_lifecycle() {
             .iter()
             .filter(|event| event.event_type == "subagent_finished")
             .count(),
-        1
+        0
     );
 }
 

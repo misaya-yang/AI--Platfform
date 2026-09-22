@@ -104,6 +104,7 @@ fn agent_thread_start_round_trips_through_postgres_store() {
             "userId": user_id,
             "sessionId": session_id,
             "start": {},
+            "toolPolicy": {"allowedTools": []},
         });
         let unauthorized = client
             .post(&create_url)
@@ -314,6 +315,73 @@ fn agent_thread_start_round_trips_through_postgres_store() {
             .expect("second HTTP server task should join")
             .expect("second HTTP server should stop cleanly");
         resumed_runtime.shutdown().await;
+
+        // A failed append may be swallowed by upstream Core. Once PostgreSQL
+        // recovers, the accepted-input durability failure must remain visible.
+        sqlx::raw_sql(AssertSqlSafe(
+            "CREATE FUNCTION reject_rollout_append() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected append failure'; END $$; CREATE TRIGGER reject_rollout_append BEFORE INSERT ON assistant_runtime_items FOR EACH ROW EXECUTE FUNCTION reject_rollout_append();",
+        ))
+        .execute(&pool).await.expect("install isolated append failure");
+        let before = ThreadStore::load_history(
+            store.as_ref(),
+            LoadThreadHistoryParams {
+                thread_id: root_thread_id,
+                include_archived: false,
+            },
+        )
+        .await
+        .expect("history before failed append");
+        let failed = ThreadStore::append_items(
+            store.as_ref(),
+            codex_thread_store::AppendThreadItemsParams {
+                thread_id: root_thread_id,
+                items: vec![before.items[0].clone()],
+            },
+        )
+        .await;
+        assert!(failed.is_err());
+        sqlx::query("DROP TRIGGER reject_rollout_append ON assistant_runtime_items")
+            .execute(&pool)
+            .await
+            .expect("recover PostgreSQL writes");
+        let after = ThreadStore::load_history(
+            store.as_ref(),
+            LoadThreadHistoryParams {
+                thread_id: root_thread_id,
+                include_archived: false,
+            },
+        )
+        .await
+        .expect("healthy database reads resume");
+        assert_eq!(before.items.len(), after.items.len());
+        for checkpoint in [
+            codex_thread_store::PersistContext::ThreadPreparation,
+            codex_thread_store::PersistContext::Standard,
+            codex_thread_store::PersistContext::TurnStart,
+            codex_thread_store::PersistContext::SteeredUserInput,
+        ] {
+            assert!(
+                ThreadStore::persist_thread(store.as_ref(), root_thread_id, checkpoint)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .admit_turn_terminal(root_thread_id, "after-final-model")
+                .await
+                .is_err()
+        );
+        assert!(
+            ThreadStore::flush_thread(store.as_ref(), root_thread_id)
+                .await
+                .is_err()
+        );
+        assert!(
+            ThreadStore::shutdown_thread(store.as_ref(), root_thread_id)
+                .await
+                .is_err()
+        );
         pool.close().await;
         let drop_schema_sql = format!(r#"DROP SCHEMA "{schema}" CASCADE"#);
         sqlx::raw_sql(AssertSqlSafe(drop_schema_sql.as_str()))

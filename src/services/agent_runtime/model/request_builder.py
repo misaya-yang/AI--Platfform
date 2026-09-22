@@ -49,6 +49,10 @@ def _validate_phase2_responses_input(
         if not isinstance(item, Mapping):
             raise AgentModelPlaneError("RUNTIME_RESPONSES_INPUT_INVALID")
         item_type = item.get("type")
+        if item_type in {"additional_tools", "configuration_update"}:
+            # Responses Lite and reasoning overrides need a dedicated adapter;
+            # embedded controls cannot bypass the immutable turn snapshot.
+            raise AgentModelPlaneError("RUNTIME_INPUT_CONTROL_UNSUPPORTED", status_code=422)
         if item_type in {"function_call", "function_call_output"} and not allow_tool_transcript:
             raise AgentModelPlaneError("RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE", status_code=422)
 
@@ -118,6 +122,17 @@ def _native_responses_input(value: Any) -> Any:
             item = {"type": "message", "role": "user", "content": content}
         normalized.append(item)
     return normalized
+
+
+def _tool_output_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(
+        isinstance(part, Mapping) and part.get("type") in {"input_text", "output_text", "text"}
+        and isinstance(part.get("text"), str) for part in value
+    ):
+        return "".join(part["text"] for part in value)
+    return None
 
 
 def _is_replayable_unsupported_tool_result(name: Any, namespace: Any, output: Any) -> bool:
@@ -194,7 +209,7 @@ def _validate_tool_transcript(
             if (
                 not isinstance(call_id, str)
                 or call_id not in pending_calls
-                or not isinstance(output, str)
+                or _tool_output_text(output) is None
             ):
                 _logger.warning(
                     "Tool transcript rejected: function_call_output has_call=%s output_str=%s",
@@ -203,6 +218,10 @@ def _validate_tool_transcript(
                 )
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             name, namespace, allowed_identity = pending_calls[call_id]
+            if (item.get("name") is not None and item["name"] != name) or (
+                item.get("namespace") is not None and item["namespace"] != namespace
+            ):
+                raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             if not allowed_identity and not _is_replayable_unsupported_tool_result(
                 name, namespace, output
             ):
@@ -221,3 +240,35 @@ def _validate_tool_transcript(
             ",".join(sorted(call[0] for call in pending_calls.values()))[:200],
         )
         raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
+
+
+def restrict_snapshot_tools(
+    tools: list[dict[str, Any]], snapshot: Mapping[str, Any],
+    aliases: Mapping[str, tuple[str, str]], *, chat: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply the turn selection after transcript validation, before dispatch.
+
+    History may contain completed calls from an earlier, broader turn. Their
+    schemas can validate replay without granting any new call this turn.
+    """
+    policy = snapshot.get("tool_policy")
+    if policy is None:  # Existing immutable snapshots predate the host ceiling.
+        return tools
+    entries = policy.get("allowedTools") if isinstance(policy, Mapping) else None
+    if not isinstance(entries, list):
+        raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    allowed: set[tuple[str | None, str]] = set()
+    for entry in entries:
+        if (not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str)
+                or (entry.get("namespace") is not None and not isinstance(entry["namespace"], str))):
+            raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+        namespace = entry.get("namespace")
+        allowed.add((None if namespace in (None, "", "functions") else namespace, entry["name"]))
+    result = []
+    for tool in tools:
+        definition = tool.get("function", {}) if chat else tool
+        name = "web_search" if tool.get("type") == "web_search" else definition.get("name")
+        identity = aliases.get(name, (None, name)) if isinstance(name, str) else None
+        if identity in allowed:
+            result.append(tool)
+    return result

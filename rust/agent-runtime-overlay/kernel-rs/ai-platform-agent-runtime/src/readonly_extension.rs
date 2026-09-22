@@ -53,9 +53,7 @@ impl ContextContributor for ReadonlyContextContributor {
                     context.0.clone(),
                 )
                 .render(),
-                codex_extension_api::ContentItemKind(
-                    "ai_platform.readonly_context".to_string(),
-                ),
+                codex_extension_api::ContentItemKind("ai_platform.readonly_context".to_string()),
             )]
         })
     }

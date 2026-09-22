@@ -104,7 +104,7 @@ async def test_repository_scopes_snapshot_and_calls_to_same_tenant_case_and_run(
 async def test_live_runner_enriches_sse_only_trace_before_contract_evaluation(monkeypatch):
     ref, evidence = _evidence()
     trace = {"trace_id": evidence["run_id"], "status": "succeeded", "metadata": {},
-             "model_id": ref["model_id"], "output_preview": "EVAL-MARKER", "spans": [], "metrics": {}}
+             "user_id": "eval-user", "model_id": ref["model_id"], "output_preview": "EVAL-MARKER", "spans": [], "metrics": {}}
     candidate = SimpleNamespace(run=AsyncMock(return_value=EvalCandidateResult(
         trace_id=evidence["run_id"], output="EVAL-MARKER", trace_payload=trace,
         fingerprint={"runtime_revision": "runtime-v1"},

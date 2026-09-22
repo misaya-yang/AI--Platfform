@@ -15,8 +15,15 @@ from .authorization import AgentModelPlaneError
 logger = logging.getLogger("src.services.agent_runtime.model_plane")
 
 class _ResponsesProjector:
-    def __init__(self, *, model_id: str, estimated_input_tokens: int) -> None:
+    def __init__(
+        self, *, model_id: str, estimated_input_tokens: int,
+        tool_aliases: Mapping[str, tuple[str, str]] | None = None,
+        allowed_tool_names: set[str] | None = None,
+    ) -> None:
         self.model_id = model_id
+        self.tool_aliases = tool_aliases or {}
+        self.allowed_tool_names = allowed_tool_names
+        self.tool_argument_bytes = 0
         self.estimated_input_tokens = estimated_input_tokens
         self.response_id = f"resp_{uuid.uuid4().hex}"
         self.reasoning_id = f"rs_{uuid.uuid4().hex}"
@@ -24,6 +31,8 @@ class _ResponsesProjector:
         self.sequence = 0
         self.reasoning = ""
         self.text = ""
+        self.text_bytes = 0
+        self.reasoning_bytes = 0
         self.reasoning_open = False
         self.reasoning_closed = False
         self.message_open = False
@@ -77,6 +86,9 @@ class _ResponsesProjector:
                     ),
                 ]
             )
+        self.reasoning_bytes += len(delta.encode("utf-8"))
+        if self.reasoning_bytes > 8 * 1024 * 1024:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_TEXT_LIMIT", status_code=502)
         self.reasoning += delta
         events.append(
             self._event(
@@ -146,6 +158,9 @@ class _ResponsesProjector:
                     ),
                 ]
             )
+        self.text_bytes += len(delta.encode("utf-8"))
+        if self.text_bytes > 8 * 1024 * 1024:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_TEXT_LIMIT", status_code=502)
         self.text += delta
         events.append(
             self._event(
@@ -205,58 +220,85 @@ class _ResponsesProjector:
             function = raw.get("function")
             if not isinstance(function, Mapping):
                 raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            if index not in self.tool_calls and len(self.tool_calls) >= 256:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_LIMIT", status_code=502)
             call = self.tool_calls.setdefault(
                 index,
                 {
-                    "id": str(raw.get("id") or f"call_{index}"),
+                    "id": "",
                     "type": "function_call",
                     "status": "in_progress",
-                    "call_id": str(raw.get("id") or f"call_{index}"),
+                    "call_id": "",
                     "name": "",
                     "arguments": "",
                 },
             )
+            call_id = raw.get("id")
+            if call_id is not None:
+                if (not isinstance(call_id, str) or not call_id or len(call_id) > 255
+                        or (call["call_id"] and call["call_id"] != call_id)
+                        or any(other is not call and other["call_id"] == call_id for other in self.tool_calls.values())):
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+                call["id"] = call["call_id"] = call_id
             name = function.get("name")
             if name is not None:
                 from .. import model_plane as facade
 
-                if not isinstance(name, str) or not facade._TOOL_NAME_RE.fullmatch(name):
+                if not isinstance(name, str):
                     raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
-                if not call["name"]:
-                    call["name"] = name
-            if index not in self.tool_call_items_added and call["name"]:
-                self.tool_call_items_added.add(index)
-                events.append(
-                    self._event(
-                        "response.output_item.added",
-                        output_index=len(self.output) + index,
-                        item=call,
-                    )
-                )
+                previous_name = call.get("_wire_name", "")
+                wire_name = previous_name if name == previous_name else previous_name + name
+                if not facade._TOOL_NAME_RE.fullmatch(wire_name):
+                    raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
+                if index in self.tool_call_items_added and wire_name != previous_name:
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+                if self.allowed_tool_names is not None and not any(allowed.startswith(wire_name) for allowed in self.allowed_tool_names):
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH", status_code=502)
+                call["_wire_name"] = wire_name
             arguments = function.get("arguments", "")
             if arguments:
                 if not isinstance(arguments, str):
                     raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
-                if not call["name"]:
-                    raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+                size = len(arguments.encode("utf-8"))
+                call_size = int(call.get("_argument_bytes", 0)) + size
+                if call_size > 1024 * 1024 or self.tool_argument_bytes + size > 4 * 1024 * 1024:
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_ARGUMENTS_LIMIT", status_code=502)
+                call["_argument_bytes"] = call_size
+                self.tool_argument_bytes += size
                 call["arguments"] += arguments
-                events.append(
-                    self._event(
-                        "response.function_call_arguments.delta",
-                        item_id=call["call_id"],
-                        output_index=len(self.output) + index,
-                        delta=arguments,
-                    )
-                )
+                call["_pending_arguments"] = call.get("_pending_arguments", "") + arguments
+            if call["call_id"] and call.get("_wire_name") and call.get("_pending_arguments"):
+                events.extend(self._open_tool_call(index, call))
+                events.append(self._event(
+                    "response.function_call_arguments.delta", item_id=call["call_id"],
+                    output_index=len(self.output) + index, delta=call.pop("_pending_arguments"),
+                ))
         return events
+
+    def _open_tool_call(self, index: int, call: dict[str, Any]) -> list[bytes]:
+        if index in self.tool_call_items_added:
+            return []
+        name = call.get("_wire_name")
+        if not call["call_id"] or not name:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+        if self.allowed_tool_names is not None and name not in self.allowed_tool_names:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH", status_code=502)
+        identity = self.tool_aliases.get(name)
+        call["name"] = identity[1] if identity else name
+        if identity:
+            call["namespace"] = identity[0]
+        self.tool_call_items_added.add(index)
+        item = {key: value for key, value in call.items() if not key.startswith("_")}
+        item["arguments"] = ""
+        return [self._event("response.output_item.added", output_index=len(self.output) + index, item=item)]
 
     def close_tool_calls(self) -> list[bytes]:
         events: list[bytes] = []
         base_index = len(self.output)
         for index, call in sorted(self.tool_calls.items()):
-            if not call["name"]:
-                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            events.extend(self._open_tool_call(index, call))
             output_index = base_index + index
+            call = {key: value for key, value in call.items() if not key.startswith("_")}
             events.extend(
                 [
                     self._event(
@@ -347,6 +389,8 @@ class _NativeResponsesStreamValidator:
         *,
         reasoning_visibility: str = "none",
         allow_tools: bool = False,
+        allowed_tool_identities: set[tuple[str | None, str]] | None = None,
+        allow_native_search: bool = False,
     ) -> None:
         self.last_sequence = -1
         self.seen_created = False
@@ -354,6 +398,10 @@ class _NativeResponsesStreamValidator:
         self.tool_aliases = dict(tool_aliases or {})
         self.reasoning_visibility = reasoning_visibility
         self.allow_tools = allow_tools
+        self.allowed_tool_identities = allowed_tool_identities
+        self.allow_native_search = allow_native_search
+        self.argument_bytes: dict[str, int] = {}
+        self.total_argument_bytes = 0
 
     def _normalize_reasoning_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
@@ -376,6 +424,8 @@ class _NativeResponsesStreamValidator:
         resolved = self.tool_aliases.get(alias) if isinstance(alias, str) else None
         if resolved is not None:
             namespace, name = resolved
+            if item.get("namespace") not in (None, "", namespace):
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH", status_code=502)
             item["name"] = name
             item["namespace"] = namespace
 
@@ -398,8 +448,24 @@ class _NativeResponsesStreamValidator:
             raise AgentModelPlaneError("RUNTIME_PROVIDER_USAGE_INVALID", status_code=502)
         return input_tokens, output_tokens
 
+    def _validate_tool_identity(self, item: Any) -> None:
+        if not isinstance(item, Mapping) or self.allowed_tool_identities is None:
+            return
+        if item.get("type") == "function_call":
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and len(arguments.encode("utf-8")) > 1024 * 1024:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_ARGUMENTS_LIMIT", status_code=502)
+            namespace = item.get("namespace") or None
+            name = item.get("name")
+            if (not isinstance(name, str) or (namespace is not None and not isinstance(namespace, str))
+                    or (namespace, name) not in self.allowed_tool_identities):
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH", status_code=502)
+        elif item.get("type") == "web_search_call" and not self.allow_native_search:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH", status_code=502)
+
     def _reject_tool_item(self, event: Mapping[str, Any]) -> None:
         item = event.get("item")
+        self._validate_tool_identity(item)
         allowed = {None, "message", "reasoning"}
         if self.allow_tools:
             allowed.update({"function_call", "web_search_call"})
@@ -467,6 +533,18 @@ class _NativeResponsesStreamValidator:
                 "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
                 status_code=502,
             )
+        if event_type == "response.function_call_arguments.delta":
+            item_id, delta = event.get("item_id"), event.get("delta")
+            if not isinstance(item_id, str) or not item_id or len(item_id) > 255 or not isinstance(delta, str):
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            size = len(delta.encode("utf-8"))
+            count = self.argument_bytes.get(item_id, 0) + size
+            if count > 1024 * 1024 or self.total_argument_bytes + size > 4 * 1024 * 1024:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_ARGUMENTS_LIMIT", status_code=502)
+            if item_id not in self.argument_bytes and len(self.argument_bytes) >= 256:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_TOOL_LIMIT", status_code=502)
+            self.argument_bytes[item_id] = count
+            self.total_argument_bytes += size
         self._restore_tool_namespace(event.get("item"))
         self._reject_tool_item(event)
         encoded = self._encoded(event_type, event)
@@ -479,6 +557,7 @@ class _NativeResponsesStreamValidator:
         if isinstance(output, list):
             for item in output:
                 self._restore_tool_namespace(item)
+                self._validate_tool_identity(item)
                 allowed = {"message", "reasoning"}
                 if self.allow_tools:
                     allowed.update({"function_call", "web_search_call"})
@@ -490,7 +569,7 @@ class _NativeResponsesStreamValidator:
         input_tokens, output_tokens = self._usage(response)
         response_id = response.get("id")
         self.terminal = _NativeResponsesTerminal(
-            event=encoded,
+            event=self._encoded(event_type, event),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             provider_request_id=response_id if isinstance(response_id, str) else None,

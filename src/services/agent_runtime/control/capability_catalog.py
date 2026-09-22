@@ -124,6 +124,16 @@ async def fetch_capability_catalog(
         )
         for descriptor in deferred
     ]
+    # Thread identity binds the authenticated catalog maximum, while each
+    # turn can choose a subset. Keep this transient and out of prompt/snapshot.
+    readonly["_thread_capabilities"] = {
+        **readonly,
+        "tools": plane._allowlisted_catalog_descriptors(readonly["tools"], capability_allowlist),
+        "mcp": plane._allowlisted_catalog_descriptors(readonly["mcp"], capability_allowlist),
+        "deferred": plane._allowlisted_catalog_descriptors(deferred, capability_allowlist)
+        if capability_allowlist is not None else deferred,
+        "responses_tool_names": None,
+    }
     requested_tool_names = readonly.get("responses_tool_names")
     if requested_tool_names is not None:
         catalog_by_name: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -195,6 +205,11 @@ async def fetch_capability_catalog(
         *allowed_deferred,
         *bridges,
         *attachment_tools,
+    ]
+    thread_capabilities = readonly["_thread_capabilities"]
+    thread_capabilities["capability_allowlist"] = [
+        {"id": item["id"], "name": item["name"], "version": item.get("version"), "schema_hash": item.get("schema_hash")}
+        for kind in ("tools", "mcp", "deferred") for item in thread_capabilities[kind]
     ]
     final_allowlist: list[dict[str, Any]] = []
     for item in live_descriptors:

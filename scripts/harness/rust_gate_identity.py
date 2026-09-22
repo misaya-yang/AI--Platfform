@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import stat
+import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 LOCK_SCHEMA = "ai-platform/agent-runtime-source-lock/v2"
 CANONICAL_UPSTREAM_URL = "https://github.com/openai/codex.git"
 OVERLAY_MANIFEST_REL = Path("rust/agent-runtime-overlay/manifest.json")
+OVERLAY_SCHEMA_V1 = "ai-platform/agent-runtime-overlay/v1"
+OVERLAY_SCHEMA_V2 = "ai-platform/agent-runtime-overlay/v2"
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 TOOL_VERSION = re.compile(
@@ -89,6 +93,101 @@ def validate_public_upstream_url(url: str) -> str:
     if url != CANONICAL_UPSTREAM_URL:
         raise GateError("source.upstream_url must be the canonical public HTTPS upstream")
     return url
+
+
+def verify_overlay_upstream_base(*, repo_root: Path, source: Path, upstream_sha: str) -> None:
+    """Verify every v2 overlay file was reviewed against the exact upstream blob."""
+    overlay_root = repo_root / OVERLAY_MANIFEST_REL.parent
+    manifest = load_json_object(overlay_root / "manifest.json", label="overlay manifest")
+    schema = manifest.get("schema_version")
+    if schema not in (OVERLAY_SCHEMA_V1, OVERLAY_SCHEMA_V2):
+        raise GateError(f"unsupported overlay manifest schema: {schema!r}")
+    _required_hex(upstream_sha, length=40, label="upstream_sha")
+    if manifest.get("upstream_sha") != upstream_sha:
+        raise GateError("overlay manifest upstream_sha does not match the locked upstream")
+    if schema == OVERLAY_SCHEMA_V1:
+        # Historical manifests predate per-file provenance; callers pin their
+        # required schema in the release identity to prevent a v2 downgrade.
+        return
+
+    declared = manifest.get("upstream_blobs")
+    if not isinstance(declared, dict):
+        raise GateError("v2 overlay manifest requires an upstream_blobs object")
+    for relative, blob in declared.items():
+        path = PurePosixPath(relative)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != relative or relative == ".":
+            raise GateError(f"invalid overlay upstream_blobs path: {relative!r}")
+        if blob is not None:
+            _required_hex(blob, length=40, label=f"upstream_blobs[{relative!r}]")
+
+    workspace = overlay_root / "kernel-rs"
+    payload: set[str] = set()
+    try:
+        if overlay_root.is_symlink() or workspace.is_symlink() or not workspace.is_dir():
+            raise GateError("overlay workspace must be a real directory")
+        if {entry.name for entry in overlay_root.iterdir()} != {"kernel-rs", "manifest.json"}:
+            raise GateError("v2 overlay payload must be entirely under kernel-rs")
+        directories = [workspace]
+        while directories:
+            directory = directories.pop()
+            for entry in directory.iterdir():
+                mode = entry.lstat().st_mode
+                if stat.S_ISDIR(mode):
+                    directories.append(entry)
+                elif stat.S_ISREG(mode):
+                    payload.add(entry.relative_to(workspace).as_posix())
+                else:
+                    raise GateError(f"overlay payload must be a regular file or directory: {entry}")
+    except OSError as exc:
+        raise GateError(f"cannot inspect overlay payload: {exc}") from exc
+    if not payload or set(declared) != payload:
+        raise GateError(
+            "overlay upstream_blobs must match the exact payload file set: "
+            f"missing={sorted(payload - set(declared))}, extra={sorted(set(declared) - payload)}"
+        )
+
+    try:
+        result = subprocess.run(
+            [
+                "git", "--no-replace-objects", "-C", str(source), "ls-tree",
+                "-r", "-t", "-z", "--full-tree", upstream_sha, "--", "codex-rs",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        raise GateError(f"cannot read locked upstream Git tree: {exc}") from exc
+    if result.returncode != 0:
+        raise GateError(f"cannot read locked upstream Git tree: {result.stderr.strip()}")
+    tree: dict[str, tuple[str, str, str]] = {}
+    try:
+        for record in result.stdout.split("\0"):
+            if record:
+                metadata, path = record.split("\t", 1)
+                mode, kind, blob = metadata.split()
+                tree[path] = (mode, kind, blob)
+    except ValueError as exc:
+        raise GateError("locked upstream Git tree returned invalid entries") from exc
+    if tree.get("codex-rs", (None, None, None))[:2] != ("040000", "tree"):
+        raise GateError("locked upstream Git tree has no codex-rs workspace")
+    for relative in sorted(payload):
+        path = PurePosixPath("codex-rs") / relative
+        for parent in path.parents:
+            entry = tree.get(parent.as_posix())
+            if entry is not None and entry[:2] != ("040000", "tree"):
+                raise GateError(f"overlay path crosses an upstream non-directory: {relative}")
+        entry = tree.get(path.as_posix())
+        if entry is not None and (entry[0] not in {"100644", "100755"} or entry[1] != "blob"):
+            raise GateError(f"overlay target is not an upstream regular file: {relative}")
+        actual = entry[2] if entry is not None else None
+        if declared[relative] != actual:
+            raise GateError(
+                f"overlay upstream blob mismatch for {relative}: "
+                f"declared={declared[relative]!r}, actual={actual!r}"
+            )
 
 
 def load_lock_authority(lock_path: Path) -> LockAuthority:

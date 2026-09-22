@@ -77,6 +77,7 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 
 | Plan | Subject |
 | --- | --- |
+| [Codex内核更新与Gateway兼容优化](plans/codex-harness-refresh-2026-09-22.md) | **active / 实现与集成中** — 从`94cbbdda`升级到指定快照`279ba894`；用户授权多代理代码更新、优化/review及本地Docker/内置浏览器验收。状态以执行账本为准。 |
 | [`plans/agent-platform-vnext-2026-09/README.md`](plans/agent-platform-vnext-2026-09/README.md) | **active / 一期实现** — 三期升级PRD；一期已在 `codex/agent-platform-vnext-phase1` 启动，P1-01首批租户边界代码与验证见执行receipt；二/三期仍为计划。 |
 | [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md) | **superseded as execution instruction** — 证据保留；现行 provider/stability blocker 在 `sota-performance-dual-gate`。 |
 | [`plans/sota-performance-claude-handoff.md`](plans/sota-performance-claude-handoff.md) | **archived intent, pending move** — 已消费的一次性交接提示词，不得再次执行。 |
@@ -121,6 +122,7 @@ state authority; lifecycle conflicts in older ledgers are a named ARC-00 cleanup
 
 Standalone runbooks in the same directory:
 
+- [`codex-harness-refresh-2026-09-22/`](../deploy/runbooks/codex-harness-refresh-2026-09-22/README.md) — 新一轮Codex更新的执行owner；多代理实现、统一Docker/浏览器验收，目标与证据边界见主计划。
 - [`agent-platform-vnext/`](../deploy/runbooks/agent-platform-vnext/README.md) — 一期唯一执行owner；`loop-state.json`与工作包receipt记录当前进度，前序执行owner已移交，历史证据及未完义务保留。
 - `assistant-runtime-operating-model.md` — runtime health, failure categories, no-go thresholds, rollback.
 - `assistant-runtime-trust-hardening.md` — trust boundary hardening.

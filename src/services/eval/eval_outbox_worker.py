@@ -105,7 +105,7 @@ def _build_candidate_runner(repository: AgentTraceRepository):
         if detail is None:
             existing, _ = await repository.list_traces(
                 tenant_id=tenant_id,
-                user_id=EVAL_CANDIDATE_USER_ID,
+                user_id=(run_case.get("runtime_handle") or {}).get("user_id") or EVAL_CANDIDATE_USER_ID,
                 trace_family="assistant",
                 session_id=run_case_id,
                 limit=1,
@@ -188,9 +188,12 @@ def _build_candidate_runner(repository: AgentTraceRepository):
                 trace_payload["spans"] = [*trace_payload.get("spans", []), *model_spans]
                 result = replace(result, fingerprint=fingerprint, usage=usage, trace_payload=trace_payload)
             if result.trace_payload is not None:
+                subject = result.trace_payload.get("user_id")
+                if not isinstance(subject, str) or not subject.strip():
+                    raise RuntimeError("AGENT_EVAL_TRACE_IDENTITY_UNAVAILABLE")
                 await repository.ingest_trace(
                     tenant_id=tenant_id,
-                    created_by=EVAL_CANDIDATE_USER_ID,
+                    created_by=subject,
                     payload={"trace": result.trace_payload, "enqueue": False},
                     enqueue=False,
                 )

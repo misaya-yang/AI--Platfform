@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import sys
 import time
@@ -346,13 +347,41 @@ class AgentModelPlane:
                 self._fail_call(call.call_id, "capacity_rejected", dispatched=False)
             ))
             raise
+        next_sequence = 0
+        response_id: str | None = None
         try:
             chunks = chat_completions.stream(
                 self, body=body, turn_metadata=turn_metadata, authorized_call=call, _helpers=_FACADE_MODULE,
             )
             async with contextlib.aclosing(chunks):
                 async for chunk in chunks:
+                    if chunk.startswith(b"event:"):
+                        if next_sequence == 0:
+                            # Both wires begin with a validated response.created.
+                            # Retain only its identity for a possible failed terminal.
+                            data = next((line[5:].strip() for line in chunk.splitlines() if line.startswith(b"data:")), b"{}")
+                            created = json.loads(data).get("response", {})
+                            response_id = created.get("id") if isinstance(created, dict) else None
+                        next_sequence += 1
                     yield chunk
+        except httpx.HTTPError:
+            # The child iterator has already closed and conservatively marked
+            # dispatched work unknown. Never retry or expose transport details
+            # (which may include provider URLs or request credentials).
+            error = AgentModelPlaneError("RUNTIME_PROVIDER_TRANSPORT_ERROR", status_code=502)
+            if next_sequence == 0:
+                raise error from None
+            response = {
+                "status": "failed",
+                "error": {
+                    "type": "runtime_model_plane_error", "code": error.code,
+                    "message": "The provider connection was interrupted. The outcome is unknown; the request was not retried.",
+                },
+            }
+            if isinstance(response_id, str):
+                response["id"] = response_id
+            event = {"type": "response.failed", "sequence_number": next_sequence, "response": response}
+            yield ("event: response.failed\ndata: " + json.dumps(event, separators=(",", ":")) + "\n\n").encode()
         finally:
             async def finish() -> None:
                 try:

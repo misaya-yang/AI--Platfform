@@ -233,12 +233,12 @@ def _make_plane(clock: FakeClock, content: AsyncIterator[bytes]) -> AgentModelPl
     )
 
 
-async def _drain(plane: AgentModelPlane, call: _AuthorizedCall) -> list[bytes]:
+async def _drain(plane: AgentModelPlane, call: _AuthorizedCall, *, tools: list[dict] | None = None) -> list[bytes]:
     try:
         return [
             chunk
             async for chunk in plane.stream(
-                body={"input": [{"role": "user", "content": "你好"}]},
+                body={"input": [{"role": "user", "content": "你好"}], "tools": tools or []},
                 turn_metadata={},
                 authorized_call=call,
             )
@@ -433,7 +433,9 @@ async def test_tool_only_stream_keeps_projection_missing(
 
     plane = _make_plane(clock, stream())
     with caplog.at_level(logging.INFO, logger=logger_name):
-        await _drain(plane, _make_call("chat_completions"))
+        await _drain(plane, _make_call("chat_completions"), tools=[{
+            "type": "function", "name": "lookup", "description": "Lookup.", "parameters": {"type": "object"},
+        }])
 
     logged = _only_logged_timing(caplog)
     assert logged["provider_wait_seconds"] == pytest.approx(0.0, abs=1e-9)

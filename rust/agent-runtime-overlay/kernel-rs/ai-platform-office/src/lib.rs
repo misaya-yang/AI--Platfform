@@ -650,8 +650,7 @@ fn is_bullet(line: &str) -> bool {
 
 fn looks_like_html(value: &str) -> bool {
     value.as_bytes().windows(2).any(|pair| {
-        pair[0] == b'<'
-            && (pair[1].is_ascii_alphabetic() || pair[1] == b'/' || pair[1] == b'!')
+        pair[0] == b'<' && (pair[1].is_ascii_alphabetic() || pair[1] == b'/' || pair[1] == b'!')
     })
 }
 

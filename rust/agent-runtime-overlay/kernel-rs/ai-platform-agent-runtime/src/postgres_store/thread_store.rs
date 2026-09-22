@@ -12,6 +12,7 @@ use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::StoredModelContext;
 use codex_thread_store::StoredThread;
 use codex_thread_store::StoredThreadHistory;
+use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPage;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
@@ -28,38 +29,99 @@ impl ThreadStore for PostgresThreadStore {
     }
 
     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(PostgresThreadStore::create_thread(self, params))
+        Box::pin(async move {
+            let thread_id = params.thread_id;
+            let result = PostgresThreadStore::create_thread(self, params).await;
+            self.record_write_result(thread_id, result)
+        })
+    }
+
+    fn stage_pending_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.pending_metadata
+                .lock()
+                .await
+                .entry(thread_id)
+                .or_default()
+                .merge(patch);
+            Ok(())
+        })
+    }
+
+    fn read_pending_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<ThreadMetadataPatch>> {
+        Box::pin(async move { Ok(self.pending_metadata.lock().await.get(&thread_id).cloned()) })
+    }
+
+    fn remove_pending_thread_metadata(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.pending_metadata.lock().await.remove(&thread_id);
+            Ok(())
+        })
     }
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
+            self.check_write_health(params.thread_id)?;
             self.ensure_visible(params.thread_id, params.include_archived)
                 .await
         })
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(PostgresThreadStore::append_items(self, params))
+        Box::pin(async move {
+            let thread_id = params.thread_id;
+            self.check_write_health(thread_id)?;
+            let result = PostgresThreadStore::append_items(self, params).await;
+            self.record_write_result(thread_id, result)
+        })
     }
 
     fn persist_thread(
         &self,
-        _thread_id: ThreadId,
+        thread_id: ThreadId,
         _context: PersistContext,
     ) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+        // create, append and metadata updates await PostgreSQL COMMIT. This is
+        // deliberately synchronous for preparation, turn-start and steered input
+        // alike: there is no background queue whose failures could be lost.
+        Box::pin(async move {
+            self.check_write_health(thread_id)?;
+            self.ensure_visible(thread_id, true).await
+        })
     }
 
-    fn flush_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        // A read barrier also surfaces a disconnected store instead of reporting
+        // a successful flush from a no-op after PostgreSQL has become unavailable.
+        Box::pin(async move {
+            self.check_write_health(thread_id)?;
+            self.ensure_visible(thread_id, true).await
+        })
     }
 
-    fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.check_write_health(thread_id)?;
+            self.ensure_visible(thread_id, true).await?;
+            self.pending_metadata.lock().await.remove(&thread_id);
+            Ok(())
+        })
     }
 
-    fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        // The store owns no per-thread file writer. Initialization failure drops
+        // only staged metadata; already committed history stays recoverable.
+        Box::pin(async move {
+            self.clear_host_startup(thread_id).await;
+            self.remove_pending_thread_metadata(thread_id).await
+        })
     }
 
     fn load_history(
@@ -109,7 +171,12 @@ impl ThreadStore for PostgresThreadStore {
         &self,
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
-        Box::pin(PostgresThreadStore::update_thread_metadata(self, params))
+        Box::pin(async move {
+            let thread_id = params.thread_id;
+            self.check_write_health(thread_id)?;
+            let result = PostgresThreadStore::update_thread_metadata(self, params).await;
+            self.record_write_result(thread_id, result)
+        })
     }
 
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
@@ -131,26 +198,90 @@ impl ThreadStore for PostgresThreadStore {
     fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let kernel_thread_id = thread_uuid(params.thread_id)?;
-            let result = sqlx::query(
-                "UPDATE assistant_runtime_thread_projections SET deleted_at = NOW() WHERE kernel_thread_id = $1 AND deleted_at IS NULL",
+            let mut transaction = self.pool.begin().await.map_err(store_error)?;
+            let root_id: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT runtime_thread_id FROM assistant_runtime_thread_members WHERE kernel_thread_id=$1",
             )
             .bind(kernel_thread_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(store_error)?;
-            if result.rows_affected() == 0 {
-                return Err(ThreadStoreError::ThreadNotFound {
-                    thread_id: params.thread_id,
-                });
-            }
+            let Some(root_id) = root_id else {
+                return Ok(());
+            };
+            // Lock even an already tombstoned root so concurrent repeat deletes
+            // remain idempotent. Append takes this same lock before writing.
+            sqlx::query("SELECT runtime_thread_id FROM assistant_runtime_threads WHERE runtime_thread_id=$1 FOR UPDATE")
+                .bind(root_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(store_error)?;
             sqlx::query(
-                "UPDATE assistant_runtime_threads SET deleted_at = NOW() WHERE runtime_thread_id = $1",
+                r#"
+                WITH RECURSIVE descendants AS (
+                    SELECT kernel_thread_id FROM assistant_runtime_thread_members
+                    WHERE kernel_thread_id=$1
+                    UNION
+                    SELECT member.kernel_thread_id
+                    FROM assistant_runtime_thread_members AS member
+                    JOIN descendants ON member.parent_kernel_thread_id=descendants.kernel_thread_id
+                )
+                UPDATE assistant_runtime_thread_projections
+                SET deleted_at=COALESCE(deleted_at, NOW())
+                WHERE kernel_thread_id IN (SELECT kernel_thread_id FROM descendants)
+                   OR ($1=$2 AND runtime_thread_id=$2)
+                "#,
             )
             .bind(kernel_thread_id)
-            .execute(&self.pool)
+            .bind(root_id)
+            .execute(&mut *transaction)
             .await
             .map_err(store_error)?;
+            sqlx::query(
+                "UPDATE assistant_runtime_threads SET deleted_at=COALESCE(deleted_at, NOW()) WHERE runtime_thread_id=$1",
+            )
+            .bind(kernel_thread_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(store_error)?;
+            transaction.commit().await.map_err(store_error)?;
+            self.pending_metadata.lock().await.remove(&params.thread_id);
+            // Append-only audit items, artifacts and platform attachment ACLs
+            // remain retained. Native thread attachments are explicitly unsupported.
             Ok(())
         })
+    }
+}
+
+impl PostgresThreadStore {
+    pub(crate) fn check_write_health(&self, thread_id: ThreadId) -> super::ThreadStoreResult<()> {
+        if self
+            .write_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&thread_id)
+        {
+            return Err(ThreadStoreError::Internal {
+                message: "thread persistence failed; reload from durable history before continuing"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_write_result<T>(
+        &self,
+        thread_id: ThreadId,
+        result: super::ThreadStoreResult<T>,
+    ) -> super::ThreadStoreResult<T> {
+        if result.is_err() {
+            // Core may log an append error and continue. Keep that error sticky
+            // so a later successful database read cannot fabricate a flush fence.
+            self.write_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(thread_id);
+        }
+        result
     }
 }

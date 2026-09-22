@@ -120,6 +120,17 @@ describe("bounded Chat projection", () => {
     expect(state.cancelled).toBe(1);
   });
 
+  it("accepts coalesced valid frames larger than 2 MiB without treating a chunk as a frame", async () => {
+    const delta = "汉".repeat(16 * 1024);
+    const { response, state } = upstream([Array.from({ length: 50 }, () => frame({ content: delta })).join("") + done]);
+    const sink = new Consumer();
+    await project(response, sink);
+    expect(sink.events.filter(event => event.type === "response.output_text.delta").map(event => event.delta).join("")).toBe(delta.repeat(50));
+    expect(sink.events.filter(event => event.type === "response.completed")).toHaveLength(1);
+    expect(sink.events.some(event => event.type === "response.failed")).toBe(false);
+    expect(state.cancelled).toBe(1);
+  });
+
   it("disconnects during backpressure without waiting for drain and cancels upstream", async () => {
     const { response, state } = upstream([frame({ content: "first" }), frame({ content: "unread" }), done]);
     const sink = new Consumer("response.output_text.delta");

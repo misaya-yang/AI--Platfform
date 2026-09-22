@@ -22,7 +22,7 @@ impl PostgresThreadStore {
             .connect(database_url)
             .await
             .map_err(connection_error)?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     // The workspace lint protects SQLite callers; this store is explicitly PostgreSQL.
@@ -37,11 +37,17 @@ impl PostgresThreadStore {
             .connect_with(options)
             .await
             .map_err(connection_error)?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            pending_metadata: Default::default(),
+            write_failures: Default::default(),
+            terminal_identity_cache: Default::default(),
+            staged_startup: Default::default(),
+        }
     }
 
     /// Persists tenant ownership before the matching host-reserved `thread/start`.
@@ -77,7 +83,7 @@ impl PostgresThreadStore {
         Ok(())
     }
 
-    pub(super) async fn root_scope(&self, root_thread_id: Uuid) -> ThreadStoreResult<MemberScope> {
+    pub(crate) async fn root_scope(&self, root_thread_id: Uuid) -> ThreadStoreResult<MemberScope> {
         let row = sqlx::query(
             r#"
             SELECT tenant_id, user_id, session_id
@@ -100,7 +106,7 @@ impl PostgresThreadStore {
         })
     }
 
-    pub(super) async fn member_scope(
+    pub(crate) async fn member_scope(
         &self,
         kernel_thread_id: Uuid,
     ) -> ThreadStoreResult<MemberScope> {

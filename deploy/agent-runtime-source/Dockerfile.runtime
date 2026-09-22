@@ -36,6 +36,26 @@ RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/l
         -p ai-platform-agent-runtime --bin ai-platform-agent-runtime \
     && cp target/dev-small/ai-platform-agent-runtime /tmp/ai-platform-agent-runtime
 
+# Export evidence from the compiled protocol library without invoking Rust on
+# the host. The ordinary runtime image remains the final/default target.
+FROM builder AS source-evidence
+
+RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked \
+    mkdir -p /tmp/source-evidence/schema \
+    && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" CARGO_INCREMENTAL=0 \
+       RUSTFLAGS="-C link-arg=-fuse-ld=lld" \
+       cargo run --locked --profile dev-small -p codex-app-server-protocol \
+         --example ai_platform_export_schema -- /tmp/source-evidence/schema \
+    && cargo metadata --locked --format-version 1 > /tmp/source-evidence/cargo-metadata.json \
+    && cp Cargo.lock /tmp/source-evidence/Cargo.lock \
+    && cargo --version > /tmp/source-evidence/cargo-version.txt \
+    && rustc --version > /tmp/source-evidence/rustc-version.txt
+
+FROM scratch AS source-evidence-export
+COPY --from=source-evidence /tmp/source-evidence/ /
+
 FROM rust:1.95.0-bookworm AS runtime
 
 ARG AI_PLATFORM_AGENT_RUNTIME_FORK_SHA

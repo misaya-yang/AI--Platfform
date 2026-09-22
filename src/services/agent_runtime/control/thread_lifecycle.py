@@ -18,6 +18,7 @@ from urllib.parse import quote
 from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 
 from .http_headers import runtime_headers
+from .tool_policy import runtime_tool_policy
 from .types import (
     BASE_AGENT_INSTRUCTIONS_V1,
     GENERIC_AGENT_INSTRUCTIONS_V1,
@@ -241,6 +242,11 @@ async def ensure_thread(
             capability_revision=capability_revision,
             capability_allowlist=capability_allowlist,
         )
+    generic_product = capability_allowlist is None and readonly_capabilities.get("responses_tool_names") is None
+    selected_capabilities = readonly_capabilities
+    thread_capabilities = readonly_capabilities.pop("_thread_capabilities", None)
+    if isinstance(thread_capabilities, dict):
+        readonly_capabilities = thread_capabilities
     existing = await plane._existing_thread(tenant_id, user_id, session_id)
     if existing:
         fingerprint = plane._dynamic_tool_fingerprint(readonly_capabilities or {})
@@ -292,6 +298,11 @@ async def ensure_thread(
                 "userId": user_id,
                 "sessionId": session_id,
                 "start": start,
+                "toolPolicy": runtime_tool_policy(
+                    readonly_capabilities if generic_product else selected_capabilities, startup=True,
+                    native_search_allowed=(native_web_search_enabled or generic_product),
+                    generic_product=generic_product,
+                ),
             },
         )
         if response.status_code >= 400:
@@ -343,12 +354,13 @@ async def resume_thread(
     tenant_id: str,
     user_id: str,
     session_id: str,
-    model_id: str,
+    model_id: str | None,
     base_instructions: str | None = BASE_AGENT_INSTRUCTIONS_V1,
     developer_instructions: str | None = None,
     model_context_window: int | None = None,
     auto_compact_token_limit: int | None = None,
-    native_web_search_enabled: bool = False,
+    native_web_search_enabled: bool | None = False,
+    tool_policy: dict[str, Any] | None = None,
 ) -> None:
     if developer_instructions is not None and not developer_instructions.strip():
         developer_instructions = GENERIC_AGENT_INSTRUCTIONS_V1
@@ -367,13 +379,16 @@ async def resume_thread(
             "developerInstructions": developer_instructions,
             "modelContextWindow": model_context_window,
             "autoCompactTokenLimit": auto_compact_token_limit,
-            "nativeWebSearchEnabled": native_web_search_enabled,
-        },
+            **({"nativeWebSearchEnabled": native_web_search_enabled}
+               if native_web_search_enabled is not None else {}),
+            **({"toolPolicy": tool_policy} if tool_policy is not None else {}),
+        } if model_id is not None else {},
     )
     if response.status_code >= 400:
         raise AgentRuntimeControlError(
-            "AI_PLATFORM_AGENT_RUNTIME_THREAD_RESUME_FAILED",
-            status_code=503,
+            "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED"
+            if response.status_code == 409 else "AI_PLATFORM_AGENT_RUNTIME_THREAD_RESUME_FAILED",
+            status_code=409 if response.status_code == 409 else 503,
         )
 
 
@@ -387,22 +402,17 @@ async def verify_thread(
     model_id: str,
 ) -> None:
     """Verify that the durable Gateway identity is backed by a live kernel thread."""
-    model = await plane.model_service.get_model(tenant_id, model_id)
-    profile = model.get("effective_capabilities") if isinstance(model, dict) else None
-    native_search = profile.get("native_search") if isinstance(profile, dict) else None
-    tools = profile.get("tools") if isinstance(profile, dict) else None
+    # Cold verification must explicitly reconstruct the private provider route.
+    # A configless resume can load upstream OpenAI defaults before the real turn
+    # can override them. Preserve stored instructions and tool/search authority.
     await plane._resume_thread(
         runtime_thread_id=uuid.UUID(str(runtime_thread_id)),
         tenant_id=tenant_id,
         user_id=user_id,
         session_id=session_id,
         model_id=model_id,
-        native_web_search_enabled=(
-            isinstance(native_search, dict)
-            and native_search.get("enabled") is True
-            and isinstance(tools, dict)
-            and tools.get("web_search_wire") == "native"
-        ),
+        base_instructions=None,
+        native_web_search_enabled=None,
     )
 
 

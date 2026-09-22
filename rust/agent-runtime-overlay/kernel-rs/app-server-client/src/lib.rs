@@ -29,6 +29,7 @@ use std::time::Duration;
 
 pub use codex_app_server::app_server_control_socket_path;
 use codex_app_server::host_runtime::AppServerHostRuntime;
+use codex_app_server::host_runtime::AppServerThreadResumeOptions;
 use codex_app_server::host_runtime::AppServerThreadStartOptions;
 use codex_app_server::host_runtime::AppServerTurnStartOptions;
 pub use codex_app_server::in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
@@ -217,6 +218,7 @@ impl InProcessClientStartArgs {
     /// Builds initialize params from caller-provided metadata.
     pub fn initialize_params(&self) -> InitializeParams {
         let capabilities = InitializeCapabilities {
+            explicit_gateway_oauth: false,
             experimental_api: self.experimental_api,
             request_attestation: false,
             extensions: None,
@@ -270,6 +272,7 @@ enum ClientCommand {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
         response_tx: oneshot::Sender<IoResult<RequestResult>>,
     },
     Notify {
@@ -362,6 +365,7 @@ impl InProcessAppServerClient {
                                 request,
                                 thread_start_options,
                                 turn_start_options,
+                                thread_resume_options,
                                 response_tx,
                             }) => {
                                 let request_sender = request_sender.clone();
@@ -369,20 +373,36 @@ impl InProcessAppServerClient {
                                 // this loop can keep draining runtime events
                                 // while the request is blocked on client input.
                                 tokio::spawn(async move {
-                                    let result = match (thread_start_options, turn_start_options) {
-                                        (Some(options), None) => request_sender
-                                            .request_thread_start(*request, options)
-                                            .await,
-                                        (None, Some(options)) => request_sender
-                                            .request_turn_start(*request, options)
-                                            .await,
-                                        (None, None) => request_sender.request(*request).await,
-                                        (Some(_), Some(_)) => Err(IoError::new(
-                                            ErrorKind::InvalidInput,
-                                            "thread and turn host options are mutually exclusive",
-                                        )),
-                                    };
-                                    let _ = response_tx.send(result);
+                                    // Device ceremonies belong to the waiting UI. Preserve
+                                    // its cancellation through this buffering task.
+                                    let cancellable = matches!(*request,
+                                        ClientRequest::UserVerificationStatus { .. }
+                                        | ClientRequest::UserVerificationEnroll { .. }
+                                        | ClientRequest::UserVerificationDelete { .. }
+                                        | ClientRequest::UserVerificationVerify { .. });
+                                    let mut response_tx = response_tx;
+                                    tokio::select! {
+                                        _ = response_tx.closed(), if cancellable => {}
+                                        result = async {
+                                            match (thread_start_options, turn_start_options, thread_resume_options) {
+                                                (Some(options), None, None) => request_sender
+                                                    .request_thread_start(*request, options)
+                                                    .await,
+                                                (None, Some(options), None) => request_sender
+                                                    .request_turn_start(*request, options)
+                                                    .await,
+                                                (None, None, Some(options)) => request_sender
+                                                    .request_thread_resume(*request, options).await,
+                                                (None, None, None) => request_sender.request(*request).await,
+                                                _ => Err(IoError::new(
+                                                    ErrorKind::InvalidInput,
+                                                    "host request options are mutually exclusive",
+                                                )),
+                                            }
+                                        } => {
+                                            let _ = response_tx.send(result);
+                                        }
+                                    }
                                 });
                             }
                             Some(ClientCommand::Notify {
@@ -472,6 +492,7 @@ impl InProcessAppServerClient {
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         self.request_inner(
             request, /*thread_start_options*/ None, /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
         )
         .await
     }
@@ -482,8 +503,13 @@ impl InProcessAppServerClient {
         request: ClientRequest,
         options: AppServerThreadStartOptions,
     ) -> IoResult<RequestResult> {
-        self.request_inner(request, Some(options), /*turn_start_options*/ None)
-            .await
+        self.request_inner(
+            request,
+            Some(options),
+            /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
+        )
+        .await
     }
 
     /// Starts a turn using a host-reserved platform run identity.
@@ -492,8 +518,28 @@ impl InProcessAppServerClient {
         request: ClientRequest,
         options: AppServerTurnStartOptions,
     ) -> IoResult<RequestResult> {
-        self.request_inner(request, /*thread_start_options*/ None, Some(options))
-            .await
+        self.request_inner(
+            request,
+            /*thread_start_options*/ None,
+            Some(options),
+            /*thread_resume_options*/ None,
+        )
+        .await
+    }
+
+    /// Resumes a thread with the freshly authenticated host tool ceiling.
+    pub async fn request_thread_resume(
+        &self,
+        request: ClientRequest,
+        options: AppServerThreadResumeOptions,
+    ) -> IoResult<RequestResult> {
+        if !matches!(&request, ClientRequest::ThreadResume { .. }) {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "host thread-resume options require a thread/resume request",
+            ));
+        }
+        self.request_inner(request, None, None, Some(options)).await
     }
 
     async fn request_inner(
@@ -501,6 +547,7 @@ impl InProcessAppServerClient {
         request: ClientRequest,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
     ) -> IoResult<RequestResult> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
@@ -508,6 +555,7 @@ impl InProcessAppServerClient {
                 request: Box::new(request),
                 thread_start_options,
                 turn_start_options,
+                thread_resume_options,
                 response_tx,
             })
             .await
@@ -682,6 +730,7 @@ impl InProcessAppServerRequestHandle {
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         self.request_inner(
             request, /*thread_start_options*/ None, /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
         )
         .await
     }
@@ -692,8 +741,13 @@ impl InProcessAppServerRequestHandle {
         request: ClientRequest,
         options: AppServerThreadStartOptions,
     ) -> IoResult<RequestResult> {
-        self.request_inner(request, Some(options), /*turn_start_options*/ None)
-            .await
+        self.request_inner(
+            request,
+            Some(options),
+            /*turn_start_options*/ None,
+            /*thread_resume_options*/ None,
+        )
+        .await
     }
 
     /// Starts a turn using a host-reserved platform run identity.
@@ -702,8 +756,28 @@ impl InProcessAppServerRequestHandle {
         request: ClientRequest,
         options: AppServerTurnStartOptions,
     ) -> IoResult<RequestResult> {
-        self.request_inner(request, /*thread_start_options*/ None, Some(options))
-            .await
+        self.request_inner(
+            request,
+            /*thread_start_options*/ None,
+            Some(options),
+            /*thread_resume_options*/ None,
+        )
+        .await
+    }
+
+    /// Resumes a thread with the freshly authenticated host tool ceiling.
+    pub async fn request_thread_resume(
+        &self,
+        request: ClientRequest,
+        options: AppServerThreadResumeOptions,
+    ) -> IoResult<RequestResult> {
+        if !matches!(&request, ClientRequest::ThreadResume { .. }) {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "host thread-resume options require a thread/resume request",
+            ));
+        }
+        self.request_inner(request, None, None, Some(options)).await
     }
 
     async fn request_inner(
@@ -711,6 +785,7 @@ impl InProcessAppServerRequestHandle {
         request: ClientRequest,
         thread_start_options: Option<AppServerThreadStartOptions>,
         turn_start_options: Option<AppServerTurnStartOptions>,
+        thread_resume_options: Option<AppServerThreadResumeOptions>,
     ) -> IoResult<RequestResult> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
@@ -718,6 +793,7 @@ impl InProcessAppServerRequestHandle {
                 request: Box::new(request),
                 thread_start_options,
                 turn_start_options,
+                thread_resume_options,
                 response_tx,
             })
             .await
@@ -848,6 +924,23 @@ impl AppServerRequestHandle {
 }
 
 impl AppServerClient {
+    /// App-server platform family, which can differ from the executor's platform.
+    /// Older remote servers may omit this metadata.
+    pub fn platform_family(&self) -> Option<&str> {
+        match self {
+            Self::InProcess(_) => Some(std::env::consts::FAMILY),
+            Self::Remote(client) => client.platform_family(),
+        }
+    }
+
+    /// App-server operating system as reported at initialization, including unknown values.
+    pub fn platform_os(&self) -> Option<&str> {
+        match self {
+            Self::InProcess(_) => Some(std::env::consts::OS),
+            Self::Remote(client) => client.platform_os(),
+        }
+    }
+
     pub fn codex_home(&self, local_codex_home: &AbsolutePathBuf) -> Option<AppServerPath> {
         match self {
             Self::InProcess(_) => Some(AppServerPath::from_app_server(
@@ -1102,6 +1195,22 @@ mod tests {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        expect_remote_initialize_with_metadata(
+            websocket,
+            serde_json::json!({
+                "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
+                "codexHome": "/server/.codex",
+            }),
+        )
+        .await;
+    }
+
+    async fn expect_remote_initialize_with_metadata<S>(
+        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+        metadata: serde_json::Value,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let JSONRPCMessage::Request(request) = read_websocket_message(websocket).await else {
             panic!("expected initialize request");
         };
@@ -1110,10 +1219,7 @@ mod tests {
             websocket,
             JSONRPCMessage::Response(JSONRPCResponse {
                 id: request.id,
-                result: serde_json::json!({
-                    "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
-                    "codexHome": "/server/.codex",
-                }),
+                result: metadata,
             }),
         )
         .await;
@@ -1199,6 +1305,7 @@ mod tests {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
         })
     }
@@ -1249,7 +1356,15 @@ mod tests {
 
     #[tokio::test]
     async fn typed_request_roundtrip_works() {
-        let client = start_test_client(SessionSource::Exec).await;
+        let TestClient {
+            _codex_home,
+            client,
+        } = start_test_client(SessionSource::Exec).await;
+        let client = AppServerClient::InProcess(client);
+        assert_eq!(
+            (client.platform_family(), client.platform_os()),
+            (Some(std::env::consts::FAMILY), Some(std::env::consts::OS))
+        );
         let _response: ConfigRequirementsReadResponse = client
             .request_typed(ClientRequest::ConfigRequirementsRead {
                 request_id: RequestId::Integer(1),
@@ -1426,6 +1541,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_platform_metadata_preserves_reported_and_missing_values() {
+        for (family, os) in [
+            (Some("windows"), Some("windows")),
+            (Some("unix"), Some("linux")),
+            (Some("future-family"), Some("future-os")),
+            (Some("unix"), None),
+            (None, Some("linux")),
+            (None, None),
+        ] {
+            let websocket_url = start_test_remote_server(move |mut websocket| async move {
+                let mut metadata = serde_json::json!({});
+                if let Some(family) = family {
+                    metadata["platformFamily"] = family.into();
+                }
+                if let Some(os) = os {
+                    metadata["platformOs"] = os.into();
+                }
+                expect_remote_initialize_with_metadata(&mut websocket, metadata).await;
+                websocket.close(None).await.expect("close should succeed");
+            })
+            .await;
+            let client = AppServerClient::Remote(
+                RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+                    .await
+                    .expect("remote client should connect"),
+            );
+            assert_eq!(
+                (client.platform_family(), client.platform_os()),
+                (family, os)
+            );
+            client.shutdown().await.expect("shutdown should complete");
+        }
+    }
+
+    #[tokio::test]
     async fn remote_typed_request_roundtrip_works() {
         let websocket_url = start_test_remote_server(|mut websocket| async move {
             expect_remote_initialize(&mut websocket).await;
@@ -1439,6 +1589,7 @@ mod tests {
                 JSONRPCMessage::Response(JSONRPCResponse {
                     id: request.id,
                     result: serde_json::to_value(GetAccountResponse {
+                        workspace_routing: None,
                         account: None,
                         requires_openai_auth: false,
                     })
@@ -1493,6 +1644,7 @@ mod tests {
                 JSONRPCMessage::Response(JSONRPCResponse {
                     id: request.id,
                     result: serde_json::to_value(GetAccountResponse {
+                        workspace_routing: None,
                         account: None,
                         requires_openai_auth: false,
                     })
@@ -1569,6 +1721,7 @@ mod tests {
         assert_eq!(
             response,
             GetAccountResponse {
+                workspace_routing: None,
                 account: None,
                 requires_openai_auth: false,
             }
@@ -1672,6 +1825,7 @@ mod tests {
                 JSONRPCMessage::Response(JSONRPCResponse {
                     id: request.id,
                     result: serde_json::to_value(GetAccountResponse {
+                        workspace_routing: None,
                         account: None,
                         requires_openai_auth: false,
                     })
@@ -1725,6 +1879,7 @@ mod tests {
         assert_eq!(
             first_response,
             GetAccountResponse {
+                workspace_routing: None,
                 account: None,
                 requires_openai_auth: false,
             }

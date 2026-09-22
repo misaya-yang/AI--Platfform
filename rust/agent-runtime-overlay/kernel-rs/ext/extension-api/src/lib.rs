@@ -1,22 +1,25 @@
 mod capabilities;
 mod contributors;
 mod registry;
+mod session_isolation;
 mod state;
+mod tool_policy;
+mod turn_admission;
 mod user_instructions;
 
-pub use capabilities::AgentSpawnFuture;
-pub use capabilities::AgentSpawner;
+pub use session_isolation::SessionIsolation;
+pub use tool_policy::ToolPolicy;
+
 pub use capabilities::ConversationHistorySnapshot;
 pub use capabilities::ExtensionEventSink;
 pub use capabilities::ExtensionMetrics;
 pub use capabilities::ExtensionWarning;
-pub use capabilities::InternalSessionSpawnFuture;
-pub use capabilities::InternalSessionSpawner;
 pub use capabilities::NoopExtensionEventSink;
 pub use capabilities::NoopResponseItemInjector;
 pub use capabilities::ResponseItemInjectionFuture;
 pub use capabilities::ResponseItemInjector;
 pub use codex_context_fragments::ContextualUserFragment;
+pub use codex_mcp::McpProtocolMode;
 pub use codex_mcp::ToolInfo as McpToolInfo;
 pub use codex_protocol::models::ContentItemKind;
 pub use codex_protocol::models::ResponseItem;
@@ -40,13 +43,14 @@ pub use codex_tools::TurnItemEmissionFuture;
 pub use codex_tools::TurnItemEmitter;
 pub use codex_tools::parse_tool_input_schema;
 pub use codex_tools::parse_tool_input_schema_without_compaction;
-pub use contributors::ApprovalAssessment;
+pub use contributors::ApprovalDecision;
+pub use contributors::ApprovalDecisionInput;
 pub use contributors::ApprovalReviewContributor;
-pub use contributors::ApprovalReviewError;
-pub use contributors::ApprovalReviewInput;
+pub use contributors::CommandStartInput;
 pub use contributors::ConfigContributor;
 pub use contributors::ContextContributor;
 pub use contributors::ExtensionFuture;
+pub use contributors::GuardianV2Enabled;
 pub use contributors::McpServerContribution;
 pub use contributors::McpServerContributionContext;
 pub use contributors::McpServerContributor;
@@ -62,6 +66,7 @@ pub use contributors::SelectedPluginSnapshot;
 pub use contributors::SkillInvocationContributor;
 pub use contributors::SkillInvocationInput;
 pub use contributors::SkillInvocationKind;
+pub use contributors::SynchronousApprovalReviewer;
 pub use contributors::ThreadIdleCause;
 pub use contributors::ThreadIdleInput;
 pub use contributors::ThreadLifecycleContributor;
@@ -89,6 +94,7 @@ pub use contributors::TurnInputEnvironment;
 pub use contributors::TurnItemContributor;
 pub use contributors::TurnLifecycleContributor;
 pub use contributors::TurnStartInput;
+pub use contributors::TurnStartPhase;
 pub use contributors::TurnStopInput;
 pub use contributors::WorldStateContributionInput;
 pub use contributors::WorldStateSectionContribution;
@@ -97,7 +103,22 @@ pub use registry::ExtensionRegistryBuilder;
 pub use registry::empty_extension_registry;
 pub use state::ExtensionData;
 pub use state::ExtensionDataInit;
+pub use turn_admission::TurnStartAdmission;
 pub use user_instructions::Instructions;
-pub use user_instructions::LoadUserInstructionsFuture;
+pub use user_instructions::LoadInstructionsFuture;
 pub use user_instructions::LoadedUserInstructions;
+pub use user_instructions::ThreadInstructionsProvider;
 pub use user_instructions::UserInstructionsProvider;
+
+/// Host startup marker requiring durable thread history before every model request.
+/// Standalone upstream sessions leave this absent and retain their persistence behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct RequireDurableThreadStore;
+
+/// Authenticated startup data resolved from the host's durable root membership.
+/// Returning this data also requires durable history before model dispatch.
+#[derive(Clone, Debug)]
+pub struct HostThreadStartupData {
+    pub tool_policy: ToolPolicy,
+    pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+}

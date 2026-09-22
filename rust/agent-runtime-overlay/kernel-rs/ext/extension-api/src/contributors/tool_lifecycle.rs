@@ -2,13 +2,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub use codex_tools::ToolEffect;
 use codex_config::McpServerConfig;
+use codex_file_system::ExecutorFileSystem;
 use codex_mcp::McpServerSource;
 use codex_mcp::PreparedMcpCall;
 use codex_mcp::ResolvedMcpServer;
 use codex_protocol::mcp::CallToolResult;
 pub use codex_tools::ToolCallSource;
+pub use codex_tools::ToolEffect;
 use codex_tools::ToolName;
 use codex_tools::ToolPayload;
 use codex_utils_path_uri::PathUri;
@@ -136,6 +137,9 @@ pub struct ToolStartInput<'a> {
     pub root_turn_id: Option<&'a str>,
     /// Model-visible tool call id.
     pub call_id: &'a str,
+    /// Responses item that issued this call or started its code-mode cell.
+    /// Hosts preserve the original wrapper identity across yields and waits.
+    pub originating_item_id: Option<&'a codex_protocol::ResponseItemId>,
     /// Tool name as routed by the host.
     pub tool_name: &'a ToolName,
     /// Read-only metadata and provenance from the exact MCP call that will execute.
@@ -150,6 +154,31 @@ pub struct ToolStartInput<'a> {
     pub source: ToolCallSource,
     /// Declared side-effect class from the executable tool metadata.
     pub effect: ToolEffect,
+}
+
+/// Finalized builtin command and the executor that will run it.
+///
+/// This runs after command hooks and environment resolution, before command
+/// attribution and measurement selection. Filesystem paths belong to the selected
+/// executor and must not be interpreted as host-local paths.
+pub struct CommandStartInput<'a> {
+    /// Store scoped to the host session runtime.
+    pub session_store: &'a ExtensionData,
+    /// Store scoped to this thread runtime.
+    pub thread_store: &'a ExtensionData,
+    /// Store scoped to this turn runtime.
+    pub turn_store: &'a ExtensionData,
+    /// Current turn submission id.
+    pub turn_id: &'a str,
+    /// Host tool call id.
+    pub call_id: &'a str,
+    /// Resolved argv, including the selected executor's shell wrapper.
+    /// Commands can contain sensitive plaintext and must not be logged.
+    pub command: &'a [String],
+    /// Effective working directory in the selected executor.
+    pub cwd: &'a PathUri,
+    /// Filesystem of the selected executor.
+    pub file_system: &'a dyn ExecutorFileSystem,
 }
 
 /// Input supplied after an MCP server responds, before the host reports completion.

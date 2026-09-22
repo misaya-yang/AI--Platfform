@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
@@ -22,7 +26,7 @@ use uuid::Uuid;
 
 mod events;
 mod identity;
-mod projection;
+pub(crate) mod projection;
 mod thread_store;
 
 pub(crate) use self::events::PlatformLifecycleEvent;
@@ -60,20 +64,28 @@ impl PlatformThreadIdentity {
 #[derive(Clone)]
 pub struct PostgresThreadStore {
     pub(crate) pool: PgPool,
+    pending_metadata: Arc<tokio::sync::Mutex<HashMap<ThreadId, ThreadMetadataPatch>>>,
+    write_failures: Arc<std::sync::Mutex<HashSet<ThreadId>>>,
+    terminal_identity_cache: Arc<std::sync::Mutex<HashMap<ThreadId, PlatformThreadIdentity>>>,
+    pub(crate) staged_startup:
+        Arc<tokio::sync::Mutex<HashMap<ThreadId, crate::tool_policy::PlatformStartupData>>>,
 }
 
 #[derive(Clone, Debug)]
-struct MemberScope {
-    root_thread_id: Uuid,
+pub(crate) struct MemberScope {
+    pub(crate) root_thread_id: Uuid,
     tenant_id: String,
     user_id: String,
     session_id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct ThreadProjection {
-    created: Option<CreateThreadParams>,
+pub(crate) struct ThreadProjection {
+    #[serde(default, deserialize_with = "deserialize_creation_metadata")]
+    pub(crate) created: Option<CreateThreadParams>,
     metadata: ThreadMetadataPatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_policy: Option<crate::tool_policy::PlatformToolPolicy>,
 }
 
 impl PostgresThreadStore {
@@ -106,7 +118,7 @@ impl PostgresThreadStore {
         sqlx::query(
             "UPDATE assistant_runtime_thread_projections \
                 SET deleted_at=NOW(), updated_at=NOW() \
-              WHERE kernel_thread_id=$1 AND deleted_at IS NULL",
+              WHERE runtime_thread_id=$1 AND deleted_at IS NULL",
         )
         .bind(runtime_thread_id)
         .execute(&mut *transaction)
@@ -129,7 +141,7 @@ impl PostgresThreadStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
+    async fn create_thread(&self, mut params: CreateThreadParams) -> ThreadStoreResult<()> {
         let kernel_thread_id = thread_uuid(params.thread_id)?;
         let (scope, relation_kind) = if let Some(parent_thread_id) = params.parent_thread_id {
             (
@@ -155,13 +167,25 @@ impl PostgresThreadStore {
                     message: format!("invalid Agent session id: {error}"),
                 }
             })?;
+        // Managed creation identity comes from the authenticated platform scope.
+        // A tenant is not a ChatGPT account and must never populate that field.
+        params.creator_user_id = Some(scope.user_id.clone());
+        params.creator_account_id = None;
         let projection = ThreadProjection {
             created: Some(params.clone()),
             metadata: ThreadMetadataPatch::default(),
+            tool_policy: self
+                .staged_startup
+                .lock()
+                .await
+                .get(&params.thread_id)
+                .map(|startup| startup.policy.clone()),
         };
         let creation_metadata = serde_json::to_value(&params).map_err(json_error)?;
         let projection_json = serde_json::to_value(&projection).map_err(json_error)?;
         let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        self.lock_root(&mut transaction, scope.root_thread_id)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO assistant_runtime_thread_members (
@@ -240,10 +264,12 @@ impl PostgresThreadStore {
             .await
             .map_err(store_error)?;
         }
-        transaction.commit().await.map_err(store_error)?;
-
+        // The member, projection and canonical first history item become visible
+        // together. A crash cannot leave a resumable thread with no session meta.
         let session_meta = session_meta_item(&params);
-        self.append_items_with_keys(
+        self.append_items_in_transaction(
+            &mut transaction,
+            &scope,
             params.thread_id,
             vec![(
                 format!("rollout/session-meta/{}", params.thread_id),
@@ -251,7 +277,19 @@ impl PostgresThreadStore {
                 session_meta,
             )],
         )
-        .await
+        .await?;
+        transaction.commit().await.map_err(store_error)?;
+        self.staged_startup.lock().await.remove(&params.thread_id);
+        self.cache_terminal_identity(
+            params.thread_id,
+            PlatformThreadIdentity::new(
+                ThreadId::from_u128(scope.root_thread_id.as_u128()),
+                scope.tenant_id,
+                scope.user_id,
+                scope.session_id,
+            ),
+        );
+        Ok(())
     }
 
     async fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreResult<()> {
@@ -289,6 +327,31 @@ impl PostgresThreadStore {
         let kernel_thread_id = thread_uuid(thread_id)?;
         let scope = self.member_scope(kernel_thread_id).await?;
         let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        self.lock_root(&mut transaction, scope.root_thread_id)
+            .await?;
+        let visible: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM assistant_runtime_thread_projections WHERE kernel_thread_id=$1 AND deleted_at IS NULL)",
+        )
+        .bind(kernel_thread_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        if !visible {
+            return Err(ThreadStoreError::ThreadNotFound { thread_id });
+        }
+        self.append_items_in_transaction(&mut transaction, &scope, thread_id, items)
+            .await?;
+        transaction.commit().await.map_err(store_error)
+    }
+
+    async fn append_items_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        scope: &MemberScope,
+        thread_id: ThreadId,
+        items: Vec<(String, Uuid, RolloutItem)>,
+    ) -> ThreadStoreResult<()> {
+        let kernel_thread_id = thread_uuid(thread_id)?;
         for (event_key, event_id, item) in items {
             let payload = serde_json::to_value(item).map_err(json_error)?;
             let payload_hash = payload_hash(&payload)?;
@@ -311,11 +374,11 @@ impl PostgresThreadStore {
             .bind(item_type)
             .bind(payload)
             .bind(payload_hash)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await
             .map_err(store_error)?;
         }
-        transaction.commit().await.map_err(store_error)
+        Ok(())
     }
 
     async fn load_history(
@@ -386,7 +449,11 @@ impl PostgresThreadStore {
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreResult<Option<StoredThread>> {
         let kernel_thread_id = thread_uuid(params.thread_id)?;
+        let scope = self.member_scope(kernel_thread_id).await?;
+        let mut pending = self.pending_metadata.lock().await;
         let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        self.lock_root(&mut transaction, scope.root_thread_id)
+            .await?;
         let row = sqlx::query(
             r#"
             SELECT projection, archived_at, deleted_at
@@ -411,7 +478,25 @@ impl PostgresThreadStore {
         }
         let value: Value = row.try_get("projection").map_err(store_error)?;
         let mut projection: ThreadProjection = serde_json::from_value(value).map_err(json_error)?;
-        projection.metadata.merge(params.patch);
+        let mut patch = pending.get(&params.thread_id).cloned().unwrap_or_default();
+        patch.merge(params.patch);
+        // Creator and originator fields are fill-only; ordinary metadata patches
+        // cannot change the authenticated creator or the creation-time originator.
+        patch.creator_user_id = projection
+            .metadata
+            .creator_user_id
+            .is_none()
+            .then(|| scope.user_id.clone());
+        patch.creator_account_id = None;
+        patch.originator = if projection.metadata.originator.is_none() {
+            projection
+                .created
+                .as_ref()
+                .map(|created| created.originator.clone())
+        } else {
+            None
+        };
+        projection.metadata.merge(patch);
         sqlx::query(
             "UPDATE assistant_runtime_thread_projections SET projection = $2 WHERE kernel_thread_id = $1",
         )
@@ -421,6 +506,8 @@ impl PostgresThreadStore {
         .await
         .map_err(store_error)?;
         transaction.commit().await.map_err(store_error)?;
+        pending.remove(&params.thread_id);
+        drop(pending);
         self.read_thread(ReadThreadParams {
             thread_id: params.thread_id,
             include_archived: params.include_archived,
@@ -429,4 +516,27 @@ impl PostgresThreadStore {
         .await
         .map(Some)
     }
+}
+
+/// Target dynamic tools use tagged namespaces. Normalize old flat creation
+/// metadata on read while retaining the original durable JSON and history.
+fn deserialize_creation_metadata<'de, D>(
+    deserializer: D,
+) -> Result<Option<CreateThreadParams>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let Some(mut value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(tools) = value.get_mut("dynamic_tools") {
+        let raw: Vec<Value> = serde_json::from_value(tools.clone()).map_err(D::Error::custom)?;
+        let normalized = codex_protocol::dynamic_tools::normalize_dynamic_tool_specs(raw)
+            .map_err(D::Error::custom)?;
+        *tools = serde_json::to_value(normalized).map_err(D::Error::custom)?;
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(D::Error::custom)
 }

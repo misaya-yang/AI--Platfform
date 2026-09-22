@@ -47,28 +47,45 @@ pub(super) struct ResumeThreadRequest {
     /// reloading a Thread. This is profile data from Gateway, never inferred
     /// from the model id or user prompt.
     #[serde(default)]
-    native_web_search_enabled: bool,
+    native_web_search_enabled: Option<bool>,
     base_instructions: Option<String>,
     developer_instructions: Option<String>,
+    tool_policy: Option<crate::tool_policy::PlatformToolPolicy>,
 }
 
 pub(super) async fn resume_thread(
     State(state): State<RuntimeHttpState>,
     Path(thread_id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<ResumeThreadRequest>,
+    Json(mut body): Json<ResumeThreadRequest>,
 ) -> Result<Json<ThreadResumeResponse>, RuntimeError> {
     let thread_id = authorize_thread_scope(&state, &headers, &thread_id).await?;
+    let tool_policy = state
+        .store
+        .resolve_tool_policy(thread_id, body.tool_policy.take())
+        .await
+        .map_err(RuntimeError::from_store)?;
+    body.native_web_search_enabled = body
+        .native_web_search_enabled
+        .map(|enabled| enabled && tool_policy.allows_native_search());
     let params = resume_params(thread_id, body)?;
-    request_typed(
-        &state,
-        ClientRequest::ThreadResume {
-            request_id: lifecycle_request_id("thread-resume", thread_id),
-            params,
-        },
-        "invalid_agent_thread_resume_response",
-    )
-    .await
+    let result = state
+        .requests
+        .request_thread_resume(
+            ClientRequest::ThreadResume {
+                request_id: lifecycle_request_id("thread-resume", thread_id),
+                params,
+            },
+            codex_app_server::host_runtime::AppServerThreadResumeOptions::new(
+                tool_policy.kernel_policy(),
+            ),
+        )
+        .await
+        .map_err(|_| RuntimeError::unavailable("agent_kernel_unavailable"))?
+        .map_err(|_| RuntimeError::bad_request("agent_thread_lifecycle_rejected"))?;
+    serde_json::from_value(result)
+        .map(Json)
+        .map_err(|_| RuntimeError::internal("invalid_agent_thread_resume_response"))
 }
 
 /// Interrupts one active turn after checking the platform-owned thread
@@ -84,6 +101,17 @@ pub(super) async fn interrupt_turn(
     let thread_id = authorize_thread_scope(&state, &headers, &thread_id).await?;
     if turn_id.is_empty() || turn_id.len() > 255 {
         return Err(RuntimeError::bad_request("invalid_turn_id"));
+    }
+    let belongs_to_thread: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM assistant_runtime_snapshots WHERE runtime_thread_id=$1 AND run_id::text=$2)",
+    )
+    .bind(Uuid::parse_str(&thread_id.to_string()).map_err(|_| RuntimeError::bad_request("invalid_thread_id"))?)
+    .bind(&turn_id)
+    .fetch_one(&state.store.pool)
+    .await
+    .map_err(|_| RuntimeError::unavailable("runtime_lease_store_unavailable"))?;
+    if !belongs_to_thread {
+        return Err(RuntimeError::not_found("turn_not_found"));
     }
     state.cancel_turn(&turn_id);
     request_typed(
@@ -112,6 +140,7 @@ fn resume_params(
         native_web_search_enabled,
         base_instructions,
         developer_instructions,
+        tool_policy: _,
     } = body;
     validate_instructions(base_instructions.as_deref(), "base_instructions")?;
     validate_instructions(developer_instructions.as_deref(), "developer_instructions")?;
@@ -157,14 +186,16 @@ fn resume_params(
             }
         }),
     );
-    config.insert(
-        "web_search".to_string(),
-        if native_web_search_enabled {
-            "live".into()
-        } else {
-            "disabled".into()
-        },
-    );
+    if let Some(enabled) = native_web_search_enabled {
+        config.insert(
+            "web_search".to_string(),
+            if enabled {
+                "live".into()
+            } else {
+                "disabled".into()
+            },
+        );
+    }
     config.insert(
         "features".to_string(),
         json!({
@@ -175,6 +206,7 @@ fn resume_params(
             },
         }),
     );
+    crate::tool_policy::apply_managed_feature_profile(&mut config);
     let mut params = ThreadResumeParams {
         thread_id: thread_id.to_string(),
         model: Some(model),

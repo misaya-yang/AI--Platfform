@@ -38,12 +38,17 @@ function createTimeoutSignal(
   if (ms > 0) {
     timer = setTimeout(() => controller.abort(new Error("SSE stream timeout")), ms);
   }
+  const forwardAbort = () => controller.abort(existingSignal?.reason);
   if (existingSignal) {
-    existingSignal.addEventListener("abort", () => controller.abort(existingSignal.reason), { once: true });
+    if (existingSignal.aborted) forwardAbort();
+    else existingSignal.addEventListener("abort", forwardAbort, { once: true });
   }
   return {
     signal: controller.signal,
-    cleanup: () => { if (timer) clearTimeout(timer); },
+    cleanup: () => {
+      if (timer) clearTimeout(timer);
+      existingSignal?.removeEventListener("abort", forwardAbort);
+    },
   };
 }
 
@@ -184,6 +189,11 @@ export interface AGUIEvent {
   [key: string]: unknown;
 }
 
+/**
+ * Read authenticated SSE data. Returning early (including a durable terminal)
+ * cancels the body; failed connections release their timeout and abort listener
+ * so callers can reconnect without retaining resources from the previous read.
+ */
 export async function* sseFetch<T>(
   url: string,
   init: SSEFetchOptions
@@ -195,11 +205,17 @@ export async function* sseFetch<T>(
   }
 
   const { signal: timeoutSignal, cleanup: cleanupTimeout } = createTimeoutSignal(init.signal, init.timeoutMs);
-  const resp = await fetch(url, {
-    ...init,
-    headers: authenticatedHeaders(init.headers),
-    signal: timeoutSignal,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      ...init,
+      headers: authenticatedHeaders(init.headers),
+      signal: timeoutSignal,
+    });
+  } catch (error) {
+    cleanupTimeout();
+    throw error;
+  }
 
   if (debug) {
     console.log(
@@ -208,9 +224,13 @@ export async function* sseFetch<T>(
   }
   
   if (!resp.ok || !resp.body) {
-    const errorDetail = await readResponseErrorDetail(resp);
-    const suffix = errorDetail ? ` ${errorDetail}` : "";
-    throw new Error(`SSE request failed: ${resp.status}${suffix}`);
+    try {
+      const errorDetail = await readResponseErrorDetail(resp);
+      const suffix = errorDetail ? ` ${errorDetail}` : "";
+      throw new Error(`SSE request failed: ${resp.status}${suffix}`);
+    } finally {
+      cleanupTimeout();
+    }
   }
   const reader = resp.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -222,11 +242,11 @@ export async function* sseFetch<T>(
     aborted = true;
     void reader.cancel().catch(() => {});
   };
-  init.signal?.addEventListener("abort", abortReader, { once: true });
+  timeoutSignal.addEventListener("abort", abortReader, { once: true });
 
   try {
     while (true) {
-      if (aborted || init.signal?.aborted) {
+      if (aborted || timeoutSignal.aborted) {
         break;
       }
       const { done, value } = await reader.read();
@@ -297,7 +317,8 @@ export async function* sseFetch<T>(
       }
     }
   } finally {
-    init.signal?.removeEventListener("abort", abortReader);
+    timeoutSignal.removeEventListener("abort", abortReader);
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
     cleanupTimeout();
   }
@@ -400,6 +421,7 @@ export async function* sseFetchEvents<T>(
     }
   } finally {
     signal.removeEventListener("abort", abortReader);
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
     cleanupTimeout();
   }
@@ -550,6 +572,7 @@ export async function* sseFetchAGUI(
     }
   } finally {
     init.signal?.removeEventListener("abort", abortReader);
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

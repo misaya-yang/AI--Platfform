@@ -466,6 +466,19 @@ def validate_lock(
         manifest = _load_object(
             overlay_root / "manifest.json", label="Agent Runtime overlay manifest"
         )
+        manifest_schema = manifest.get("schema_version")
+        if manifest_schema == "ai-platform/agent-runtime-overlay/v2" or build.get(
+            "overlay_manifest_schema"
+        ) == "ai-platform/agent-runtime-overlay/v2":
+            manifest_digest = sha256_file(overlay_root / "manifest.json")
+            if (
+                manifest_schema != "ai-platform/agent-runtime-overlay/v2"
+                or build.get("overlay_manifest_schema") != manifest_schema
+                or overlay.get("manifest_schema") != manifest_schema
+                or build.get("overlay_manifest_sha256") != manifest_digest
+                or overlay.get("manifest_sha256") != manifest_digest
+            ):
+                raise ContractError("overlay upstream-base manifest is not pinned by lock and receipt")
         if (
             manifest.get("sha256") != actual_overlay["sha256"]
             or manifest.get("file_count") != actual_overlay["file_count"]
@@ -687,7 +700,13 @@ def refresh_source_lock(*, repo_root: Path, lock_path: Path) -> None:
     }
     if build.get("overlay_manifest"):
         lock["build"]["overlay_manifest"] = build["overlay_manifest"]
-        lock["build"]["overlay_sha256"] = build.get("overlay_sha256")
+        refreshed_overlay = receipt.get("overlay") or {}
+        lock["build"]["overlay_sha256"] = refreshed_overlay.get("sha256")
+        lock["build"]["overlay_file_count"] = refreshed_overlay.get("file_count")
+        lock["build"]["overlay_cargo_lock_sha256"] = refreshed_overlay.get("cargo_lock_sha256")
+        if (receipt.get("overlay") or {}).get("manifest_schema"):
+            lock["build"]["overlay_manifest_schema"] = receipt["overlay"]["manifest_schema"]
+            lock["build"]["overlay_manifest_sha256"] = receipt["overlay"].get("manifest_sha256")
     lock["license"] = {
         "spdx": "Apache-2.0",
         "notice": notice_rel,
@@ -806,6 +825,12 @@ def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path) 
         "source_revision": fork_sha,
         "upstream_sha": upstream_sha,
     }
+    if manifest.get("schema_version") == "ai-platform/agent-runtime-overlay/v2":
+        manifest_digest = sha256_file(manifest_path)
+        receipt["overlay"]["manifest_schema"] = manifest["schema_version"]
+        receipt["overlay"]["manifest_sha256"] = manifest_digest
+        build["overlay_manifest_schema"] = manifest["schema_version"]
+        build["overlay_manifest_sha256"] = manifest_digest
     receipt["capability_worker_schema_sha256"] = schema_sha
     receipt["capability_worker_sbom"] = {
         "format": "CycloneDX-1.5",

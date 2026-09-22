@@ -275,7 +275,38 @@ def crate_for_path(repo_root: Path, rel_path: str) -> tuple[str | None, Path | N
             return None, None
         current = parent
 
-def plan(repo_root: Path, changed: list[str]) -> tuple[dict[str, list[str]], list[str]]:
+def workspace_authority_changed(repo_root: Path, base: str | None, lock_path: Path) -> bool:
+    """Narrow receipt refreshes only when the compiled inputs are provably unchanged."""
+    current = load_lock_authority(lock_path)
+    if base is None:
+        return True
+    try:
+        baseline_text = _run_git(repo_root, "show", f"{base}:{LOCK_REL.as_posix()}")
+        with tempfile.TemporaryDirectory(prefix="rust-gate-base-lock-") as tmp:
+            baseline_path = Path(tmp) / "lock.json"
+            baseline_path.write_text(baseline_text, encoding="utf-8")
+            baseline = load_lock_authority(baseline_path)
+    except (GateError, OSError):
+        # Missing/older baseline identity cannot justify a partial test selection.
+        return True
+    compile_inputs = (
+        "upstream_sha",
+        "upstream_url",
+        "cargo_version",
+        "rustc_version",
+        "overlay_manifest",
+        "overlay_cargo_lock_sha256",
+    )
+    return any(getattr(current, key) != getattr(baseline, key) for key in compile_inputs)
+
+
+def plan(
+    repo_root: Path,
+    changed: list[str],
+    *,
+    base: str | None = None,
+    lock_path: Path | None = None,
+) -> tuple[dict[str, list[str]], list[str]]:
     crates: dict[str, list[str]] = {}
     unmapped: list[str] = []
     identity_paths: list[str] = []
@@ -298,9 +329,17 @@ def plan(repo_root: Path, changed: list[str]) -> tuple[dict[str, list[str]], lis
             unmapped.append(rel)
             continue
         crates.setdefault(name, []).append(rel)
-    # A receipt-only source/overlay identity change still exercises the whole
-    # workspace. Alongside real crate changes it must not erase their selector.
-    if identity_paths and not crates:
+    # A new upstream/toolchain/dependency lock affects unmodified upstream crates
+    # and all platform consumers. Only proven receipt refreshes retain a narrow
+    # selector alongside real crate changes; receipt-only changes still run all.
+    if identity_paths and (
+        not crates
+        or (
+            "@workspace" not in crates
+            and LOCK_REL.as_posix() in identity_paths
+            and workspace_authority_changed(repo_root, base, lock_path or repo_root / LOCK_REL)
+        )
+    ):
         crates["@workspace"] = identity_paths
     if "@workspace" in crates:
         all_paths = sorted(path for paths in crates.values() for path in paths)
@@ -374,6 +413,9 @@ def compose_workspace(
     authority: LockAuthority,
     destination: Path,
 ) -> tuple[Path, dict[str, str]]:
+    _identity.verify_overlay_upstream_base(
+        repo_root=repo_root, source=source_root, upstream_sha=authority.upstream_sha
+    )
     archive_path = destination / "upstream.tar"
     composed = destination / "source"
     composed.mkdir()
@@ -483,7 +525,7 @@ def execute_gate(
         "control_selftest": "pass" if control_selftest_passed else "not-run",
     }
     try:
-        crates, unmapped = plan(repo_root, changed)
+        crates, unmapped = plan(repo_root, changed, base=base, lock_path=lock_path)
         control_paths = sorted(set(changed) & GATE_CONTROL_PATHS)
         if not crates and not unmapped:
             if control_paths:

@@ -38,7 +38,10 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-sqlx = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
+sqlx-postgres = { workspace = true }
+# Keep the shared SQLite driver's Executor feature in sync with sqlx-core.
+sqlx-sqlite = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = { workspace = true }

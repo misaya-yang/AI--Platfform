@@ -168,9 +168,9 @@ async def stream_events(
                                 )
                                 + "\n\n"
                             ).encode()
-                        if event_type in {"run_finished", "run_error"}:
-                            terminal_status = str(event_data.get("status") or "failed")
-                    elif event_type in {"run_finished", "run_error"}:
+                        if event_type in {"run_finished", "run_error", "cancelled"}:
+                            terminal_status = "cancelled" if event_type == "cancelled" else str(event_data.get("status") or "failed")
+                    elif event_type in {"run_finished", "run_error", "cancelled"}:
                         _logger.warning(
                             "Terminal %s not matched to turn run_id=%s (event run_id=%r); "
                             "V1 stream will not close on it",
@@ -180,11 +180,13 @@ async def stream_events(
                             if isinstance(event_data, dict)
                             else None,
                         )
+            if terminal_status:
+                # Clients can disconnect immediately after terminal delivery.
+                # Release the run and model lease before exposing that event.
+                await plane._complete_run(uuid.UUID(turn.run_id), terminal_status)
             yield encoded
             if terminal_status:
                 break
-    if terminal_status:
-        await plane._complete_run(uuid.UUID(turn.run_id), terminal_status)
 
 
 async def stream_thread_events(
@@ -253,7 +255,7 @@ async def stream_thread_events(
                 # A stream without a turn filter is a durable whole-thread
                 # cursor. An older turn reaching terminal state must not hide
                 # later turns from backlog replay or close the live stream.
-                if event_type in {"run_finished", "run_error"} and isinstance(event_data, dict):
+                if event_type in {"run_finished", "run_error", "cancelled"} and isinstance(event_data, dict):
                     event_run_id = str(event_data.get("run_id") or "")
                     try:
                         completed_id = uuid.UUID(event_run_id)
@@ -267,7 +269,7 @@ async def stream_thread_events(
                             completed_id, tenant_id, user_id, session_id, uuid.UUID(runtime_thread_id),
                         ))
                     if completed_id is not None and scoped:
-                        status = str(event_data.get("status") or "failed")
+                        status = "cancelled" if event_type == "cancelled" else str(event_data.get("status") or "failed")
                         await plane._complete_run(completed_id, status)
                         if turn_id:
                             terminal_status = status

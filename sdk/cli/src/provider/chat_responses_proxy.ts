@@ -90,6 +90,7 @@ async function handleProxyRequest(
     const chatBody = responsesToChat(body);
     const upstream = await openUpstream(provider, env, chatBody, clientAbort.signal);
     if (!upstream.ok) {
+      await upstream.body?.cancel();
       jsonError(response, 502, `provider_http_${upstream.status}`);
       return;
     }
@@ -115,7 +116,7 @@ async function handleProxyRequest(
   } catch (error) {
     if (response.writableEnded || response.destroyed) return;
     const code = error instanceof CompatibilityError ? error.code : "chat_compatibility_stream_failed";
-    if (!response.headersSent) jsonError(response, error instanceof CompatibilityError ? 400 : 502, code);
+    if (!response.headersSent) jsonError(response, error instanceof CompatibilityError ? error.status : 502, code);
     else response.destroy(new Error(code));
   }
 }
@@ -129,7 +130,6 @@ async function openUpstream(
   const url = chatCompletionsUrl(provider);
   const headers = providerHeaders(provider, env);
   const retries = provider.request_max_retries ?? 4;
-  let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     if (signal.aborted) throw signal.reason;
     const controller = new AbortController();
@@ -148,15 +148,16 @@ async function openUpstream(
       const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
       await delay(Math.min(retryAfter ?? 250 * 2 ** attempt, 5_000), signal);
     } catch (error) {
-      lastError = error;
-      if (attempt === retries || signal.aborted) throw error;
-      await delay(Math.min(250 * 2 ** attempt, 5_000), signal);
+      if (signal.aborted) throw error;
+      // A transport failure does not establish that the provider rejected the
+      // request. Replaying it could duplicate model work or emitted tool intent.
+      throw new CompatibilityError("provider_outcome_unknown", 502);
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", forward);
     }
   }
-  throw lastError ?? new Error("provider request failed");
+  throw new CompatibilityError("provider_outcome_unknown", 502);
 }
 
 function providerHeaders(provider: ProviderProfile, env: NodeJS.ProcessEnv): Record<string, string> {

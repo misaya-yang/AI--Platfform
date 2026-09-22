@@ -104,10 +104,18 @@ async fn async_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         )
         .await?,
     );
+    // Use the upstream catalog with the supported Gateway wire selected. This
+    // is model metadata, not a new model loop or a guessed config flag.
+    let model_catalog_path = prepare_gateway_model_catalog(&args.agent_home)?;
+    let cli_overrides = vec![(
+        "model_catalog_json".to_string(),
+        toml::Value::String(model_catalog_path.to_string_lossy().into_owned()),
+    )];
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let config = Arc::new(
         ConfigBuilder::default()
             .codex_home(args.agent_home)
+            .cli_overrides(cli_overrides.clone())
             .fallback_cwd(Some(args.runtime_workdir))
             .loader_overrides(loader_overrides.clone())
             .build()
@@ -120,7 +128,7 @@ async fn async_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         InProcessClientStartArgs {
             arg0_paths,
             config,
-            cli_overrides: Vec::new(),
+            cli_overrides,
             loader_overrides,
             strict_config: true,
             cloud_config_bundle: CloudConfigBundleLoader::default(),
@@ -202,6 +210,29 @@ fn prepare_isolated_agent_home(path: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn prepare_gateway_model_catalog(agent_home: &Path) -> std::io::Result<PathBuf> {
+    let mut catalog =
+        codex_models_manager::bundled_models_response().map_err(std::io::Error::other)?;
+    for model in &mut catalog.models {
+        model.use_responses_lite = false;
+    }
+    let path = agent_home.join("gateway-model-catalog.json");
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Gateway model catalog must not be a symlink",
+        ));
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&catalog).map_err(std::io::Error::other)?,
+    )?;
+    Ok(path)
 }
 
 async fn shutdown_signal() {

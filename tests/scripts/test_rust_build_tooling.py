@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts.harness.rust_changed_crate_gate import cargo_environment, cargo_test_command
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,19 +93,29 @@ def _install_source_locked_build_fakes(repo: Path) -> None:
         """from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 repo = Path(sys.argv[sys.argv.index("--repo-root") + 1])
 lock_path = Path(sys.argv[sys.argv.index("--lock") + 1])
+command = sys.argv[1]
 artifact = None
-if "--require-artifact" in sys.argv:
+if command == "validate" and "--require-artifact" in sys.argv:
     artifact = sys.argv[sys.argv.index("--require-artifact") + 1]
+if command not in {"validate", "verify-local-images"}:
+    raise SystemExit(2)
+step = f"validate:{artifact or 'source'}" if command == "validate" else command
 with (repo / "build-trace.log").open("a", encoding="utf-8") as trace:
-    trace.write(f"validate:{artifact or 'source'}\\n")
+    trace.write(f"{step}\\n")
+if os.environ.get("FAKE_SUPPLY_CHAIN_FAIL_STEP") == step:
+    raise SystemExit(1)
 lock = json.loads(lock_path.read_text(encoding="utf-8"))
-if artifact is not None:
-    selected = lock["oci"]["artifacts"][artifact]
+artifacts = [artifact] if artifact is not None else []
+if command == "verify-local-images":
+    artifacts = ["agent_runtime", "capability_worker"]
+for selected_artifact in artifacts:
+    selected = lock["oci"]["artifacts"][selected_artifact]
     if not selected["candidate_start_allowed"] or not selected["image_digest"]:
         raise SystemExit(1)
 """,
@@ -205,7 +217,8 @@ def test_build_update_dry_run_is_locked_local_only_and_calls_real_entries(tmp_pa
     runtime_build = result.stdout.index("build_agent_runtime_image.sh")
     runtime_validation = result.stdout.index("--require-artifact agent_runtime")
     worker_validation = result.stdout.index("--require-artifact capability_worker")
-    assert source_validation < runtime_build < runtime_validation < worker_validation
+    pair_validation = result.stdout.index("agent_runtime_supply_chain.py verify-local-images")
+    assert source_validation < runtime_build < runtime_validation < worker_validation < pair_validation
     assert "DRY RUN" in result.stdout
     assert not (repo / ".git/ai-gateway-locks/.low-memory").exists()
     assert not (repo / ".git/ai-gateway-locks/rust-build").exists()
@@ -238,6 +251,7 @@ def test_build_update_builds_before_requiring_empty_source_lock_artifacts(tmp_pa
         "build:capability_worker",
         "validate:agent_runtime",
         "validate:capability_worker",
+        "verify-local-images",
     ]
     updated = json.loads(
         (repo / "deploy/agent-runtime-source/lock.json").read_text(encoding="utf-8")
@@ -247,6 +261,49 @@ def test_build_update_builds_before_requiring_empty_source_lock_artifacts(tmp_pa
         updated["oci"]["artifacts"][artifact]["candidate_start_allowed"]
         for artifact in ("agent_runtime", "capability_worker")
     )
+
+
+@pytest.mark.parametrize(
+    ("failed_step", "expected_trace"),
+    (
+        ("validate:source", ["validate:source"]),
+        (
+            "verify-local-images",
+            [
+                "validate:source",
+                "build:agent_runtime",
+                "build:capability_worker",
+                "validate:agent_runtime",
+                "validate:capability_worker",
+                "verify-local-images",
+            ],
+        ),
+    ),
+)
+def test_build_update_stops_on_source_or_pair_verification_failure(
+    tmp_path: Path, failed_step: str, expected_trace: list[str]
+) -> None:
+    repo, source = _fixture_repo(tmp_path)
+    _install_source_locked_build_fakes(repo)
+    result = subprocess.run(
+        ["bash", "scripts/rust/build-update.sh", "--artifact", "all"],
+        cwd=repo,
+        env={
+            **os.environ,
+            "AI_PLATFORM_AGENT_RUNTIME_SOURCE": str(source),
+            "AI_PLATFORM_RUST_MIN_AVAILABLE_MEMORY_MB": "1",
+            "AI_PLATFORM_RUST_MIN_FREE_DISK_MB": "1",
+            "FAKE_SUPPLY_CHAIN_FAIL_STEP": failed_step,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "Rust build completed" not in result.stdout
+    assert (repo / "build-trace.log").read_text(encoding="utf-8").splitlines() == expected_trace
 
 
 def test_build_update_allows_only_explicit_documentation_and_receipt_wip(

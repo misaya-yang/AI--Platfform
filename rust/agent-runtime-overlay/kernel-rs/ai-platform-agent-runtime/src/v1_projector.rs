@@ -276,6 +276,32 @@ fn project_collab_item(
 ) -> Option<Vec<AssistantTurnEventV1>> {
     let value = serde_json::to_value(item).ok()?;
     let object = value.as_object()?;
+    if object.get("type")?.as_str()? == "subAgentActivity" {
+        if matches!(phase, ToolProjectionPhase::Started) {
+            return Some(Vec::new());
+        }
+        let (event_type, status) = match object.get("kind")?.as_str()? {
+            "started" => ("subagent_started", "running"),
+            "completed" => ("subagent_finished", "completed"),
+            "interrupted" => ("subagent_finished", "cancelled"),
+            "interacted" => ("subagent_step", "running"),
+            _ => return None,
+        };
+        return Some(vec![AssistantTurnEventV1::new(
+            event_type,
+            json!({
+                "agent_id": object.get("agentThreadId")?,
+                "agent_path": object.get("agentPath"),
+                "agent_type": "task",
+                "call_id": object.get("id")?,
+                "parent_task_id": thread_id,
+                "task_id": turn_id,
+                "session_id": context.session_id,
+                "thread_id": thread_id,
+                "status": status,
+            }),
+        )]);
+    }
     if object.get("type")?.as_str()? != "collabAgentToolCall" {
         return None;
     }
@@ -323,6 +349,11 @@ fn project_collab_item(
         receiver_ids
             .into_iter()
             .flat_map(|agent_id| {
+                let child_status = object.get("agentsStates")
+                    .and_then(|states| states.get(&agent_id))
+                    .and_then(|state| state.get("status"))
+                    .and_then(Value::as_str);
+                let child_terminal = matches!(child_status, Some("completed" | "errored" | "interrupted" | "shutdown"));
                 let data = json!({
                     "agent_id": agent_id,
                     "agent_type": agent_type,
@@ -333,11 +364,13 @@ fn project_collab_item(
                     "session_id": context.session_id,
                     "thread_id": thread_id,
                     "tool": tool,
-                    "status": status,
+                    "status": if tool == "spawnAgent" { child_status.unwrap_or("running") } else { status },
                 });
                 let event_type = match (tool, phase) {
                     ("spawnAgent", ToolProjectionPhase::Started) => "subagent_started",
-                    ("spawnAgent", ToolProjectionPhase::Completed) => "subagent_finished",
+                    ("spawnAgent", ToolProjectionPhase::Completed) if child_terminal => "subagent_finished",
+                    // A successful spawn only means the child was accepted.
+                    ("spawnAgent", ToolProjectionPhase::Completed) => "subagent_step",
                     (_, _) => "subagent_step",
                 };
                 let data = if tool == "spawnAgent" {
@@ -381,6 +414,9 @@ fn tool_data(item: &ThreadItem) -> Option<serde_json::Map<String, Value>> {
     let item_id = object.get("id")?.as_str()?;
     projected.insert("tool_call_id".to_string(), item_id.into());
     projected.insert("tool_name".to_string(), tool_name.into());
+    if let Some(namespace) = object.get("namespace") {
+        projected.insert("tool_namespace".to_string(), namespace.clone());
+    }
     if let Some(arguments) = object.get("arguments") {
         projected.insert("arguments".to_string(), arguments.clone());
     }
@@ -401,6 +437,48 @@ fn tool_data(item: &ThreadItem) -> Option<serde_json::Map<String, Value>> {
 #[cfg(test)]
 mod tests {
     use super::tool_terminal_failed;
+
+    #[test]
+    fn native_subagent_completion_is_separate_from_spawn_acceptance() {
+        let item: codex_app_server_protocol::ThreadItem =
+            serde_json::from_value(serde_json::json!({
+                "type": "subAgentActivity", "id": "activity-1", "kind": "completed",
+                "agentThreadId": "child-1", "agentPath": "/root/child",
+            }))
+            .expect("native child activity");
+        let context = super::V1ProjectionContext {
+            tenant_id: "tenant".to_string(),
+            user_id: "user".to_string(),
+            session_id: "session".to_string(),
+        };
+        let events = super::project_collab_item(
+            &item,
+            "root",
+            "turn",
+            &context,
+            super::ToolProjectionPhase::Completed,
+        )
+        .expect("native activity projection");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "subagent_finished");
+        assert_eq!(events[0].data["agent_id"], "child-1");
+    }
+
+    #[test]
+    fn same_named_dynamic_tools_keep_distinct_namespaces() {
+        for namespace in ["alpha", "beta"] {
+            let item: codex_app_server_protocol::ThreadItem =
+                serde_json::from_value(serde_json::json!({
+                    "type": "dynamicToolCall", "id": "call-1", "namespace": namespace,
+                    "tool": "lookup", "arguments": {}, "status": "completed",
+                    "contentItems": [], "success": true, "durationMs": 1,
+                }))
+                .expect("target dynamic tool item");
+            let projected = super::tool_data(&item).expect("tool projection");
+            assert_eq!(projected["tool_name"], "lookup");
+            assert_eq!(projected["tool_namespace"], namespace);
+        }
+    }
 
     #[test]
     fn non_successful_tool_statuses_are_projected_as_failures() {

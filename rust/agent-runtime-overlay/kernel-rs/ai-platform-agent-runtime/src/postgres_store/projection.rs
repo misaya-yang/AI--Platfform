@@ -24,7 +24,29 @@ use super::PostgresThreadStore;
 use super::ThreadProjection;
 
 impl PostgresThreadStore {
-    pub(super) async fn load_projection(
+    /// Every mutating writer takes the root lock before a projection lock. This
+    /// is also the deletion fence: no append can race past a committed tombstone.
+    pub(crate) async fn lock_root(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        root_thread_id: Uuid,
+    ) -> ThreadStoreResult<()> {
+        let root: Option<Uuid> = sqlx::query_scalar(
+            "SELECT runtime_thread_id FROM assistant_runtime_threads WHERE runtime_thread_id=$1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(root_thread_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(store_error)?;
+        if root.is_none() {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: ThreadId::from_u128(root_thread_id.as_u128()),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn load_projection(
         &self,
         thread_id: ThreadId,
         include_archived: bool,
@@ -36,9 +58,13 @@ impl PostgresThreadStore {
     )> {
         let row = sqlx::query(
             r#"
-            SELECT projection, archived_at, deleted_at, created_at, updated_at
-            FROM assistant_runtime_thread_projections
-            WHERE kernel_thread_id = $1
+            SELECT projection.projection, projection.archived_at, projection.deleted_at,
+                   projection.created_at, projection.updated_at
+            FROM assistant_runtime_thread_projections AS projection
+            JOIN assistant_runtime_threads AS root
+              ON root.runtime_thread_id = projection.runtime_thread_id
+             AND root.deleted_at IS NULL
+            WHERE projection.kernel_thread_id = $1
             "#,
         )
         .bind(thread_uuid(thread_id)?)
@@ -109,6 +135,14 @@ impl PostgresThreadStore {
 pub(super) fn session_meta_item(params: &CreateThreadParams) -> RolloutItem {
     RolloutItem::SessionMeta(SessionMetaLine {
         meta: SessionMeta {
+            creator_user_id: params.creator_user_id.clone(),
+            creator_account_id: params.creator_account_id.clone(),
+            runtime_workspace_roots: params.runtime_workspace_roots.as_ref().map(|roots| {
+                roots
+                    .iter()
+                    .map(|root| root.as_path().to_path_buf())
+                    .collect()
+            }),
             session_id: params.session_id,
             id: params.thread_id,
             forked_from_id: params.forked_from_id,
@@ -148,6 +182,8 @@ pub(super) fn stored_thread(
 ) -> StoredThread {
     let resolved_git_info = git_info(&metadata);
     StoredThread {
+        originator: Some(created.originator.clone()),
+        daybreak_enabled: metadata.daybreak_enabled,
         thread_id,
         extra_config: created.extra_config,
         rollout_path: metadata.rollout_path,
@@ -212,7 +248,7 @@ fn git_info(metadata: &ThreadMetadataPatch) -> Option<codex_protocol::protocol::
     })
 }
 
-pub(super) fn thread_uuid(thread_id: ThreadId) -> ThreadStoreResult<Uuid> {
+pub(crate) fn thread_uuid(thread_id: ThreadId) -> ThreadStoreResult<Uuid> {
     Uuid::parse_str(&thread_id.to_string()).map_err(|error| ThreadStoreError::InvalidRequest {
         message: format!("invalid Agent thread id: {error}"),
     })
@@ -223,13 +259,13 @@ pub(super) fn payload_hash(payload: &Value) -> ThreadStoreResult<String> {
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
-pub(super) fn json_error(error: serde_json::Error) -> ThreadStoreError {
+pub(crate) fn json_error(error: serde_json::Error) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: format!("failed to encode thread-store payload: {error}"),
     }
 }
 
-pub(super) fn store_error(error: sqlx::Error) -> ThreadStoreError {
+pub(crate) fn store_error(error: sqlx::Error) -> ThreadStoreError {
     if let sqlx::Error::Database(database_error) = &error
         && database_error.code().as_deref() == Some("23505")
     {

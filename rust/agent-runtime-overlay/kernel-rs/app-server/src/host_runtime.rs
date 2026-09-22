@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use codex_core::config::Config;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolPolicy;
 use codex_protocol::ThreadId;
 use codex_thread_store::ThreadStore;
 
@@ -13,16 +14,46 @@ use codex_thread_store::ThreadStore;
 #[derive(Clone, Debug)]
 pub struct AppServerThreadStartOptions {
     reserved_thread_id: ThreadId,
+    tool_policy: Option<ToolPolicy>,
 }
 
 impl AppServerThreadStartOptions {
     /// Creates host options for one pre-authorized root thread identity.
     pub fn new(reserved_thread_id: ThreadId) -> Self {
-        Self { reserved_thread_id }
+        Self {
+            reserved_thread_id,
+            tool_policy: None,
+        }
+    }
+
+    /// Captures the authenticated host tool ceiling before the thread starts.
+    pub fn with_tool_policy(mut self, tool_policy: ToolPolicy) -> Self {
+        self.tool_policy = Some(tool_policy);
+        self
+    }
+
+    pub(crate) fn tool_policy(&self) -> Option<&ToolPolicy> {
+        self.tool_policy.as_ref()
     }
 
     pub(crate) fn reserved_thread_id(&self) -> ThreadId {
         self.reserved_thread_id
+    }
+}
+
+/// Host-only tool ceiling supplied again for a `thread/resume` request.
+#[derive(Clone, Debug)]
+pub struct AppServerThreadResumeOptions {
+    tool_policy: ToolPolicy,
+}
+
+impl AppServerThreadResumeOptions {
+    pub fn new(tool_policy: ToolPolicy) -> Self {
+        Self { tool_policy }
+    }
+
+    pub(crate) fn tool_policy(&self) -> &ToolPolicy {
+        &self.tool_policy
     }
 }
 

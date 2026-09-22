@@ -306,3 +306,22 @@ def test_candidate_client_uses_compose_gateway_port_by_default(monkeypatch: pyte
     monkeypatch.delenv("AGENT_EVAL_GATEWAY_URL", raising=False)
     monkeypatch.delenv("GATEWAY_URL", raising=False)
     assert EvalCandidateClient().base_url == "http://gateway:8080"
+
+
+async def test_candidate_trace_uses_verified_subject_and_retains_kernel_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict[str, Any]] = []
+    _install_fake_client(monkeypatch, captured, [
+        _FakeResponse({"thread": {"thread_id": "thread-1", "runtime": {"owner": "agent_runtime"}}}),
+        _FakeResponse({"turn": {"id": "turn-1", "events_url": "/api/v2/agent/threads/thread-1/events"}}),
+        _FakeResponse(lines=[
+            _v2_event("run_started", {"run_id": "turn-1", "kernel_revision": "target-sha"}, 1),
+            _v2_event("context_budget", {"tool_schema_hash": "tools"}, 2),
+            _v2_event("text_delta", {"content": "answer"}, 3),
+            _v2_event("run_finished", {"status": "succeeded"}, 4),
+        ]),
+    ])
+    monkeypatch.setenv("AGENT_EVAL_AUTH_TOKEN", "test-token")
+    monkeypatch.setattr(candidate_module, "build_assistant_runtime_trace", lambda **kwargs: kwargs)
+    result = await EvalCandidateClient().run(tenant_id="tenant-a", run_case_id="case", message="hello", config={})
+    assert result.trace_payload["user_id"] == "eval-user"
+    assert result.fingerprint == {"runtime_revision": "target-sha", "tool_schema_hash": "tools"}

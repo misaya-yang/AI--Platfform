@@ -117,16 +117,31 @@ pub(super) async fn route_kernel_events(
                             let events = events.clone();
                             let request_id = request_id.clone();
                             let params = params.clone();
-                            let cancel = turn_cancellations
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .entry(params.turn_id.clone())
-                                .or_insert_with(|| runtime_cancel.child_token())
-                                .clone();
+                            let thread_id = ThreadId::from_string(&params.thread_id);
+                            let root_turn_id = match thread_id {
+                                Ok(thread_id) => store.root_turn_id(thread_id, &params.turn_id).await.ok(),
+                                Err(_) => None,
+                            };
+                            let Some(root_turn_id) = root_turn_id else {
+                                let _ = request_handle.reject_server_request(
+                                    request_id,
+                                    JSONRPCErrorError { code: -32001, message: "capability turn attribution unavailable".to_string(), data: None },
+                                );
+                                continue;
+                            };
+                            let cancel = {
+                                let mut cancellations = turn_cancellations.lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let parent = cancellations.entry(root_turn_id.clone())
+                                    .or_insert_with(|| runtime_cancel.child_token()).clone();
+                                cancellations.entry(params.turn_id.clone())
+                                    .or_insert_with(|| parent.child_token()).clone()
+                            };
                             tokio::spawn(async move {
                                 let _permit = permit;
                                 let result = handle_dynamic_tool_call(
                                     &params,
+                                    &root_turn_id,
                                     &store,
                                     &readonly_by_turn,
                                     &capability_client,
@@ -187,6 +202,7 @@ pub(super) async fn route_kernel_events(
 
 async fn handle_dynamic_tool_call(
     params: &codex_app_server_protocol::DynamicToolCallParams,
+    root_turn_id: &str,
     store: &PostgresThreadStore,
     readonly_by_turn: &Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
     capability_client: &reqwest::Client,
@@ -203,12 +219,12 @@ async fn handle_dynamic_tool_call(
     let cached_binding = readonly_by_turn
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&params.turn_id)
+        .get(root_turn_id)
         .cloned();
     // Re-check the durable lease on every call. The in-memory entry is only a
     // consistency witness; using it as authority would allow a revoked lease
     // or completed run to invoke the capability plane.
-    let mut binding = load_readonly_turn_binding(store, &identity, &params.turn_id).await?;
+    let mut binding = load_readonly_turn_binding(store, &identity, root_turn_id).await?;
     if let Some(cached_binding) = cached_binding {
         if cached_binding.snapshot_id != binding.snapshot_id
             || cached_binding.capability_revision != binding.capability_revision
@@ -217,6 +233,7 @@ async fn handle_dynamic_tool_call(
         }
         binding.trace_context = cached_binding.trace_context;
     }
+    let execution_params = execution_params(params, &identity, root_turn_id);
     let (capability_allowlist, expected_tool, descriptor, effect) =
         crate::readonly_capabilities::resolve_dynamic_capability_descriptor(
             &binding.payload,
@@ -260,6 +277,9 @@ async fn handle_dynamic_tool_call(
                 "turn_id": params.turn_id,
                 "tool_call_id": params.call_id,
                 "tool_name": params.tool,
+                "tool_namespace": params.namespace,
+                "root_turn_id": root_turn_id,
+                "execution_call_id": execution_params.call_id,
                 "arguments_sha256": arguments_sha256,
                 "lifecycle": if effect == CapabilityEffect::Read {
                     "dispatched"
@@ -319,11 +339,18 @@ async fn handle_dynamic_tool_call(
     let mut approval_id = None;
     if effect != CapabilityEffect::Read {
         let (id, receiver) = approvals
-            .await_dynamic_tool(params, &expected_tool.id, &identity, store)
+            .await_dynamic_tool(&execution_params, &expected_tool.id, &identity, store)
             .await?;
         approval_id = Some(id);
-        if let Err(error) =
-            persist_dynamic_approval_required(params, id, effect, &identity, store, events).await
+        if let Err(error) = persist_dynamic_approval_required(
+            &execution_params,
+            id,
+            effect,
+            &identity,
+            store,
+            events,
+        )
+        .await
         {
             approvals
                 .cancel_dynamic(
@@ -424,6 +451,9 @@ async fn handle_dynamic_tool_call(
                     "turn_id": params.turn_id,
                     "tool_call_id": params.call_id,
                     "tool_name": params.tool,
+                    "tool_namespace": params.namespace,
+                    "root_turn_id": root_turn_id,
+                    "execution_call_id": execution_params.call_id,
                     "approval_id": id,
                     "lifecycle": "dispatched",
                     "dispatch_state": "dispatched",
@@ -450,7 +480,8 @@ async fn handle_dynamic_tool_call(
                     internal_token.clone(),
                 )
                 .map(|worker| {
-                    worker.with_trace_context(binding.trace_context.clone(), params.turn_id.clone())
+                    worker
+                        .with_trace_context(binding.trace_context.clone(), root_turn_id.to_string())
                 })
                 .map_err(|error| error.code().to_string());
                 match worker {
@@ -463,7 +494,7 @@ async fn handle_dynamic_tool_call(
                             expected_tool: expected_tool.clone(),
                             descriptor: descriptor.clone(),
                         },
-                        params,
+                        &execution_params,
                         lease_secret.as_bytes(),
                         effect,
                         approval_id_string.as_deref(),
@@ -479,7 +510,7 @@ async fn handle_dynamic_tool_call(
     } else if effect == CapabilityEffect::Read {
         crate::capability_plane::invoke_dynamic_tool(
             capability_client,
-            params,
+            &execution_params,
             &identity,
             &capability_plane_url,
             &internal_token,
@@ -506,7 +537,7 @@ async fn handle_dynamic_tool_call(
     if let Ok(outcome) = &result
         && outcome.status == CapabilityExecutionStatus::Succeeded
         && let Some(event) =
-            capability_projection_event(params, &identity, outcome.raw_result.as_ref())
+            capability_projection_event(&execution_params, &identity, outcome.raw_result.as_ref())
         && persist_capability_projection(params, thread_id, event, store, events)
             .await
             .is_err()
@@ -658,6 +689,27 @@ fn capability_projection_event(
     ))
 }
 
+/// Keep native call identity in Codex/lifecycle receipts, while the existing
+/// capability contract binds authorization and billing to the authenticated root.
+fn execution_params(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    identity: &PlatformThreadIdentity,
+    root_turn_id: &str,
+) -> codex_app_server_protocol::DynamicToolCallParams {
+    let mut execution = params.clone();
+    if params.thread_id != identity.runtime_thread_id.to_string() {
+        let mut digest = Sha256::new();
+        for part in [&params.thread_id, &params.turn_id, &params.call_id] {
+            digest.update(part.as_bytes());
+            digest.update([0]);
+        }
+        execution.call_id = format!("child/{:x}", digest.finalize());
+    }
+    execution.thread_id = identity.runtime_thread_id.to_string();
+    execution.turn_id = root_turn_id.to_string();
+    execution
+}
+
 async fn persist_capability_projection(
     params: &codex_app_server_protocol::DynamicToolCallParams,
     thread_id: ThreadId,
@@ -678,8 +730,12 @@ async fn persist_capability_projection(
         .append_v1_event(thread_id, Uuid::from_bytes(event_id), &event_key, &event)
         .await
         .map_err(|_| "capability_projection_failed".to_string())?;
+    let identity = store
+        .identity_for_kernel_thread(thread_id)
+        .await
+        .map_err(|_| "capability_projection_scope_unavailable".to_string())?;
     let _ = events.send(RuntimeBroadcastEvent {
-        root_thread_id: thread_id,
+        root_thread_id: identity.runtime_thread_id,
         event: SequencedAssistantTurnEventV1 { sequence, event },
     });
     Ok(())
@@ -926,7 +982,9 @@ async fn persist_dynamic_terminal_receipt(
 mod tests {
     use super::*;
 
-    fn request(tool: &str) -> (
+    fn request(
+        tool: &str,
+    ) -> (
         codex_app_server_protocol::DynamicToolCallParams,
         PlatformThreadIdentity,
     ) {
@@ -942,6 +1000,25 @@ mod tests {
             },
             PlatformThreadIdentity::new(thread_id, "tenant-a", "user-a", "session-a"),
         )
+    }
+
+    #[test]
+    fn child_dispatches_use_root_authority_and_distinct_execution_identity() {
+        let (mut first, identity) = request("lookup");
+        let root_turn = first.turn_id.clone();
+        first.thread_id = ThreadId::new().to_string();
+        let mut second = first.clone();
+        second.thread_id = ThreadId::new().to_string();
+        let first_execution = execution_params(&first, &identity, &root_turn);
+        let second_execution = execution_params(&second, &identity, &root_turn);
+        assert_eq!(
+            first_execution.thread_id,
+            identity.runtime_thread_id.to_string()
+        );
+        assert_eq!(first_execution.turn_id, root_turn);
+        assert_ne!(first_execution.call_id, second_execution.call_id);
+        assert_eq!(first.call_id, "call-a");
+        assert!(first_execution.call_id.len() < 255);
     }
 
     #[test]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -18,6 +17,8 @@ from .authorization import (
     AgentModelPlaneError,
     _AuthorizedCall,
 )
+from .request_builder import restrict_snapshot_tools
+from .stream_limits import provider_lines
 
 logger = logging.getLogger("src.services.agent_runtime.model_plane")
 
@@ -161,7 +162,7 @@ def _native_tool_transcript(
     if not isinstance(normalized, list):
         return normalized
     for item in normalized:
-        if not isinstance(item, dict) or item.get("type") != "function_call":
+        if not isinstance(item, dict) or item.get("type") not in {"function_call", "function_call_output"}:
             continue
         name = item.get("name")
         namespace = item.get("namespace")
@@ -218,8 +219,6 @@ def _native_responses_body(
     function_tool_names = {
         str(tool["name"]) for tool in serialized_tools if tool.get("type") == "function"
     }
-    if allowed_tool_names is not None and not function_tool_names.issubset(allowed_tool_names):
-        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
     wire_input = _helpers._native_tool_transcript(
         raw_input,
         aliases=validated_tools.aliases,
@@ -252,8 +251,18 @@ def _native_responses_body(
     # A required/specific choice applies to the initial model call only. Once
     # the kernel supplies a completed tool transcript, forcing it again would
     # create an unbounded post-tool loop.
+    if allowed_tool_names is not None:
+        serialized_tools = [
+            tool for tool in serialized_tools if tool.get("type") != "function"
+            or validated_tools.aliases.get(str(tool["name"]), ("", str(tool["name"])))[1] in allowed_tool_names
+        ]
+    function_tool_names = {str(tool["name"]) for tool in serialized_tools if tool.get("type") == "function"}
     effective_tool_choice = "auto" if has_tool_transcript and tool_choice != "none" else tool_choice
     effective_parallel_tool_calls = parallel_tool_calls
+    if isinstance(effective_tool_choice, dict):
+        identity = validated_tools.aliases.get(effective_tool_choice["name"])
+        if identity is not None:
+            effective_tool_choice = {**effective_tool_choice, "name": validated_tools.wire_aliases[identity]}
     if tool_choice == "none":
         serialized_tools = []
     if (
@@ -312,6 +321,17 @@ async def _stream_native_responses(
             parallel_tool_calls=parallel_tool_calls,
             native_search_authorized=_helpers.native_web_search_authorized(call.snapshot),
         )
+        provider_body["tools"] = restrict_snapshot_tools(
+            provider_body.get("tools", []), call.snapshot, tool_aliases,
+        )
+        choice = provider_body.get("tool_choice")
+        names = {tool.get("name") for tool in provider_body["tools"] if tool.get("type") == "function"}
+        if (choice == "required" and not names) or (isinstance(choice, dict) and choice.get("name") not in names):
+            raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+        if not provider_body["tools"]:
+            provider_body.pop("tools")
+            provider_body.pop("tool_choice", None)
+            provider_body.pop("parallel_tool_calls", None)
     except ReasoningWireError:
         await self._fail_call(call.call_id, "reasoning_wire_invalid", dispatched=False)
         raise AgentModelPlaneError(
@@ -350,6 +370,11 @@ async def _stream_native_responses(
         tool_aliases,
         reasoning_visibility=reasoning_visibility,
         allow_tools=any(isinstance(tool, Mapping) for tool in provider_body.get("tools", [])),
+        allowed_tool_identities={
+            tool_aliases.get(str(tool["name"]), (None, str(tool["name"])))
+            for tool in provider_body.get("tools", []) if tool.get("type") == "function"
+        },
+        allow_native_search=any(tool.get("type") == "web_search" for tool in provider_body.get("tools", [])),
     )
     header_request_id: str | None = None
     # TTFT breakdown: provider connect/headers vs. first usable event. The
@@ -374,7 +399,7 @@ async def _stream_native_responses(
                 dispatched=True,
             )
             raise AgentModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
-        async for line in response.aiter_lines():
+        async for line in provider_lines(response):
             if not line.startswith("data:"):
                 continue
             payload = line[5:].strip()
@@ -403,12 +428,12 @@ async def _stream_native_responses(
                     first_event_logged = True
                     _helpers.logger.info(
                         "Agent provider TTFT model=%s headers_ms=%.0f "
-                        "first_event_ms=%.0f tools=%d payload_chars=%d",
+                        "first_event_ms=%.0f tools=%d payload_bytes=%d",
                         call.model_id,
                         headers_ms,
                         (self._clock() - dispatch_started) * 1000,
                         len(provider_body.get("tools") or []),
-                        len(json.dumps(provider_body, ensure_ascii=False)),
+                        len(response.request.content),
                     )
                 yield event
     terminal = validator.finish()

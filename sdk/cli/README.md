@@ -171,10 +171,21 @@ reads `~/.ai-gateway-cli/providers.json`.
   profiles.
 - The Chat adapter supports text, function tools, tool results, usage,
   reasoning-effort request passthrough, structured reasoning-summary deltas,
-  retries before streaming, and strict SSE projection. Stream reconnect is
+  retries after explicit retryable HTTP responses, and strict SSE projection.
+  A transport failure with an unknown provider outcome is not retried. Stream reconnect is
   intentionally disabled because replay could duplicate output or tool intent.
-  Responses reasoning-history inputs, images, hosted tools, and input forms
-  that cannot be represented losslessly fail closed.
+  Plain reasoning summaries produced by the adapter replay as Chat
+  `reasoning_content`, separate from assistant text. Parallel function calls
+  replay as one assistant tool-call batch followed by all matching results.
+  Namespaces retain distinct deterministic aliases in tool definitions, forced
+  choices, returned calls, and subsequent history. Named results must agree
+  with their call identity.
+  Opaque reasoning state, Responses Lite embedded tools/context controls,
+  unpaired named tool results, images, hosted tools, and input forms that
+  cannot be represented losslessly fail closed.
+  Stream limits apply to individual SSE frames and total content; coalesced
+  network chunks are decoded in bounded slices. Slow consumers pause upstream
+  reads, and disconnects cancel the provider stream.
 - The native build and package verifier derive source identity from the Runtime
   source receipt, overlay manifest, and lock; package assembly fails when they
   disagree. The launcher re-checks receipt target/name and binary SHA-256.

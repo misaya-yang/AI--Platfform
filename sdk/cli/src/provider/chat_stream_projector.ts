@@ -142,28 +142,13 @@ async function projectBoundedChatStream(
         }
       }
       const delta = choice.delta && typeof choice.delta === "object" ? record(choice.delta, "provider_delta_invalid") : {};
-      const content = typeof delta.content === "string" ? delta.content : "";
-      if (delta.content !== undefined && delta.content !== null && typeof delta.content !== "string") {
-        throw new CompatibilityError("provider_content_delta_unsupported");
-      }
-      if (content) {
-        await closeReasoning();
-        await ensureMessageOpen();
-        textOutput = boundedAppend(textOutput, content, 4 * 1024 * 1024, "provider_text_limit");
-        await emit("response.output_text.delta", {
-          item_id: messageId,
-          output_index: messageOutputIndex,
-          content_index: 0,
-          delta: content,
-          logprobs: [],
-        });
-      }
       const rawReasoning = delta.reasoning_content ?? delta.reasoning;
       if (rawReasoning !== undefined && rawReasoning !== null) {
         if (typeof rawReasoning !== "string") {
           throw new CompatibilityError("provider_reasoning_delta_unsupported");
         }
         if (rawReasoning) {
+          if (reasoningClosed) throw new CompatibilityError("provider_reasoning_order_unsupported");
           if (reasoningOutputIndex === undefined) {
             reasoningOutputIndex = nextOutputIndex++;
             await emit("response.output_item.added", {
@@ -190,6 +175,22 @@ async function projectBoundedChatStream(
             delta: rawReasoning,
           });
         }
+      }
+      const content = typeof delta.content === "string" ? delta.content : "";
+      if (delta.content !== undefined && delta.content !== null && typeof delta.content !== "string") {
+        throw new CompatibilityError("provider_content_delta_unsupported");
+      }
+      if (content) {
+        await closeReasoning();
+        await ensureMessageOpen();
+        textOutput = boundedAppend(textOutput, content, 4 * 1024 * 1024, "provider_text_limit");
+        await emit("response.output_text.delta", {
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          delta: content,
+          logprobs: [],
+        });
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const rawTool of delta.tool_calls) {

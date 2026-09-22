@@ -58,6 +58,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+python3 - "$repo_root" "$source_root" "$upstream_sha" <<'PY_VERIFY_UPSTREAM'
+import sys
+from pathlib import Path
+
+from scripts.harness.rust_gate_identity import verify_overlay_upstream_base
+
+verify_overlay_upstream_base(
+    repo_root=Path(sys.argv[1]), source=Path(sys.argv[2]), upstream_sha=sys.argv[3]
+)
+PY_VERIFY_UPSTREAM
+
 git -C "$source_root" archive "$upstream_sha" | tar -x -C "$build_context"
 cp -R "$overlay_root/kernel-rs/." "$build_context/codex-rs/"
 
@@ -82,6 +93,7 @@ monitor_build_memory() {
 }
 
 docker build \
+    --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
     --resource "memory=$build_memory" \
     --resource "cpu-quota=$build_cpu_quota" \
     --file "$repo_root/deploy/agent-runtime-source/Dockerfile.capability-worker" \

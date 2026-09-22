@@ -59,6 +59,10 @@ pub(super) async fn start_turn(
     Json(body): Json<StartTurnRequest>,
 ) -> Result<Json<TurnStartResponse>, RuntimeError> {
     let thread_id = authorize_thread_scope(&state, &headers, &thread_id).await?;
+    state
+        .store
+        .check_write_health(thread_id)
+        .map_err(RuntimeError::from_store)?;
     validate_start_turn_request(&body)?;
     let tenant_id = required_header(&headers, TENANT_HEADER)?;
     let user_id = required_header(&headers, USER_HEADER)?;

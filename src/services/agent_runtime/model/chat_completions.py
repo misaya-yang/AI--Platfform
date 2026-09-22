@@ -12,17 +12,48 @@ from ai_gateway_core.models import ReasoningWireError
 
 from ..timing import ModelPlaneTiming
 from .authorization import (
-    _TOOL_NAME_RE,
     KERNEL_TOOL_TRANSCRIPT_NAMES,
     AgentModelPlaneError,
     _AuthorizedCall,
 )
 from .request_builder import (
     _content_text,
+    _tool_output_text,
     _validate_tool_transcript,
+    restrict_snapshot_tools,
 )
+from .stream_limits import provider_lines
 
 logger = logging.getLogger("src.services.agent_runtime.model_plane")
+
+def _validated_chat_tools(
+    raw_tools: Any,
+    profile: Mapping[str, Any],
+    *,
+    allowed_tool_names: set[str] | None,
+    _helpers: Any,
+):
+    # Chat has no namespace containers or hosted search. Use the same
+    # reversible aliases as Responses without mutating the pinned profile.
+    compatible_tools = (
+        [tool for tool in raw_tools if not isinstance(tool, Mapping) or tool.get("type") != "web_search"]
+        if isinstance(raw_tools, list) else raw_tools
+    )
+    tool_profile = profile.get("tools")
+    if not isinstance(tool_profile, Mapping):
+        raise AgentModelPlaneError("RUNTIME_TOOL_CAPABILITY_INVALID", status_code=422)
+    validated = _helpers._validated_native_tools(
+        compatible_tools,
+        {**profile, "tools": {**tool_profile, "namespace_wire": "flatten"}},
+    )
+    chat_tools = [
+        {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
+        for tool in validated.tools
+        if allowed_tool_names is None
+        or validated.aliases.get(str(tool["name"]), ("", str(tool["name"])))[1] in allowed_tool_names
+    ]
+    return chat_tools, validated
+
 
 def _chat_tools_from_runtime(
     raw_tools: Any,
@@ -31,54 +62,9 @@ def _chat_tools_from_runtime(
     allowed_tool_names: set[str] | None,
     _helpers: Any,
 ) -> list[dict[str, Any]]:
-    """Convert the Runtime's Responses-shaped tools to Chat Completions."""
-
-    # Namespace containers and provider-native web search are Responses-only
-    # wire shapes. Flatten their function children for Chat Completions and
-    # omit native search instead of failing an otherwise compatible turn.
-    compatible_tools: Any = raw_tools
-    if isinstance(raw_tools, list):
-        compatible_tools = []
-        for tool in raw_tools:
-            if not isinstance(tool, Mapping) or tool.get("type") != "namespace":
-                compatible_tools.append(tool)
-                continue
-            namespace = tool.get("name")
-            children = tool.get("tools")
-            if (
-                not isinstance(namespace, str)
-                or not _TOOL_NAME_RE.fullmatch(namespace)
-                or not isinstance(children, list)
-                or len(children) > 256
-            ):
-                raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
-            if any(
-                not isinstance(child, Mapping) or child.get("type") != "function"
-                for child in children
-            ):
-                raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_UNSUPPORTED", status_code=422)
-            compatible_tools.extend(children)
-    validated = _helpers._validated_native_tools(compatible_tools, profile)
-    function_tools = [tool for tool in validated.tools if tool.get("type") == "function"]
-    names = {str(tool["name"]) for tool in function_tools}
-    logger.info(
-        "Chat Completions tool projection function_names=%s",
-        sorted(names),
-    )
-    if allowed_tool_names is not None and not names.issubset(allowed_tool_names):
-        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": str(tool["name"]),
-                "description": str(tool.get("description") or ""),
-                "parameters": tool.get("parameters") or {},
-            },
-        }
-        for tool in function_tools
-    ]
-
+    return _validated_chat_tools(
+        raw_tools, profile, allowed_tool_names=allowed_tool_names, _helpers=_helpers,
+    )[0]
 
 
 def _responses_input_to_messages(
@@ -148,19 +134,14 @@ def _responses_input_to_messages(
             if call_id in pending_calls:
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID")
             pending_calls[call_id] = name
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": arguments},
-                        }
-                    ],
-                }
-            )
+            tool_call = {
+                "id": call_id, "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+            if messages and messages[-1].get("tool_calls"):
+                messages[-1]["tool_calls"].append(tool_call)
+            else:
+                messages.append({"role": "assistant", "content": "", "tool_calls": [tool_call]})
             continue
         if item_type == "function_call_output":
             call_id = str(item.get("call_id") or "")
@@ -171,7 +152,7 @@ def _responses_input_to_messages(
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": pending_calls.pop(call_id),
-                    "content": str(item.get("output") or ""),
+                    "content": _tool_output_text(item.get("output")),
                 }
             )
             continue
@@ -252,18 +233,29 @@ async def stream(
         await self._fail_call(call.call_id, "wire_protocol_unsupported", dispatched=False)
         raise AgentModelPlaneError("RUNTIME_PROVIDER_WIRE_UNSUPPORTED", status_code=422)
 
+    try:
+        _helpers._validate_phase2_responses_input(body, allow_tool_transcript=True)
+        chat_tools, validated_tools = _validated_chat_tools(
+            body.get("tools"), profile, allowed_tool_names=allowed_tool_names, _helpers=_helpers,
+        )
+        wire_input = _helpers._native_tool_transcript(
+            body.get("input"), aliases=validated_tools.aliases,
+            wire_aliases=validated_tools.wire_aliases,
+        )
+        messages = _helpers._responses_input_to_messages(
+            {**body, "input": wire_input},
+            allowed_tool_names={tool["name"] for tool in validated_tools.tools},
+        )
+    except AgentModelPlaneError:
+        await self._fail_call(call.call_id, "chat_request_invalid", dispatched=False)
+        raise
     chat_body: dict[str, Any] = {
         "model": call.model_id,
-        "messages": _helpers._responses_input_to_messages(
-            body, allowed_tool_names=allowed_tool_names
-        ),
+        "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
         "max_tokens": call.reserved_output_tokens,
     }
-    chat_tools = _helpers._chat_tools_from_runtime(
-        body.get("tools"), profile, allowed_tool_names=allowed_tool_names
-    )
     raw_input = body.get("input")
     has_tool_transcript = isinstance(raw_input, list) and any(
         isinstance(item, Mapping)
@@ -272,6 +264,16 @@ async def stream(
     )
     effective_tool_choice = "auto" if has_tool_transcript and tool_choice != "none" else tool_choice
     effective_parallel_tool_calls = parallel_tool_calls
+    if isinstance(effective_tool_choice, dict):
+        name = effective_tool_choice["name"]
+        identity = validated_tools.aliases.get(name)
+        if identity is not None:
+            effective_tool_choice = {**effective_tool_choice, "name": validated_tools.wire_aliases[identity]}
+    try:
+        chat_tools = restrict_snapshot_tools(chat_tools, call.snapshot, validated_tools.aliases, chat=True)
+    except AgentModelPlaneError:
+        await self._fail_call(call.call_id, "chat_request_invalid", dispatched=False)
+        raise
     if effective_tool_choice == "none":
         chat_tools = []
     chat_names = {
@@ -283,8 +285,10 @@ async def stream(
         isinstance(effective_tool_choice, dict)
         and effective_tool_choice["name"] not in chat_names
     ):
+        await self._fail_call(call.call_id, "chat_request_invalid", dispatched=False)
         raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
     if effective_tool_choice == "required" and not chat_tools:
+        await self._fail_call(call.call_id, "chat_request_invalid", dispatched=False)
         raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
     if chat_tools:
         chat_body["tools"] = chat_tools
@@ -317,8 +321,14 @@ async def stream(
     projector = _helpers._ResponsesProjector(
         model_id=call.model_id,
         estimated_input_tokens=call.estimated_input_tokens,
+        tool_aliases=validated_tools.aliases,
+        allowed_tool_names=chat_names | {
+            name for name, identity in validated_tools.aliases.items()
+            if validated_tools.wire_aliases[identity] in chat_names
+        },
     )
     provider_request_id: str | None = None
+    terminal_received = False
     timing.note_dispatch()
     try:
         async with self.http_client.stream(
@@ -337,12 +347,15 @@ async def stream(
                 )
                 raise AgentModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
             yield projector.created()
-            async for line in response.aiter_lines():
+            async for line in provider_lines(response):
                 if not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
+                if not payload:
                     continue
+                if payload == "[DONE]":
+                    terminal_received = True
+                    break
                 try:
                     event = json.loads(payload)
                 except json.JSONDecodeError:
@@ -361,6 +374,10 @@ async def stream(
                 for choice in choices:
                     if not isinstance(choice, dict):
                         continue
+                    if choice.get("finish_reason") is not None:
+                        if choice["finish_reason"] not in {"stop", "tool_calls", "function_call"}:
+                            raise AgentModelPlaneError("RUNTIME_PROVIDER_RESPONSE_INCOMPLETE", status_code=502)
+                        terminal_received = True
                     delta = choice.get("delta")
                     if not isinstance(delta, dict):
                         continue
@@ -377,6 +394,8 @@ async def stream(
                         for chunk in projector.text_delta(text_delta):
                             timing.note_first_visible()
                             yield chunk
+        if not terminal_received:
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INCOMPLETE", status_code=502)
         terminal_chunks = projector.complete()
         assert projector.usage is not None
         usage = projector.usage

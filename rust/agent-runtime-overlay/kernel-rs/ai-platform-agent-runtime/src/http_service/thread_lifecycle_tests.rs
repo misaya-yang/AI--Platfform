@@ -58,7 +58,7 @@ fn platform_resume_reinstates_the_private_responses_provider() {
         config["model_providers"]["ai-platform-gateway"]["supports_websockets"],
         false
     );
-    assert_eq!(config["web_search"], "disabled");
+    assert!(!config.contains_key("web_search"));
     assert_eq!(config["features"]["standalone_web_search"], false);
     assert_eq!(config["features"]["multi_agent_v2"]["enabled"], true);
 }
@@ -72,7 +72,7 @@ fn platform_resume_preserves_profile_declared_native_web_search() {
             model_plane_base_url: Some(
                 "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
             ),
-            native_web_search_enabled: true,
+            native_web_search_enabled: Some(true),
             ..Default::default()
         },
     )

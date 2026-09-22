@@ -199,13 +199,13 @@ describe("Responses to Chat Completions compatibility", () => {
     })).toThrow(/responses_content_unsupported/);
   });
 
-  it("rejects unknown fields, reasoning history, and non-boolean parallel tools", () => {
+  it("rejects unknown fields, opaque reasoning history, and non-boolean parallel tools", () => {
     expect(() => responsesToChat({
       model: "chat-model", input: "hello", stream: true, previous_response_id: "resp_1",
     } as any)).toThrow(/responses_fields_unsupported/);
     expect(() => responsesToChat({
-      model: "chat-model", stream: true, input: [{ type: "reasoning", summary: [] }],
-    })).toThrow(/responses_input_item_unsupported/);
+      model: "chat-model", stream: true, input: [{ type: "reasoning", summary: [], encrypted_content: "opaque" }],
+    })).toThrow(/responses_reasoning_history_unsupported/);
     expect(() => responsesToChat({
       model: "chat-model", stream: true, input: "hello",
       tools: [{ type: "function", name: "lookup" }], parallel_tool_calls: "false",
@@ -421,10 +421,12 @@ describe("tool identity and authorization boundaries", () => {
     expect(calls.map((call: any) => ({ namespace: call.namespace, name: call.name }))).toEqual([
       { namespace: "files", name: "lookup" }, { namespace: "records", name: "lookup" },
     ]);
-    const transcript = calls.flatMap((call: any) => [call, { type: "function_call_output", call_id: call.call_id, output: "found" }]);
+    const transcript = [...calls, ...calls.map((call: any) => ({ type: "function_call_output", call_id: call.call_id, output: "found" }))];
     const second = await post(proxy, requestBody(tools, transcript));
     expect((await second.text()).includes("event: response.completed")).toBe(true);
-    expect(requests[1].messages.filter((message: any) => message.role === "assistant").map((message: any) => message.tool_calls[0].function.name)).toEqual(aliases);
+    const assistants = requests[1].messages.filter((message: any) => message.role === "assistant");
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].tool_calls.map((call: any) => call.function.name)).toEqual(aliases);
     expect(requests[1].messages.filter((message: any) => message.role === "tool").map((message: any) => ({ name: message.name, call_id: message.tool_call_id }))).toEqual(aliases.map((name, index) => ({ name, call_id: `call_${index}` })));
   });
 
@@ -444,6 +446,57 @@ describe("tool identity and authorization boundaries", () => {
     expect(outbound.tools).toBeUndefined();
     expect(outbound.tool_choice).toBeUndefined();
     expect(outbound.parallel_tool_calls).toBeUndefined();
+  });
+});
+
+describe("Codex refresh multi-turn compatibility", () => {
+  const post = (proxy: ChatCompatibilityProxy, input: unknown) => fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${proxy.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "chat-model", input, stream: true }),
+  });
+
+  it("replays its own plain reasoning and assistant output on the next turn", async () => {
+    const requests: any[] = [];
+    const provider = await mockChatProvider(({ body }) => {
+      requests.push(body);
+      return { chunks: [
+        'data: {"choices":[{"delta":{"reasoning_content":"first "}}]}\n\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"second","content":"answer"},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+      ] };
+    });
+    const proxy = await startProxy(profile(provider.baseUrl));
+    const first = parseSseEvents(await (await post(proxy, "question")).text());
+    const output = first.find(event => event.type === "response.completed").response.output;
+    const reasonDone = first.findIndex(event => event.type === "response.reasoning_summary_text.done");
+    expect(first.slice(reasonDone).some(event => event.type === "response.reasoning_summary_text.delta")).toBe(false);
+    expect(first[reasonDone].text).toBe("first second");
+    const second = await post(proxy, [{ type: "message", role: "user", content: "question" }, ...output, { type: "message", role: "user", content: "continue" }]);
+    expect(await second.text()).toContain("event: response.completed");
+    expect(requests[1].messages).toEqual([
+      { role: "user", content: "question" },
+      { role: "assistant", content: "answer", reasoning_content: "first second" },
+      { role: "user", content: "continue" },
+    ]);
+  });
+
+  it("does not retry a transport failure after the provider accepted the request", async () => {
+    let attempts = 0;
+    const server = createServer(async (request) => {
+      for await (const _chunk of request) { /* consume accepted request */ }
+      attempts++;
+      request.socket.destroy();
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture did not bind");
+    const proxy = await startProxy(profile(`http://127.0.0.1:${address.port}/v1`));
+    const response = await post(proxy, "question");
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ error: { code: "provider_outcome_unknown" } });
+    expect(attempts).toBe(1);
   });
 });
 

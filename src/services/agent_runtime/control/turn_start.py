@@ -28,6 +28,7 @@ from ..runtime_configuration import (
 )
 from .capacity import note_dispatch
 from .http_headers import runtime_headers
+from .tool_policy import runtime_tool_policy
 from .types import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
@@ -422,14 +423,7 @@ async def start_turn(
             capability_revision=capability_revision,
             capability_allowlist=capability_allowlist,
         )
-    thread = await plane.ensure_thread(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        session_id=session_id,
-        model_id=model_id,
-        readonly_capabilities=readonly,
-        capability_allowlist=capability_allowlist,
-        native_web_search_enabled=(
+    native_web_search_enabled = (
             readonly.get("responses_tool_choice") != "none"
             and readonly.get("responses_tool_names") is None
             and any(item.get("source") == "web-search" for item in readonly.get("items", []) if isinstance(item, dict))
@@ -437,9 +431,18 @@ async def start_turn(
             and profile["native_search"].get("enabled") is True
             and isinstance(profile.get("tools"), dict)
             and profile["tools"].get("web_search_wire") == "native"
-        ),
+        )
+    thread = await plane.ensure_thread(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+        model_id=model_id,
+        readonly_capabilities=readonly,
+        capability_allowlist=capability_allowlist,
+        native_web_search_enabled=native_web_search_enabled,
     )
     runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
+    tool_policy = runtime_tool_policy(readonly, native_search_allowed=native_web_search_enabled)
     await plane._resume_thread(
         runtime_thread_id=runtime_thread_id,
         tenant_id=tenant_id,
@@ -447,6 +450,7 @@ async def start_turn(
         session_id=session_id,
         model_id=model_id,
         developer_instructions=agent_spec["developerInstructions"],
+        tool_policy=tool_policy,
         model_context_window=int(model.get("context_window") or 128000),
         auto_compact_token_limit=(
             int(model["auto_compact_token_limit"])
@@ -459,15 +463,7 @@ async def start_turn(
                 else None
             )
         ),
-        native_web_search_enabled=(
-            readonly.get("responses_tool_choice") != "none"
-            and readonly.get("responses_tool_names") is None
-            and any(item.get("source") == "web-search" for item in readonly.get("items", []) if isinstance(item, dict))
-            and isinstance(profile.get("native_search"), dict)
-            and profile["native_search"].get("enabled") is True
-            and isinstance(profile.get("tools"), dict)
-            and profile["tools"].get("web_search_wire") == "native"
-        ),
+        native_web_search_enabled=native_web_search_enabled,
     )
     run_id = uuid.uuid4()
     snapshot_id = uuid.uuid4()
@@ -531,6 +527,7 @@ async def start_turn(
             else "pure_text",
         },
         "readonly_capabilities": readonly,
+        "tool_policy": tool_policy,
         "platform_config": platform_config,
         "platform_config_hash": runtime_platform_config_hash(platform_config),
     }

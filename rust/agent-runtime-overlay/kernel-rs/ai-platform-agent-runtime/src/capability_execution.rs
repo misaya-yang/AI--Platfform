@@ -114,6 +114,9 @@ pub async fn execute_capability(
     approval_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<CapabilityExecutionOutcome, CapabilityExecutionError> {
+    if cancel.is_cancelled() {
+        return Ok(cancelled_before_dispatch());
+    }
     if params.thread_id != identity.runtime_thread_id.to_string()
         || params.turn_id.is_empty()
         || params.call_id.is_empty()
@@ -221,73 +224,133 @@ pub async fn execute_capability(
     request
         .validate(now)
         .map_err(|_| CapabilityExecutionError::InvalidBinding)?;
-    let execution = worker
-        .create(&scope, &request)
-        .await
-        .map_err(CapabilityExecutionError::Worker)?;
-    let deadline = tokio::time::Instant::now() + EXECUTION_DEADLINE;
-    let mut after_sequence = 0_u64;
-    loop {
-        if cancel.is_cancelled() {
-            return cancel_and_confirm_terminal(
-                worker,
-                &scope,
-                &execution.execution_id,
-                &params.call_id,
-                after_sequence,
-            )
-            .await;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return cancel_and_confirm_terminal(
-                worker,
-                &scope,
-                &execution.execution_id,
-                &params.call_id,
-                after_sequence,
-            )
-            .await;
-        }
-        let page = tokio::select! {
-            () = cancel.cancelled() => {
-                return cancel_and_confirm_terminal(
-                    worker,
-                    &scope,
-                    &execution.execution_id,
-                    &params.call_id,
-                    after_sequence,
-                )
-                .await;
-            }
-            () = tokio::time::sleep_until(deadline) => {
-                return cancel_and_confirm_terminal(
-                    worker,
-                    &scope,
-                    &execution.execution_id,
-                    &params.call_id,
-                    after_sequence,
-                )
-                .await;
-            }
-            result = worker.events(&scope, &execution.execution_id, after_sequence) => {
-                result.map_err(CapabilityExecutionError::Worker)?
-            }
-        };
-        if let Some(event) = page.events.first() {
-            if event.tool_call_id != params.call_id {
-                return Err(CapabilityExecutionError::TerminalResultInvalid);
-            }
-            after_sequence = event.sequence;
-            if event.status.is_terminal() {
-                return project_terminal(event);
-            }
-            // A newly observed progress event advanced the cursor. Poll the
-            // next page immediately; sleeping here can consume the entire
-            // bounded cancellation grace period even when terminal is ready.
-            continue;
-        }
-        tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+    if cancel.is_cancelled() {
+        return Ok(cancelled_before_dispatch());
     }
+    // Once create is polled it may already have committed an execution. Drop
+    // the in-flight request on cancellation; never resend it under a new ID.
+    let creation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            return Ok(if expected_effect == CapabilityEffect::Read {
+                cancelled_before_dispatch()
+            } else {
+                side_effect_unknown()
+            });
+        }
+        result = worker.create(&scope, &request) => result,
+    };
+    let execution = match creation {
+        Ok(execution) => execution,
+        Err(error) => {
+            if expected_effect != CapabilityEffect::Read && create_outcome_may_be_unknown(&error) {
+                return Ok(side_effect_unknown());
+            }
+            return Err(CapabilityExecutionError::Worker(error));
+        }
+    };
+    let outcome = async {
+        let deadline = tokio::time::Instant::now() + EXECUTION_DEADLINE;
+        let mut after_sequence = 0_u64;
+        loop {
+            if cancel.is_cancelled() {
+                return cancel_and_confirm_terminal(
+                    worker,
+                    &scope,
+                    &execution.execution_id,
+                    &params.call_id,
+                    after_sequence,
+                )
+                .await;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return cancel_and_confirm_terminal(
+                    worker,
+                    &scope,
+                    &execution.execution_id,
+                    &params.call_id,
+                    after_sequence,
+                )
+                .await;
+            }
+            let page = tokio::select! {
+                () = cancel.cancelled() => {
+                    return cancel_and_confirm_terminal(
+                        worker,
+                        &scope,
+                        &execution.execution_id,
+                        &params.call_id,
+                        after_sequence,
+                    )
+                    .await;
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    return cancel_and_confirm_terminal(
+                        worker,
+                        &scope,
+                        &execution.execution_id,
+                        &params.call_id,
+                        after_sequence,
+                    )
+                    .await;
+                }
+                result = worker.events(&scope, &execution.execution_id, after_sequence) => {
+                    result.map_err(CapabilityExecutionError::Worker)?
+                }
+            };
+            if let Some(event) = page.events.first() {
+                if event.tool_call_id != params.call_id {
+                    return Err(CapabilityExecutionError::TerminalResultInvalid);
+                }
+                after_sequence = event.sequence;
+                if event.status.is_terminal() {
+                    return project_terminal(event);
+                }
+                // A newly observed progress event advanced the cursor. Poll the
+                // next page immediately; sleeping here can consume the entire
+                // bounded cancellation grace period even when terminal is ready.
+                continue;
+            }
+            tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+        }
+    }
+    .await;
+    if expected_effect != CapabilityEffect::Read && outcome.is_err() {
+        return Ok(side_effect_unknown());
+    }
+    outcome
+}
+
+fn cancelled_before_dispatch() -> CapabilityExecutionOutcome {
+    CapabilityExecutionOutcome {
+        status: CapabilityExecutionStatus::Cancelled,
+        response: dynamic_tool_text_response(
+            false,
+            "capability execution cancelled before dispatch",
+        ),
+        raw_result: None,
+    }
+}
+
+fn side_effect_unknown() -> CapabilityExecutionOutcome {
+    CapabilityExecutionOutcome {
+        status: CapabilityExecutionStatus::SideEffectUnknown,
+        response: dynamic_tool_text_response(
+            false,
+            "The write may already have executed but its outcome could not be confirmed. Do not retry this action; inspect the execution receipt first.",
+        ),
+        raw_result: None,
+    }
+}
+
+fn create_outcome_may_be_unknown(error: &CapabilityWorkerError) -> bool {
+    !matches!(
+        error,
+        CapabilityWorkerError::InvalidBaseUrl
+            | CapabilityWorkerError::MissingInternalToken
+            | CapabilityWorkerError::InvalidRequest
+            | CapabilityWorkerError::Rejected(400 | 401 | 403 | 404 | 409 | 422)
+    )
 }
 
 /// Cancellation is a durable protocol, not a local projection.  The worker
@@ -799,6 +862,111 @@ mod tests {
             arguments: json!({}),
         };
         assert_eq!(validate_binding(&binding, &params), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_write_never_reaches_worker_create() {
+        let identity = PlatformThreadIdentity::new(
+            codex_protocol::ThreadId::new(),
+            "tenant",
+            "user",
+            "session",
+        );
+        let expected = CapabilityAllowlistEntry {
+            capability_type: "tool".to_string(),
+            name: "generate_document".to_string(),
+            id: "generate_document".to_string(),
+            version: None,
+            schema_hash: Some(format!("sha256:{}", "a".repeat(64))),
+            connector_binding: None,
+        };
+        let binding = ReadonlyCapabilityBinding {
+            capability_revision: 1,
+            allowlist: vec![expected.clone()],
+            expected_tool: expected,
+            descriptor: CapabilityDescriptorV2 {
+                schema_version:
+                    ai_platform_capability_contract::CAPABILITY_DESCRIPTOR_SCHEMA_VERSION
+                        .to_string(),
+                id: "generate_document".to_string(),
+                name: "generate_document".to_string(),
+                version: "null".to_string(),
+                description: "Generate a document".to_string(),
+                schema_hash: format!("sha256:{}", "a".repeat(64)),
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                effect: CapabilityEffect::Write,
+                approval_policy: ai_platform_capability_contract::ApprovalPolicy::Always,
+                execution_mode: ai_platform_capability_contract::ExecutionMode::Inline,
+                timeout_ms: 30_000,
+                tags: vec!["kind:tool".to_string()],
+                protocol: "internal".to_string(),
+                connector_binding: None,
+            },
+        };
+        let params = DynamicToolCallParams {
+            thread_id: identity.runtime_thread_id.to_string(),
+            turn_id: "turn-a".to_string(),
+            call_id: "call-a".to_string(),
+            namespace: None,
+            tool: "generate_document".to_string(),
+            arguments: json!({}),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let worker = CapabilityWorkerClient::new(
+            Client::builder().no_proxy().build().unwrap(),
+            &format!(
+                "http://{}/internal/v2/capabilities",
+                listener.local_addr().unwrap()
+            ),
+            "internal",
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            execute_capability(
+                &worker,
+                &identity,
+                &binding,
+                &params,
+                &[0; 32],
+                CapabilityEffect::Write,
+                Some("approval"),
+                &cancel,
+            ),
+        )
+        .await
+        .expect("pre-cancel is immediate")
+        .expect("cancelled outcome");
+        assert_eq!(outcome.status, CapabilityExecutionStatus::Cancelled);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn uncertain_worker_acceptance_is_never_an_ordinary_write_failure() {
+        for error in [
+            CapabilityWorkerError::Timeout,
+            CapabilityWorkerError::Unavailable,
+            CapabilityWorkerError::InvalidResponse,
+            CapabilityWorkerError::Rejected(500),
+        ] {
+            assert!(create_outcome_may_be_unknown(&error));
+        }
+        assert!(!create_outcome_may_be_unknown(
+            &CapabilityWorkerError::Rejected(403)
+        ));
+        assert_eq!(
+            side_effect_unknown().status,
+            CapabilityExecutionStatus::SideEffectUnknown
+        );
     }
 
     #[tokio::test]

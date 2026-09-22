@@ -34,6 +34,15 @@ impl PostgresThreadStore {
         &self,
         event: PlatformLifecycleEvent,
     ) -> ThreadStoreResult<i64> {
+        let thread_id = event.kernel_thread_id;
+        let result = self.append_platform_lifecycle_event_inner(event).await;
+        self.record_write_result(thread_id, result)
+    }
+
+    async fn append_platform_lifecycle_event_inner(
+        &self,
+        event: PlatformLifecycleEvent,
+    ) -> ThreadStoreResult<i64> {
         if event.event_key.is_empty() || event.event_key.len() > 255 || event.turn_id.is_empty() {
             return Err(ThreadStoreError::InvalidRequest {
                 message: "platform lifecycle identifiers are invalid".to_string(),
@@ -48,7 +57,22 @@ impl PostgresThreadStore {
         let mut event_id_bytes = [0u8; 16];
         event_id_bytes.copy_from_slice(&digest[..16]);
         let event_id = Uuid::from_bytes(event_id_bytes);
-        sqlx::query_scalar::<_, i64>(
+        let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        self.lock_root(&mut transaction, scope.root_thread_id)
+            .await?;
+        let visible: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM assistant_runtime_thread_projections WHERE kernel_thread_id=$1 AND deleted_at IS NULL)",
+        )
+        .bind(kernel_thread_uuid)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        if !visible {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: ThreadId::from_u128(kernel_thread_uuid.as_u128()),
+            });
+        }
+        let sequence = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT append_assistant_runtime_item(
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -69,9 +93,11 @@ impl PostgresThreadStore {
         .bind(event.status)
         .bind(event.payload)
         .bind(payload_hash)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(store_error)
+        .map_err(store_error)?;
+        transaction.commit().await.map_err(store_error)?;
+        Ok(sequence)
     }
 
     /// Reads the durable lifecycle receipts needed to reconstruct a turn
@@ -136,6 +162,7 @@ impl PostgresThreadStore {
         kernel_thread_id: ThreadId,
         turn_id: &str,
     ) -> ThreadStoreResult<Vec<crate::platform_lifecycle::RecoveredToolCall>> {
+        self.check_write_health(kernel_thread_id)?;
         let events = self
             .read_platform_lifecycle_events(kernel_thread_id, turn_id)
             .await?;
@@ -170,12 +197,104 @@ impl PostgresThreadStore {
         kernel_thread_id: ThreadId,
     ) -> ThreadStoreResult<super::PlatformThreadIdentity> {
         let scope = self.member_scope(thread_uuid(kernel_thread_id)?).await?;
-        Ok(super::PlatformThreadIdentity::new(
+        let identity = super::PlatformThreadIdentity::new(
             ThreadId::from_u128(scope.root_thread_id.as_u128()),
             scope.tenant_id,
             scope.user_id,
             scope.session_id,
-        ))
+        );
+        self.cache_terminal_identity(kernel_thread_id, identity.clone());
+        Ok(identity)
+    }
+
+    /// A bounded last-known identity is only a failure-notification address.
+    /// It must never authorize a model request, tool, read or mutation.
+    pub(crate) fn cached_terminal_identity(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<super::PlatformThreadIdentity> {
+        self.terminal_identity_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .cloned()
+    }
+
+    pub(super) fn cache_terminal_identity(
+        &self,
+        thread_id: ThreadId,
+        identity: super::PlatformThreadIdentity,
+    ) {
+        let mut identities = self
+            .terminal_identity_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if identities.len() >= 16_384
+            && !identities.contains_key(&thread_id)
+            && let Some(oldest) = identities.keys().next().copied()
+        {
+            identities.remove(&oldest);
+        }
+        identities.insert(thread_id, identity);
+    }
+
+    /// Resolve a child's lease owner from the exact persisted turn context.
+    /// Never infer it from the newest root run: concurrent turns and resume can
+    /// otherwise bind a child to a different capability snapshot.
+    pub(crate) async fn root_turn_id(
+        &self,
+        kernel_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> ThreadStoreResult<String> {
+        self.check_write_health(kernel_thread_id)?;
+        self.ensure_visible(kernel_thread_id, true).await?;
+        let scope = self.member_scope(thread_uuid(kernel_thread_id)?).await?;
+        self.check_write_health(ThreadId::from_u128(scope.root_thread_id.as_u128()))?;
+        let root_turn_id = if thread_uuid(kernel_thread_id)? == scope.root_thread_id {
+            turn_id.to_string()
+        } else {
+            let roots: Vec<String> = sqlx::query_scalar(
+                r#"
+                SELECT DISTINCT payload->'payload'->>'root_turn_id'
+                FROM assistant_runtime_items
+                WHERE kernel_thread_id=$1 AND runtime_thread_id=$2
+                  AND event_type='rollout/item'
+                  AND payload->>'type'='turn_context'
+                  AND payload->'payload'->>'turn_id'=$3
+                  AND payload->'payload'->>'root_turn_id' IS NOT NULL
+                "#,
+            )
+            .bind(thread_uuid(kernel_thread_id)?)
+            .bind(scope.root_thread_id)
+            .bind(turn_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(store_error)?;
+            if roots.len() != 1 {
+                return Err(ThreadStoreError::Conflict {
+                    message: "child turn has no unambiguous durable root attribution".to_string(),
+                });
+            }
+            roots[0].clone()
+        };
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM assistant_runtime_snapshots AS s JOIN assistant_runs AS r ON r.run_id=s.run_id WHERE s.runtime_thread_id=$1 AND s.run_id::text=$2 AND s.tenant_id=$3 AND s.user_id=$4 AND s.session_id=$5 AND r.status='running' AND r.engine='agent_runtime' AND NOT EXISTS (SELECT 1 FROM assistant_runtime_items AS item WHERE item.kernel_thread_id=$1 AND item.turn_id=$2 AND item.event_type IN ('compat/v1/run_finished', 'compat/v1/run_error')))",
+        )
+        .bind(scope.root_thread_id)
+        .bind(&root_turn_id)
+        .bind(&scope.tenant_id)
+        .bind(&scope.user_id)
+        .bind(&scope.session_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        if !valid {
+            return Err(ThreadStoreError::Conflict {
+                message: "turn attribution does not match the authenticated root snapshot"
+                    .to_string(),
+            });
+        }
+        Ok(root_turn_id)
     }
 
     /// Verifies a caller-provided root identity without creating or changing it.
@@ -204,6 +323,22 @@ impl PostgresThreadStore {
         event_key: &str,
         event: &AssistantTurnEventV1,
     ) -> ThreadStoreResult<i64> {
+        if event.event_type == "run_finished" {
+            self.check_write_health(kernel_thread_id)?;
+        }
+        let result = self
+            .append_v1_event_inner(kernel_thread_id, event_id, event_key, event)
+            .await;
+        self.record_write_result(kernel_thread_id, result)
+    }
+
+    async fn append_v1_event_inner(
+        &self,
+        kernel_thread_id: ThreadId,
+        event_id: Uuid,
+        event_key: &str,
+        event: &AssistantTurnEventV1,
+    ) -> ThreadStoreResult<i64> {
         if event_key.is_empty() || event_key.len() > 255 {
             return Err(ThreadStoreError::InvalidRequest {
                 message: "runtime event key must contain 1 to 255 characters".to_string(),
@@ -220,7 +355,22 @@ impl PostgresThreadStore {
             .or_else(|| event.data.get("item_id"))
             .and_then(Value::as_str);
         let status = event.data.get("status").and_then(Value::as_str);
-        sqlx::query_scalar::<_, i64>(
+        let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        self.lock_root(&mut transaction, scope.root_thread_id)
+            .await?;
+        let visible: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM assistant_runtime_thread_projections WHERE kernel_thread_id=$1 AND deleted_at IS NULL)",
+        )
+        .bind(kernel_thread_uuid)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        if !visible {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: ThreadId::from_u128(kernel_thread_uuid.as_u128()),
+            });
+        }
+        let sequence = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT append_assistant_runtime_item(
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -241,9 +391,11 @@ impl PostgresThreadStore {
         .bind(status)
         .bind(payload)
         .bind(hash)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(store_error)
+        .map_err(store_error)?;
+        transaction.commit().await.map_err(store_error)?;
+        Ok(sequence)
     }
 
     /// Reads an ordered, bounded V1 cursor page for one platform root Thread.

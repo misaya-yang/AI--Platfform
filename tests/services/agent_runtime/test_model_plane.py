@@ -1207,3 +1207,188 @@ async def test_native_responses_rejects_unsupported_tool_schema_before_provider_
 
     assert exc_info.value.code == "RUNTIME_TOOL_SCHEMA_UNSUPPORTED"
     assert captured["http_calls"] == 0
+
+
+@pytest.mark.parametrize("wire_protocol", ["chat_completions", "responses_v1"])
+@pytest.mark.parametrize("item_type", ["additional_tools", "configuration_update"])
+async def test_embedded_input_controls_cannot_bypass_snapshot(wire_protocol: str, item_type: str) -> None:
+    requests = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: requests.append(request)))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+                            lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    try:
+        with pytest.raises(AgentModelPlaneError, match="RUNTIME_INPUT_CONTROL_UNSUPPORTED"):
+            _ = [chunk async for chunk in plane.stream(
+                body={"input": [{"type": item_type, "tools": [{"name": "exec_command"}]}]},
+                turn_metadata={}, authorized_call=_call(_profile(), wire_protocol=wire_protocol),
+            )]
+        assert requests == []
+    finally:
+        await client.aclose()
+
+
+async def test_chat_partial_stream_without_terminal_is_unknown_not_completed() -> None:
+    requests = []
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, content=b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+                            lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    from unittest.mock import AsyncMock
+    plane._complete_call = AsyncMock()
+    plane._mark_unknown_if_dispatched = AsyncMock()
+    call = _call(_profile(), wire_protocol="chat_completions")
+    try:
+        with pytest.raises(AgentModelPlaneError, match="RUNTIME_PROVIDER_STREAM_INCOMPLETE"):
+            _ = [chunk async for chunk in plane.stream(body={"input": "hello"}, turn_metadata={}, authorized_call=call)]
+        assert len(requests) == 1
+        plane._complete_call.assert_not_awaited()
+        plane._mark_unknown_if_dispatched.assert_awaited_once_with(call.call_id)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("reason", ["length", "content_filter", "unexpected"])
+async def test_chat_non_success_finish_reason_cannot_complete(reason: str) -> None:
+    from unittest.mock import AsyncMock
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        chunk = {"choices": [{"delta": {"content": "partial"}, "finish_reason": reason}]}
+        return httpx.Response(200, request=request, content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    plane._complete_call = AsyncMock()
+    try:
+        with pytest.raises(AgentModelPlaneError, match="RUNTIME_PROVIDER_RESPONSE_INCOMPLETE"):
+            _ = [chunk async for chunk in plane.stream(body={"input": "hello"}, turn_metadata={},
+                authorized_call=_call(_profile(), wire_protocol="chat_completions"))]
+        plane._complete_call.assert_not_awaited()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("wire_protocol", ["chat_completions", "responses_v1"])
+@pytest.mark.parametrize("selected", [["lookup"], []])
+async def test_current_snapshot_subset_filters_outbound_tools_and_rejects_broader_return(
+    wire_protocol: str, selected: list[str],
+) -> None:
+    from unittest.mock import AsyncMock
+
+    captured = []
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        if wire_protocol == "chat_completions":
+            payload = {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "new", "function": {"name": "read", "arguments": "{}"}}]}}]}
+            content = f"data: {json.dumps(payload)}\n\n"
+        else:
+            content = _event(0, "response.created", response={"id": "resp"}) + _event(
+                1, "response.output_item.added", item={"type": "function_call", "name": "read", "id": "new", "call_id": "new", "arguments": "{}"},
+            )
+        return httpx.Response(200, request=request, content=content)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    plane._complete_call = AsyncMock()
+    call = _call(_profile(), wire_protocol=wire_protocol)
+    call.snapshot["tool_policy"] = {"allowedTools": [{"namespace": None, "name": name} for name in selected]}
+    tools = [{"type": "function", "name": name, "description": name, "parameters": {"type": "object"}} for name in ("lookup", "read")]
+    history = [{"type": "function_call", "name": "read", "call_id": "prior", "arguments": "{}"},
+               {"type": "function_call_output", "call_id": "prior", "output": "prior result"}]
+    try:
+        with pytest.raises(AgentModelPlaneError, match="RUNTIME_PROVIDER_TOOL_SCOPE_MISMATCH"):
+            _ = [chunk async for chunk in plane.stream(body={"input": history, "tools": tools}, turn_metadata={}, authorized_call=call)]
+        serialized = captured[0].get("tools", [])
+        assert [(tool["function"] if wire_protocol == "chat_completions" else tool)["name"] for tool in serialized] == selected
+        assert len(captured) == 1
+        plane._complete_call.assert_not_awaited()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("wire_protocol", ["chat_completions", "responses_v1"])
+async def test_provider_connect_error_returns_stable_private_error_without_retry(wire_protocol: str) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.api.internal.agent_model_plane import responses
+
+    requests = []
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("https://provider.invalid/secret-fixture", request=request)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    call = _call(_profile(), wire_protocol=wire_protocol)
+    plane.authorize_and_reserve = AsyncMock(return_value=call)
+    plane._complete_call = AsyncMock()
+    plane._mark_unknown_if_dispatched = AsyncMock()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(agent_model_plane_internal_token="fixture", agent_model_plane=plane)),
+        headers={"authorization": "Bearer fixture", "x-agent-turn-metadata": "{}"},
+        body=AsyncMock(return_value=json.dumps({"input": "hello", "stream": True}).encode()),
+    )
+    try:
+        response = await responses(request)
+        assert response.status_code == 502
+        payload = json.loads(response.body)
+        assert payload["error"]["code"] == "RUNTIME_PROVIDER_TRANSPORT_ERROR"
+        assert b"secret-fixture" not in response.body
+        assert len(requests) == 1
+        plane._complete_call.assert_not_awaited()
+        plane._mark_unknown_if_dispatched.assert_awaited_once_with(call.call_id)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("wire_protocol", ["chat_completions", "responses_v1"])
+async def test_provider_read_error_emits_one_failed_terminal_and_preserves_unknown(wire_protocol: str) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.api.internal.agent_model_plane import responses
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if wire_protocol == "responses_v1":
+                yield _event(0, "response.created", response={"id": "resp_transport"}).encode()
+                yield _event(1, "response.output_text.delta", delta="partial").encode()
+            else:
+                yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise httpx.ReadError("private transport detail")
+
+    requests = []
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, stream=BrokenStream())
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(database=_Database(), provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32), http_client=client)
+    call = _call(_profile(), wire_protocol=wire_protocol)
+    plane.authorize_and_reserve = AsyncMock(return_value=call)
+    plane._complete_call = AsyncMock()
+    plane._mark_unknown_if_dispatched = AsyncMock()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(agent_model_plane_internal_token="fixture", agent_model_plane=plane)),
+        headers={"authorization": "Bearer fixture", "x-agent-turn-metadata": "{}"},
+        body=AsyncMock(return_value=json.dumps({"input": "hello", "stream": True}).encode()),
+    )
+    try:
+        response = await responses(request)
+        assert response.status_code == 200
+        frames = [frame async for frame in response.body_iterator]
+        events = [json.loads(next(line[5:] for line in frame.splitlines() if line.startswith(b"data:"))) for frame in frames]
+        assert events[-1]["type"] == "response.failed"
+        assert events[-1]["response"]["error"]["code"] == "RUNTIME_PROVIDER_TRANSPORT_ERROR"
+        assert [event["sequence_number"] for event in events] == list(range(len(events)))
+        assert len([event for event in events if event["type"] == "response.failed"]) == 1
+        assert not any(event["type"] == "response.completed" for event in events)
+        assert any(event.get("delta") == "partial" for event in events)
+        assert b"private transport detail" not in b"".join(frames)
+        assert len(requests) == 1
+        plane._complete_call.assert_not_awaited()
+        plane._mark_unknown_if_dispatched.assert_awaited_once_with(call.call_id)
+    finally:
+        await client.aclose()
