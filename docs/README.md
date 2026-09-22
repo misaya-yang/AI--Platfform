@@ -88,7 +88,7 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 | [`plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md`](plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md) | **archived evidence, pending move** — 已完成的 Rust 0828 验收计划，不得重新执行。 |
 | [`plans/platform-architecture-convergence-prd-2026-08.md`](plans/platform-architecture-convergence-prd-2026-08.md) | **active closeout** — 核心候选 `9aaa9cab` 当前栈实机已通过；托管 Rust CI、多架构、fresh-machine 与冻结镜像回切证据仍未完成。 |
 | [`plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md`](plans/agent-runtime-codex-harness-upgrade-prd-2026-08.md) | **implemented; retained as upgrade contract** — upstream `94cbbdda` 已同步并进入 `main`；后续修复由下列计划接管。 |
-| [`plans/agent-runtime-post-upgrade-core-fixes-2026-08.md`](plans/agent-runtime-post-upgrade-core-fixes-2026-08.md) | **queued** — 四路源码审查确认的工具授权、租户隔离、终态恢复、Python sandbox、Runtime/Worker 制品与 CLI 流式边界修复。 |
+| [升级后核心修复：一期执行记录](../deploy/runbooks/agent-platform-vnext/README.md) | **completed_local** — 原本地草稿已由一期接管；工具授权、租户隔离、终态恢复、Python sandbox、成对制品与 CLI 流式边界的本地验收已完成，外部发行义务见执行账本。 |
 
 ## Research
 

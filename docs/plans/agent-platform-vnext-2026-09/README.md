@@ -109,7 +109,7 @@
 | 现有工作 | 本计划处理 |
 | --- | --- |
 | `platform-architecture-convergence` | 保留已完成模块化/DB role/gate 工作；把未完成制品、fresh-machine、完整回滚证据登记为前序义务；不重跑全部 ARC 包 |
-| `agent-runtime-post-upgrade-core-fixes-2026-08.md` | CORE-1～6 在当前源码仍有相关问题，纳入一期兼容性入口；实现前逐项刷新，保持一项一个执行 owner |
+| 升级后核心修复本地草稿（已接管） | CORE-1～6 已纳入一期；本地完成范围与未验证发行义务以[执行账本](../../../deploy/runbooks/agent-platform-vnext/loop-state.json)为准，旧草稿仅本地保留，不再作为执行入口 |
 | `agent-runtime-upstream-sync` | 只接收锁定后的 source/overlay/制品与残留证据；本 PRD 不授权再次同步 upstream |
 | `agent-runtime-cli-client` / ADR-009 | 保留已实现的本地 launcher、隔离 home、provider adapter；补尚未完成的终态/工具/平台分发合同 |
 | RAG PRD 与 `kb-rag-ui-t5` | 保留 IR、索引迁移、检索、UI 工作；核对实际运行装配与发布黄金集，不把历史 plan 的勾选当当前验收 |

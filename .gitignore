@@ -86,6 +86,8 @@ docs_project/
 docs/**/node_modules/
 docs/**/.cache/
 docs/scratch/
+# Local legacy draft; tracked execution records live in deploy/runbooks/agent-platform-vnext/.
+/docs/plans/agent-runtime-post-upgrade-core-fixes-2026-08.md
 
 # ======================== Data & Models ========================
 # Downloaded ML models (OCR, embeddings, etc.)
