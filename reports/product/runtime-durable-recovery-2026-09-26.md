@@ -106,3 +106,19 @@ C3 `b9799e5c9478` 验证执行合同；C4 的最后修正仅是未知事实投�
 ## Git
 
 [验收阶段 Git 快照](../runtime-recovery/git-final-status.txt)保留。用户追加授权本包提交并本地合入main；只提交本包代码、设计、程序状态和验收证据。先前PRD、`docs/README.md`及其他线程架构规划文件保持原工作树内容，收尾结果另记。
+
+
+## 本地 main 合入收尾
+
+用户追加授权后，恢复包在 `codex/runtime-durable-recovery` 提交为
+`91eadb927a8e0fa02eac39fc1657470bcf84ff73`，本地 `main` 已 fast-forward
+合入。独立范围审计无新增阻塞。合入前再次运行受影响 Python **200通过**、
+architecture/harness、validate/status与运行镜像身份检查；合入后实际 PostgreSQL
+两角色矩阵 **2通过**、来源契约 **18通过**。这些是定向合并检查，未冒充再跑完整
+Rust/浏览器崩溃矩阵；原 C4 代码和运行镜像一致，没有功能代码追加修改。
+
+本包日志已显式纳入 Git，移除 ANSI 颜色和行尾空白的规则见 logs/README。
+11个既有未提交文件逐个哈希对比保持不变：产品PRD、`docs/README.md`、PRD review
+报告和其他线程的架构规划继续保留，未顺带提交。无远程推送、历史重写、分支删除或
+数据清理。DR-01 收口；完整 R1 的其他未验证旅程仍保留。
+[本地合入事实](../runtime-recovery/local-main-integration.json)。

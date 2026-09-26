@@ -1,11 +1,13 @@
 # R1 / durable recovery handoff
 
 Authoritative status: [loop-state.json](loop-state.json).
-DR-01 local acceptance is complete. Branch `codex/runtime-durable-recovery`,
-Acceptance base `92c98c0b85c7b9b72254e5023e6086fd8d4792df`. User now authorizes
-scoped commit and local main integration; see integration record in loop-state.
+DR-01 local acceptance and integration to `main` are complete. Source branch
+`codex/runtime-durable-recovery`, implementation commit `91eadb92`.
+Acceptance base `92c98c0b85c7b9b72254e5023e6086fd8d4792df`. Local fast-forward
+main integration performed after user authorization; no remote push.
 Preexisting dirty PRD, docs index and another thread's architecture planning
-remain preserved. Primary writer only; all other agents were read-only.
+remain preserved. Primary writer only; all other agents were read-only. Post-commit SQL two-role
+matrix and source-contract passed; unrelated files remained byte-identical.
 
 ## Final local runtime
 

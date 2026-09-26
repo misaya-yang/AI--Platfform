@@ -1,9 +1,10 @@
 package_id: DR-01
 state: verified
 base_sha: 92c98c0b85c7b9b72254e5023e6086fd8d4792df
-head_sha: 92c98c0b85c7b9b72254e5023e6086fd8d4792df
-working_tree_delivery: true
-commits: []
+head_sha: 91eadb927a8e0fa02eac39fc1657470bcf84ff73
+working_tree_delivery: false
+commits:
+- 91eadb927a8e0fa02eac39fc1657470bcf84ff73
 changed_paths:
 - rust/agent-runtime-overlay/**
 - src/services/agent_runtime/**
@@ -156,7 +157,21 @@ remaining_risks:
 - Real crash matrix used Quiz capability; not every configured provider or tool.
 - Entire R1 remains in progress with separate unverified journeys.
 local_integration:
-  authorization: User requested quick closure and local main integration
-  state: in_progress
+  state: integrated
   target: main
-  mode: fast-forward
+  mode: local fast-forward
+  implementation_commit: 91eadb927a8e0fa02eac39fc1657470bcf84ff73
+  remote_push_performed: false
+  unrelated_files_preserved: 11
+post_commit_checks:
+- command: RUNTIME_RECOVERY_DB_LIVE=1 uv run --all-packages --extra test pytest -q
+    --no-cov tests/database/test_runtime_durable_recovery_live.py
+  exit_code: 0
+  passed: 2
+  failed: 0
+  skipped: 0
+- command: make agent-runtime-source-contract
+  exit_code: 0
+  passed: 18
+  failed: 0
+  skipped: 0

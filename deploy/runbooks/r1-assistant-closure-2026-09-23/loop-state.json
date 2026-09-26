@@ -6,12 +6,12 @@
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "codex/runtime-durable-recovery",
+  "branch": "main",
   "active_phase": "R1-1",
   "active_feature": "Rust durable execution and same-run restart recovery",
   "active_package": "DR-01",
-  "next_action": "User authorized quick scoped closure and local main integration of DR-01. Recheck short gates, commit this package on codex branch and fast-forward local main; retain unrelated dirty PRD and other-thread documents.",
-  "last_result": "DR-01 verified on C4 overlay22bf4e1ecad5: Python200; Docker Rust160 passed2 explicit optional ignores; actual isolated role SQL2; ten crash/governance cases with original identity/no duplicate action; final real Qwen/browser original approval SIGTERM recovery, refresh/reopen unchanged; validate/status/source/architecture/OpenAPI/harness passed. Final read-only independent review PASS; R1 overall still incomplete.",
+  "next_action": "DR-01 complete and locally integrated into main. Retain running C4 and unrelated dirty PRD/architecture planning. R1 remaining unverified journeys stay separate; no additional DR-01 development pending.",
+  "last_result": "DR-01 verified on C4 overlay22bf4e1ecad5: Python200; Docker Rust160 passed2 explicit optional ignores; actual isolated role SQL2; ten crash/governance cases with original identity/no duplicate action; final real Qwen/browser original approval SIGTERM recovery, refresh/reopen unchanged; validate/status/source/architecture/OpenAPI/harness passed. Final read-only independent review PASS; R1 overall still incomplete. Scoped implementation commit 91eadb927a8e0fa02eac39fc1657470bcf84ff73 locally merged into main; post-commit actual SQL role matrix2 and source-contract18 passed. No remote push.",
   "updated_at": "2026-09-26",
   "blockers": [
     {
@@ -97,7 +97,7 @@
   "execution_authorization": {
     "scope": "持久执行与重启恢复本地范围；用户现追加授权本包收尾、提交并本地合入main。不扩展全平台语言迁移。",
     "parallel_agents": "只读调查与独立 review；主代理为唯一代码写入者。",
-    "round_status": "DR-01 verified; local integration authorized and in progress",
+    "round_status": "complete: verified DR-01, scoped commit locally fast-forwarded to main",
     "local_main_integration_authorized": true
   },
   "durable_recovery": {
@@ -121,9 +121,11 @@
     }
   ],
   "integration": {
-    "state": "in_progress",
+    "state": "integrated",
     "target": "main",
     "mode": "local fast-forward",
+    "implementation_commit": "91eadb927a8e0fa02eac39fc1657470bcf84ff73",
+    "remote_push_performed": false,
     "unrelated_work_preserved": true
   }
 }
