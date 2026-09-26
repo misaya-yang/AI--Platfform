@@ -2401,6 +2401,15 @@ async fn drain_in_flight(
     while let Some(res) = in_flight.next().await {
         match res {
             Ok(envelope) => {
+                if turn_context
+                    .extension_data
+                    .get::<super::turn_suspension::SuspendedTurn>()
+                    .is_some()
+                {
+                    // A process suspension is not a user cancellation. The
+                    // durable capability receipt supplies the real output.
+                    continue;
+                }
                 mark_thread_memory_mode_polluted_if_external_context(
                     sess.as_ref(),
                     turn_context.as_ref(),

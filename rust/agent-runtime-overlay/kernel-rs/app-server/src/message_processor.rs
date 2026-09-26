@@ -878,6 +878,13 @@ impl MessageProcessor {
         self.thread_processor.clear_all_thread_listeners().await;
     }
 
+    pub(crate) async fn suspend_thread(
+        &self,
+        thread_id: codex_protocol::ThreadId,
+    ) -> std::io::Result<codex_protocol::turn_input::SuspendTurnOutcome> {
+        self.thread_processor.suspend_thread(thread_id).await
+    }
+
     pub(crate) async fn shutdown_threads(&self) {
         self.thread_processor.shutdown_threads().await;
     }

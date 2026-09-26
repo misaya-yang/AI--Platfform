@@ -1,6 +1,6 @@
 {
   "baseline_id": "2026_08_post_kb_v1",
-  "epoch": 3,
+  "epoch": 4,
   "changes": [
     {
       "sequence": 1,
@@ -68,6 +68,26 @@
       "resume_handler": null,
       "repair_handler": null,
       "notes": "R1 AR-04: stable logged-in and public quiz result replay without duplicate attempt count; additive fields and a versioned atomic public function."
+    },
+    {
+      "sequence": 4,
+      "name": "runtime_durable_recovery",
+      "file": "004_runtime_durable_recovery.sql",
+      "sha256": "d24958b1edf5e7735a91fcd256e1c32abb2778109a6b3270cceb68380874fa59",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('assistant.assistant_capability_executions') IS NOT NULL"
+      ],
+      "postconditions": [
+        "SELECT to_regclass('assistant.assistant_runtime_execution_owners') IS NOT NULL AND to_regclass('assistant.assistant_runtime_invocations') IS NOT NULL"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R1 J03: fenced Rust execution ownership, durable original invocation and dispatch authority. Quiesce old Runtime before migration."
     }
   ]
 }

@@ -117,23 +117,40 @@ impl ApprovalBroker {
         }
         let thread_id = Uuid::parse_str(&params.thread_id)
             .map_err(|_| "approval_thread_invalid".to_string())?;
-        let approval_id = Uuid::now_v7();
-        let arguments = params.arguments.clone();
-        sqlx::query(
-            "INSERT INTO assistant_tool_approvals (approval_id, tenant_id, user_id, session_id, run_id, tool_call_id, tool_name, arguments, status, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',NOW() + ($9 * INTERVAL '1 second'))",
-        )
-        .bind(approval_id)
-        .bind(&identity.tenant_id)
-        .bind(&identity.user_id)
-        .bind(&identity.session_id)
-        .bind(run_id)
-        .bind(&params.call_id)
-        .bind(capability_id)
-        .bind(&arguments)
-        .bind(APPROVAL_TTL_SECONDS)
-        .execute(&store.pool)
-        .await
-        .map_err(|_| "approval_persistence_failed".to_string())?;
+        // Serialize by the original run before finding/creating approval.
+        // Original ID, parameters, decision and deadline survive waiter loss.
+        let mut tx = store
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "approval_persistence_failed")?;
+        sqlx::query("SELECT run_id FROM assistant_runs WHERE run_id=$1 FOR UPDATE")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "approval_persistence_failed")?;
+        let previous=sqlx::query("SELECT approval_id,arguments FROM assistant_tool_approvals WHERE run_id=$1 AND tool_call_id=$2 AND tool_name=$3 AND tenant_id=$4 AND user_id=$5 AND session_id=$6 ORDER BY created_at LIMIT 1 FOR UPDATE")
+            .bind(run_id).bind(&params.call_id).bind(capability_id).bind(&identity.tenant_id).bind(&identity.user_id).bind(&identity.session_id)
+            .fetch_optional(&mut *tx).await.map_err(|_| "approval_persistence_failed")?;
+        let approval_id = if let Some(row) = previous {
+            if row
+                .try_get::<Value, _>("arguments")
+                .map_err(|_| "approval_invalid")?
+                != params.arguments
+            {
+                return Err("approval_arguments_changed".to_string());
+            }
+            row.try_get("approval_id").map_err(|_| "approval_invalid")?
+        } else {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO assistant_tool_approvals (approval_id,tenant_id,user_id,session_id,run_id,tool_call_id,tool_name,arguments,status,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',NOW()+($9*INTERVAL '1 second'))")
+                .bind(id).bind(&identity.tenant_id).bind(&identity.user_id).bind(&identity.session_id).bind(run_id).bind(&params.call_id).bind(capability_id).bind(&params.arguments).bind(APPROVAL_TTL_SECONDS)
+                .execute(&mut *tx).await.map_err(|_| "approval_persistence_failed")?;
+            id
+        };
+        tx.commit()
+            .await
+            .map_err(|_| "approval_persistence_failed")?;
 
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(
@@ -150,6 +167,35 @@ impl ApprovalBroker {
             },
         );
         Ok((approval_id, receiver))
+    }
+
+    pub(crate) async fn wait_dynamic_decision(
+        &self,
+        approval_id: Uuid,
+        mut receiver: oneshot::Receiver<DynamicApprovalDecision>,
+        store: &PostgresThreadStore,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<DynamicApprovalDecision> {
+        let mut receiver_open = true;
+        loop {
+            let row=sqlx::query("SELECT status,reason,(expires_at>NOW()) AS valid FROM assistant_tool_approvals WHERE approval_id=$1")
+                .bind(approval_id).fetch_optional(&store.pool).await.ok().flatten()?;
+            let status: String = row.try_get("status").ok()?;
+            if status != "pending" {
+                return Some(DynamicApprovalDecision {
+                    approved: matches!(status.as_str(), "approved" | "consumed"),
+                    reason: row.try_get("reason").ok().flatten(),
+                });
+            }
+            if !row.try_get::<bool, _>("valid").unwrap_or(false) || cancel.is_cancelled() {
+                return None;
+            }
+            tokio::select! {
+                ()=cancel.cancelled()=>return None,
+                decision=&mut receiver, if receiver_open=>{ receiver_open=false; if let Ok(decision)=decision { return Some(decision); } },
+                ()=tokio::time::sleep(std::time::Duration::from_millis(250))=>{},
+            }
+        }
     }
 
     pub(crate) async fn cancel_dynamic(
@@ -200,7 +246,7 @@ impl ApprovalBroker {
             }
         };
         let rows = match sqlx::query(
-            "WITH eligible AS (SELECT a.approval_id, a.tool_call_id, r.harness_thread_id, r.harness_turn_id FROM assistant_tool_approvals AS a JOIN assistant_runs AS r ON r.run_id=a.run_id WHERE r.engine='agent_runtime' AND r.status IN ('running','awaiting_approval') AND a.status='pending' AND a.created_at < $1), cancelled AS (UPDATE assistant_tool_approvals AS a SET status='cancelled', reason='runtime_restarted', approved_at=NOW() FROM eligible AS e WHERE a.approval_id=e.approval_id AND a.status='pending' RETURNING a.approval_id, a.run_id, a.tenant_id, a.user_id, a.session_id, a.tool_name) SELECT c.approval_id, c.run_id, c.tenant_id, c.user_id, c.session_id, c.tool_name, e.tool_call_id, e.harness_thread_id, e.harness_turn_id FROM cancelled AS c JOIN eligible AS e ON e.approval_id=c.approval_id",
+            "WITH eligible AS (SELECT a.approval_id, a.tool_call_id, r.harness_thread_id, r.harness_turn_id FROM assistant_tool_approvals AS a JOIN assistant_runs AS r ON r.run_id=a.run_id WHERE r.engine='agent_runtime' AND r.status IN ('running','awaiting_approval') AND a.status='pending' AND a.created_at < $1 AND NOT EXISTS (SELECT 1 FROM assistant_runtime_execution_owners o WHERE o.run_id=r.run_id)), cancelled AS (UPDATE assistant_tool_approvals AS a SET status='cancelled', reason='runtime_restarted', approved_at=NOW() FROM eligible AS e WHERE a.approval_id=e.approval_id AND a.status='pending' RETURNING a.approval_id, a.run_id, a.tenant_id, a.user_id, a.session_id, a.tool_name) SELECT c.approval_id, c.run_id, c.tenant_id, c.user_id, c.session_id, c.tool_name, e.tool_call_id, e.harness_thread_id, e.harness_turn_id FROM cancelled AS c JOIN eligible AS e ON e.approval_id=c.approval_id",
         )
         .bind(startup_cutoff)
         .fetch_all(&mut *transaction)
@@ -597,13 +643,29 @@ impl ApprovalBroker {
         store: &PostgresThreadStore,
         requests: &InProcessAppServerRequestHandle,
     ) -> Result<ApprovalProjection, String> {
-        let pending = self
-            .pending
-            .lock()
-            .await
-            .get(&approval_id)
-            .cloned()
-            .ok_or_else(|| "approval_not_found".to_string())?;
+        let pending = self.pending.lock().await.get(&approval_id).cloned();
+        let pending = if let Some(pending) = pending {
+            pending
+        } else {
+            let row=sqlx::query("SELECT a.run_id,a.tool_call_id,r.harness_thread_id FROM assistant_tool_approvals a JOIN assistant_runs r ON r.run_id=a.run_id WHERE a.approval_id=$1 AND a.tenant_id=$2 AND a.user_id=$3 AND a.session_id=$4")
+                .bind(approval_id).bind(tenant_id).bind(user_id).bind(session_id).fetch_optional(&store.pool).await.map_err(|_| "approval_lookup_failed")?.ok_or("approval_not_found")?;
+            let run_id: Uuid = row.try_get("run_id").map_err(|_| "approval_invalid")?;
+            let thread_id: Uuid = row
+                .try_get("harness_thread_id")
+                .map_err(|_| "approval_invalid")?;
+            PendingApproval {
+                destination: ApprovalDestination::Dynamic(Arc::new(Mutex::new(None))),
+                tenant_id: tenant_id.to_string(),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                thread_id,
+                root_thread_id: codex_protocol::ThreadId::from_u128(thread_id.as_u128()),
+                turn_id: run_id.to_string(),
+                call_id: row
+                    .try_get("tool_call_id")
+                    .map_err(|_| "approval_invalid")?,
+            }
+        };
         if pending.tenant_id != tenant_id
             || pending.user_id != user_id
             || pending.session_id != session_id
@@ -645,7 +707,9 @@ impl ApprovalBroker {
         } else {
             "consumed"
         };
-        if destination_failed {
+        if destination_failed
+            && matches!(pending.destination, ApprovalDestination::ServerRequest(_))
+        {
             let _ = sqlx::query(
                 "UPDATE assistant_tool_approvals SET status='cancelled', reason='runtime_resume_failed', approved_at=NOW() WHERE approval_id=$1 AND status='approved'",
             )

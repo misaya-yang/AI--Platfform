@@ -379,6 +379,11 @@ impl ThreadLifecycleContributor<Config> for PlatformLifecycleContributor {
                 return;
             };
             for turn_id in turn_ids {
+                let durable:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM assistant_runtime_execution_owners WHERE run_id::text=$1)")
+                    .bind(&turn_id).fetch_one(&self.store.pool).await.unwrap_or(true);
+                if durable {
+                    continue;
+                }
                 self.recover_unclosed(thread_id, &turn_id).await;
             }
         })

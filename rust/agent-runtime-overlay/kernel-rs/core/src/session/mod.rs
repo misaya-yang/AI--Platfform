@@ -1045,6 +1045,7 @@ impl SessionIo {
         start_options: TurnStartOptions,
         trace: Option<W3cTraceContext>,
         turn_id: String,
+        responsesapi_client_metadata: Option<std::collections::HashMap<String, String>>,
     ) -> CodexResult<TurnInputSubmission> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_with_id(Submission {
@@ -1052,6 +1053,7 @@ impl SessionIo {
             op: Op::RecoverTurn {
                 thread_settings,
                 start_options,
+                responsesapi_client_metadata,
                 reply: reply_tx,
             },
             trace,

@@ -369,7 +369,7 @@ async def authorize_and_reserve(
         raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_INVALID", status_code=401) from None
     row = await self.database.fetchrow(
         """
-        SELECT l.*, s.snapshot, s.snapshot_sha256
+        SELECT l.*, s.snapshot, s.snapshot_sha256, o.owner_id AS execution_owner_id, o.fence AS execution_fence
           FROM assistant_runtime_model_leases AS l
           JOIN assistant_runtime_snapshots AS s
             ON s.snapshot_id = l.snapshot_id
@@ -379,7 +379,9 @@ async def authorize_and_reserve(
            AND s.session_id = l.session_id
           JOIN assistant_runs AS run
             ON run.run_id = l.run_id
+          LEFT JOIN assistant_runtime_execution_owners AS o ON o.run_id = run.run_id
          WHERE l.lease_id = $1
+           AND (o.run_id IS NULL OR o.lease_until > NOW())
            AND l.status = 'active'
            AND l.expires_at > NOW()
            AND run.status = 'running'
@@ -395,6 +397,13 @@ async def authorize_and_reserve(
     if row is None:
         raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_NOT_FOUND", status_code=401)
     data = dict(row)
+    execution_owner = data.get("execution_owner_id")
+    execution_fence = data.get("execution_fence")
+    if execution_owner is not None and (
+        str(turn_metadata.get("ai_platform_execution_owner") or "") != str(execution_owner)
+        or str(turn_metadata.get("ai_platform_execution_fence") or "") != str(execution_fence)
+    ):
+        raise AgentModelPlaneError("RUNTIME_EXECUTION_FENCE_LOST", status_code=403)
     claims = RuntimeModelLeaseClaims(
         schema_version=str(data["schema_version"]),
         lease_id=str(data["lease_id"]),
@@ -438,17 +447,22 @@ async def authorize_and_reserve(
         output_price_per_1k=float(pricing.get("output_price_per_1k") or 0),
     )
     call_id = uuid.uuid4()
-    request_hash = sha256(_helpers.canonical_runtime_json(body).encode()).hexdigest()
+    # A recovery generation can retry an interrupted model request under the
+    # original remaining budget. Replays within one generation stay rejected.
+    fingerprint = body if execution_owner is None else {"body": body, "execution_fence": execution_fence}
+    request_hash = sha256(_helpers.canonical_runtime_json(fingerprint).encode()).hexdigest()
     try:
-        await self.database.fetchrow(
-            "SELECT reserve_assistant_runtime_model_call($1, $2, $3, $4, $5, $6)",
-            call_id,
-            lease_id,
-            request_hash,
-            estimated_input,
-            requested_output,
-            reserved_cost,
-        )
+        if execution_owner is not None:
+            await self.database.fetchrow(
+                "SELECT reserve_assistant_runtime_model_call($1,$2,$3,$4,$5,$6,$7,$8)",
+                call_id, lease_id, request_hash, estimated_input, requested_output,
+                reserved_cost, execution_owner, execution_fence,
+            )
+        else:
+            await self.database.fetchrow(
+                "SELECT reserve_assistant_runtime_model_call($1, $2, $3, $4, $5, $6)",
+                call_id, lease_id, request_hash, estimated_input, requested_output, reserved_cost,
+            )
     except Exception as exc:
         code = str(exc)
         if "MODEL_CALL_REPLAYED" in code:

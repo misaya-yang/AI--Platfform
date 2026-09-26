@@ -731,7 +731,7 @@ def refresh_source_lock(*, repo_root: Path, lock_path: Path) -> None:
     validate_lock(repo_root=repo_root, lock_path=lock_path)
 
 
-def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path) -> None:
+def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path, cargo_metadata: Path | None = None) -> None:
     """Refresh overlay identities and the Worker dependency SBOM atomically.
 
     ``cargo_workspace`` is intentionally read-only: it is the already-composed,
@@ -777,12 +777,17 @@ def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path) 
             or sha256_file(composed_path) != sha256_file(overlay_path)
         ):
             raise ContractError(f"cargo workspace does not contain the current overlay {relative}")
-    metadata = json.loads(
-        _run(
-            ["cargo", "metadata", "--locked", "--format-version", "1"],
-            cwd=cargo_cwd,
+    if cargo_metadata is not None:
+        # Existing Docker source-evidence exports dependency metadata alongside
+        # its exact lockfile. Source-only overlay edits do not change this graph.
+        evidence_lock = cargo_metadata.parent / "Cargo.lock"
+        if not evidence_lock.is_file() or sha256_file(evidence_lock) != sha256_file(cargo_lock):
+            raise ContractError("offline Cargo metadata must include the matching exported Cargo.lock")
+        metadata = _load_object(cargo_metadata, label="Docker Cargo metadata")
+    else:
+        metadata = json.loads(
+            _run(["cargo", "metadata", "--locked", "--format-version", "1"], cwd=cargo_cwd)
         )
-    )
     if not isinstance(metadata, dict):
         raise ContractError("cargo metadata must return a JSON object")
 
@@ -1027,6 +1032,7 @@ def _parser() -> argparse.ArgumentParser:
     refresh_overlay_parser.add_argument("--repo-root", type=Path, required=True)
     refresh_overlay_parser.add_argument("--lock", type=Path, required=True)
     refresh_overlay_parser.add_argument("--cargo-workspace", type=Path, required=True)
+    refresh_overlay_parser.add_argument("--cargo-metadata", type=Path, help="Docker-exported offline metadata with its sibling Cargo.lock")
 
     record = subparsers.add_parser(
         "record-local-image",
@@ -1074,6 +1080,7 @@ def main() -> int:
                 repo_root=args.repo_root.resolve(),
                 lock_path=args.lock.resolve(),
                 cargo_workspace=args.cargo_workspace,
+                cargo_metadata=args.cargo_metadata,
             )
         elif args.command == "verify-local-images":
             verify_local_images(

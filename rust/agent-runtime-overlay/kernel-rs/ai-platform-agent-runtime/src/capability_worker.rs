@@ -53,6 +53,7 @@ pub struct CapabilityWorkerClient {
     internal_token: String,
     trace_context: InternalTraceContext,
     run_id: Option<String>,
+    execution_owner: Option<(String, i64)>,
 }
 
 impl CapabilityWorkerClient {
@@ -74,7 +75,13 @@ impl CapabilityWorkerClient {
             internal_token,
             trace_context: InternalTraceContext::default(),
             run_id: None,
+            execution_owner: None,
         })
+    }
+
+    pub(crate) fn with_execution_owner(mut self, owner: String, fence: i64) -> Self {
+        self.execution_owner = Some((owner, fence));
+        self
     }
 
     pub(crate) fn with_trace_context(
@@ -222,6 +229,11 @@ impl CapabilityWorkerClient {
             .header("x-ai-user-id", &scope.user_id)
             .header("x-ai-session-id", &scope.session_id)
             .timeout(REQUEST_TIMEOUT);
+        if let Some((owner, fence)) = self.execution_owner.as_ref() {
+            request = request
+                .header("x-runtime-execution-owner", owner)
+                .header("x-runtime-execution-fence", fence.to_string());
+        }
         if let Some(run_id) = self.run_id.as_deref() {
             request =
                 self.trace_context

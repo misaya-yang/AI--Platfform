@@ -68,6 +68,7 @@ pub(super) async fn events(
         .await
         .map_err(RuntimeError::from_store)?;
     let store = Arc::clone(&state.store);
+    let shutdown = state.recovery_shutdown.clone();
     let stream = async_stream::stream! {
         let mut cursor = query.after_sequence;
         for event in initial {
@@ -86,6 +87,7 @@ pub(super) async fn events(
         durable_poll.tick().await;
         loop {
             tokio::select! {
+                () = shutdown.cancelled() => break,
                 message = receiver.recv() => match message {
                     Ok(message) if message.root_thread_id == root_thread_id => {
                         if message.event.sequence > cursor {

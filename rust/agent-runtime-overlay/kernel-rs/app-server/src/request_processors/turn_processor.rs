@@ -541,6 +541,13 @@ impl TurnRequestProcessor {
             .check_thread_model_provider(thread.config().await.as_ref())
             .await
             .map_err(|error| config_load_error(&error))?;
+        if turn_start_options
+            .as_ref()
+            .is_some_and(AppServerTurnStartOptions::is_recovery)
+            && (!params.input.is_empty() || params.tool_output.is_some())
+        {
+            return Err(invalid_request("host recovery cannot submit new input"));
+        }
         if let Some(tool_output) = &params.tool_output {
             if !params.input.is_empty() {
                 return Err(invalid_request(
@@ -664,6 +671,25 @@ impl TurnRequestProcessor {
             .with_responses_metadata(params.responsesapi_client_metadata)
             .with_trace(self.request_trace_context(&request_id).await);
         let submission = match turn_start_options {
+            Some(options) if options.is_recovery() => thread
+                .recover_turn_with_metadata_if_idle(
+                    codex_protocol::turn_input::RecoverTurnRequest {
+                        turn_id: options.reserved_turn_id().to_string(),
+                        thread_settings: turn_request.thread_settings,
+                        trace: turn_request.trace,
+                        cyber_access_program: turn_request.start.cyber_access_program,
+                    },
+                    turn_request.responsesapi_client_metadata,
+                )
+                .await
+                .map(|submission| match submission {
+                    codex_protocol::turn_input::StartIfIdleSubmission::Started { turn_id } => {
+                        TurnInputSubmission::Started { turn_id }
+                    }
+                    codex_protocol::turn_input::StartIfIdleSubmission::NotSubmitted { reason } => {
+                        TurnInputSubmission::NotSubmitted { reason }
+                    }
+                }),
             Some(options) => {
                 thread
                     .start_turn_with_id(turn_request, options.reserved_turn_id().to_string())

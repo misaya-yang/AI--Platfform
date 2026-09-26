@@ -226,7 +226,8 @@ async def stream_thread_events(
     ) as response:
         if response.status_code >= 400:
             raise AgentRuntimeControlError(
-                "AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED", status_code=503
+                "AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED",
+                status_code=503 if response.status_code >= 500 else response.status_code,
             )
         async for line in response.aiter_lines():
             if line:

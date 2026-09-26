@@ -190,6 +190,10 @@ pub enum InProcessServerEvent {
 /// replies are fire-and-forget from the caller's perspective (transport errors are
 /// caught by `try_send` on the outer channel).
 enum InProcessClientMessage {
+    SuspendThread {
+        thread_id: codex_protocol::ThreadId,
+        response_tx: oneshot::Sender<IoResult<codex_protocol::turn_input::SuspendTurnOutcome>>,
+    },
     Request {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
@@ -215,6 +219,10 @@ enum InProcessClientMessage {
 }
 
 enum ProcessorCommand {
+    SuspendThread {
+        thread_id: codex_protocol::ThreadId,
+        response_tx: oneshot::Sender<IoResult<codex_protocol::turn_input::SuspendTurnOutcome>>,
+    },
     Request {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
@@ -231,6 +239,20 @@ pub struct InProcessClientSender {
 }
 
 impl InProcessClientSender {
+    pub async fn suspend_thread(
+        &self,
+        thread_id: codex_protocol::ThreadId,
+    ) -> IoResult<codex_protocol::turn_input::SuspendTurnOutcome> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.try_send_client_message(InProcessClientMessage::SuspendThread {
+            thread_id,
+            response_tx,
+        })?;
+        response_rx.await.map_err(|_| {
+            IoError::new(ErrorKind::BrokenPipe, "suspension response channel closed")
+        })?
+    }
+
     pub async fn request(&self, request: ClientRequest) -> IoResult<PendingClientRequestResponse> {
         self.request_inner(
             request, /*thread_start_options*/ None, /*turn_start_options*/ None,
@@ -637,6 +659,9 @@ async fn start_uninitialized(
                 tokio::select! {
                     command = processor_rx.recv() => {
                         match command {
+                            Some(ProcessorCommand::SuspendThread { thread_id, response_tx }) => {
+                                let _ = response_tx.send(processor.suspend_thread(thread_id).await);
+                            }
                             Some(ProcessorCommand::Request {
                                 request,
                                 thread_start_options,
@@ -726,6 +751,13 @@ async fn start_uninitialized(
             tokio::select! {
                 message = client_rx.recv() => {
                     match message {
+                        Some(InProcessClientMessage::SuspendThread { thread_id, response_tx }) => {
+                            if let Err(err) = processor_tx.try_send(ProcessorCommand::SuspendThread { thread_id, response_tx }) {
+                                if let ProcessorCommand::SuspendThread { response_tx, .. } = err.into_inner() {
+                                    let _ = response_tx.send(Err(IoError::new(ErrorKind::WouldBlock, "suspension processor unavailable")));
+                                }
+                            }
+                        }
                         Some(InProcessClientMessage::Request {
                             request,
                             thread_start_options,

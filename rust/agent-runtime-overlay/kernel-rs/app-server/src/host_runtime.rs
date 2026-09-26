@@ -65,12 +65,28 @@ impl AppServerThreadResumeOptions {
 #[derive(Clone, Debug)]
 pub struct AppServerTurnStartOptions {
     reserved_turn_id: String,
+    recovery: bool,
 }
 
 impl AppServerTurnStartOptions {
     /// Creates host options for one pre-authorized platform run identity.
     pub fn new(reserved_turn_id: String) -> Self {
-        Self { reserved_turn_id }
+        Self {
+            reserved_turn_id,
+            recovery: false,
+        }
+    }
+
+    /// Recovers an authorized unfinished turn; never adds new user input.
+    pub fn recovery(reserved_turn_id: String) -> Self {
+        Self {
+            reserved_turn_id,
+            recovery: true,
+        }
+    }
+
+    pub(crate) fn is_recovery(&self) -> bool {
+        self.recovery
     }
 
     pub(crate) fn reserved_turn_id(&self) -> &str {

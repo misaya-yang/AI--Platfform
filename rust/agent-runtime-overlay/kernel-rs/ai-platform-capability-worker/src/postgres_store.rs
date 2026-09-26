@@ -609,6 +609,26 @@ impl ExecutionStore for PostgresExecutionStore {
     }
 
     async fn reserve(&self, requested: NewExecution) -> Result<ReserveOutcome, StoreError> {
+        self.reserve_owned(requested, None, None).await
+    }
+
+    async fn reserve_owned(
+        &self,
+        requested: NewExecution,
+        owner: Option<&str>,
+        fence: Option<i64>,
+    ) -> Result<ReserveOutcome, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(database_error)?;
+        sqlx::query("SELECT assistant.assert_worker_execution_owner($1,$2,$3,$4,$5,$6,TRUE)")
+            .bind(uuid(&requested.execution.run_id)?)
+            .bind(&requested.execution.tenant_id)
+            .bind(&requested.execution.user_id)
+            .bind(&requested.execution.session_id)
+            .bind(owner.map(uuid).transpose()?)
+            .bind(fence)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
         let proposed_id = uuid(&requested.execution.execution_id)?;
         let row = sqlx::query(
             "SELECT * FROM reserve_assistant_capability_execution(\
@@ -642,10 +662,11 @@ impl ExecutionStore for PostgresExecutionStore {
         .bind(&requested.approval_status)
         .bind(&requested.execution.events_url)
         .bind(&requested.resource_binding)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(database_error)?;
         let record = row_to_record(&row)?;
+        transaction.commit().await.map_err(database_error)?;
         Ok(ReserveOutcome {
             created: record.execution.execution_id == proposed_id.to_string(),
             record,
@@ -850,36 +871,56 @@ impl ExecutionStore for PostgresExecutionStore {
         scope: &CapabilityScopeV2,
         execution_id: &str,
     ) -> Result<ExecutionRecord, StoreError> {
+        self.cancel_owned(scope, execution_id, None, None).await
+    }
+
+    async fn cancel_owned(
+        &self,
+        scope: &CapabilityScopeV2,
+        execution_id: &str,
+        owner: Option<&str>,
+        fence: Option<i64>,
+    ) -> Result<ExecutionRecord, StoreError> {
         let current = self.get(scope, execution_id).await?;
-        if current.execution.status.is_terminal() {
-            return Ok(current);
-        }
-        let status = if current.dispatch_fence.is_some()
-            && !matches!(current.execution.effect, CapabilityEffect::Read)
-        {
-            CapabilityExecutionStatus::SideEffectUnknown
-        } else {
-            CapabilityExecutionStatus::Cancelled
-        };
-        let mut payload = BTreeMap::new();
-        payload.insert(
-            "error_code".to_string(),
-            Value::String(status_name(status).to_string()),
-        );
-        match self
-            .append_event(
-                scope,
-                execution_id,
-                &Uuid::now_v7().to_string(),
-                "terminal",
-                status,
-                payload,
-                current.dispatch_fence.as_deref(),
-            )
+        let mut transaction = self.pool.begin().await.map_err(database_error)?;
+        sqlx::query("SELECT assistant.assert_worker_execution_owner($1,$2,$3,$4,$5,$6,FALSE)")
+            .bind(uuid(&current.execution.run_id)?)
+            .bind(&scope.tenant_id)
+            .bind(&scope.user_id)
+            .bind(&scope.session_id)
+            .bind(owner.map(uuid).transpose()?)
+            .bind(fence)
+            .execute(&mut *transaction)
             .await
-        {
-            Ok(_) | Err(StoreError::TerminalImmutable) => self.get(scope, execution_id).await,
-            Err(error) => Err(error),
+            .map_err(database_error)?;
+        let row = sqlx::query("SELECT * FROM assistant_capability_executions WHERE execution_id=$1 AND tenant_id=$2 AND user_id=$3 AND session_id=$4 FOR UPDATE")
+            .bind(uuid(execution_id)?).bind(&scope.tenant_id).bind(&scope.user_id).bind(&scope.session_id)
+            .fetch_one(&mut *transaction).await.map_err(database_error)?;
+        let current = row_to_record(&row)?;
+        if !current.execution.status.is_terminal() {
+            let status = if current.dispatch_fence.is_some()
+                && !matches!(current.execution.effect, CapabilityEffect::Read)
+            {
+                CapabilityExecutionStatus::SideEffectUnknown
+            } else {
+                CapabilityExecutionStatus::Cancelled
+            };
+            sqlx::query(
+                "SELECT append_assistant_capability_event($1,$2,$3,$4,$5,'terminal',$6,$7,$8)",
+            )
+            .bind(uuid(execution_id)?)
+            .bind(&scope.tenant_id)
+            .bind(&scope.user_id)
+            .bind(&scope.session_id)
+            .bind(Uuid::now_v7())
+            .bind(status_name(status))
+            .bind(serde_json::json!({"error_code":status_name(status)}))
+            .bind(current.dispatch_fence.as_deref().map(uuid).transpose()?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
         }
+        transaction.commit().await.map_err(database_error)?;
+        self.get(scope, execution_id).await
     }
 }

@@ -25,13 +25,14 @@ use sqlx::Row;
 use uuid::Uuid;
 
 mod events;
+pub(crate) mod execution;
 mod identity;
 pub(crate) mod projection;
 mod thread_store;
 
 pub(crate) use self::events::PlatformLifecycleEvent;
 use self::projection::json_error;
-use self::projection::payload_hash;
+pub(crate) use self::projection::payload_hash;
 use self::projection::session_meta_item;
 use self::projection::store_error;
 use self::projection::stored_thread;
@@ -64,6 +65,9 @@ impl PlatformThreadIdentity {
 #[derive(Clone)]
 pub struct PostgresThreadStore {
     pub(crate) pool: PgPool,
+    pub(crate) instance_id: Uuid,
+    pub(crate) execution_claims:
+        Arc<std::sync::Mutex<HashMap<ThreadId, execution::ExecutionClaim>>>,
     pending_metadata: Arc<tokio::sync::Mutex<HashMap<ThreadId, ThreadMetadataPatch>>>,
     write_failures: Arc<std::sync::Mutex<HashSet<ThreadId>>>,
     terminal_identity_cache: Arc<std::sync::Mutex<HashMap<ThreadId, PlatformThreadIdentity>>>,
@@ -339,9 +343,40 @@ impl PostgresThreadStore {
         if !visible {
             return Err(ThreadStoreError::ThreadNotFound { thread_id });
         }
+        let output_calls: Vec<_> = items
+            .iter()
+            .filter_map(|(_, _, item)| match item {
+                RolloutItem::ResponseItem(envelope) => match &envelope.item {
+                    codex_protocol::models::ResponseItem::FunctionCallOutput {
+                        call_id: Some(call_id),
+                        ..
+                    } => Some(call_id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         self.append_items_in_transaction(&mut transaction, &scope, thread_id, items)
             .await?;
-        transaction.commit().await.map_err(store_error)
+        transaction.commit().await.map_err(store_error)?;
+        if crate::http_service::recovery_fault::armed("core_output_saved").await {
+            for call_id in output_calls {
+                let row = sqlx::query("SELECT params FROM assistant_runtime_invocations WHERE kernel_thread_id=$1 AND call_id=$2 ORDER BY created_at DESC LIMIT 1")
+                    .bind(kernel_thread_id).bind(call_id).fetch_optional(&self.pool).await.map_err(store_error)?;
+                if let Some(row) = row {
+                    let params: codex_app_server_protocol::DynamicToolCallParams =
+                        serde_json::from_value(row.try_get("params").map_err(store_error)?)
+                            .map_err(json_error)?;
+                    crate::http_service::recovery_fault::pause(
+                        "core_output_saved",
+                        &params,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn append_items_in_transaction(

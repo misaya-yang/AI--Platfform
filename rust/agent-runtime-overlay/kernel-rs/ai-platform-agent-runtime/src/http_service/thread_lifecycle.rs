@@ -19,6 +19,8 @@ use codex_protocol::ThreadId;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use sqlx::Row;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -60,6 +62,22 @@ pub(super) async fn resume_thread(
     Json(mut body): Json<ResumeThreadRequest>,
 ) -> Result<Json<ThreadResumeResponse>, RuntimeError> {
     let thread_id = authorize_thread_scope(&state, &headers, &thread_id).await?;
+    let _thread_guard = state
+        .thread_gate(thread_id)
+        .try_lock_owned()
+        .map_err(|_| RuntimeError::conflict("runtime_turn_recovering"))?;
+    let foreign_owner:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM assistant_runtime_execution_owners o JOIN assistant_runs r ON r.run_id=o.run_id WHERE o.runtime_thread_id=$1 AND o.owner_id<>$2 AND r.status IN ('running','awaiting_approval'))")
+        .bind(Uuid::parse_str(&thread_id.to_string()).map_err(|_|RuntimeError::bad_request("invalid_thread_id"))?).bind(state.store.instance_id)
+        .fetch_one(&state.store.pool).await.map_err(|_|RuntimeError::unavailable("runtime_recovery_store_unavailable"))?;
+    if foreign_owner
+        || state
+            .recovering_threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&thread_id)
+    {
+        return Err(RuntimeError::conflict("runtime_turn_recovering"));
+    }
     let tool_policy = state
         .store
         .resolve_tool_policy(thread_id, body.tool_policy.take())
@@ -113,22 +131,88 @@ pub(super) async fn interrupt_turn(
     if !belongs_to_thread {
         return Err(RuntimeError::not_found("turn_not_found"));
     }
+    let run_id =
+        Uuid::parse_str(&turn_id).map_err(|_| RuntimeError::bad_request("invalid_turn_id"))?;
+    let mut transaction = state
+        .store
+        .pool
+        .begin()
+        .await
+        .map_err(|_| RuntimeError::unavailable("runtime_cancel_store_unavailable"))?;
+    let cancelled: bool = sqlx::query_scalar("SELECT cancel_runtime_execution($1,$2,$3,$4,$5)")
+        .bind(run_id)
+        .bind(
+            Uuid::parse_str(&thread_id.to_string())
+                .map_err(|_| RuntimeError::bad_request("invalid_thread_id"))?,
+        )
+        .bind(required_header(&headers, TENANT_HEADER)?)
+        .bind(required_header(&headers, USER_HEADER)?)
+        .bind(required_header(&headers, SESSION_HEADER)?)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| RuntimeError::unavailable("runtime_cancel_store_unavailable"))?;
+    let saved = sqlx::query("SELECT status,EXTRACT(EPOCH FROM COALESCE(finished_at,updated_at))::double precision AS finished FROM assistant_runs WHERE run_id=$1")
+        .bind(run_id).fetch_one(&mut *transaction).await.map_err(|_| RuntimeError::unavailable("runtime_cancel_store_unavailable"))?;
+    if saved.try_get::<String, _>("status").ok().as_deref() == Some("cancelled") {
+        let event = crate::AssistantTurnEventV1 {
+            schema_version: "assistant-turn-contract/v1".to_string(),
+            event_type: "cancelled".to_string(),
+            data: json!({"run_id":run_id,"thread_id":thread_id,"session_id":required_header(&headers,SESSION_HEADER)?,"status":"cancelled","terminal_reason":"client_interrupt"}),
+            timestamp: saved
+                .try_get("finished")
+                .map_err(|_| RuntimeError::unavailable("runtime_cancel_store_unavailable"))?,
+        };
+        let payload = serde_json::to_value(event)
+            .map_err(|_| RuntimeError::internal("runtime_cancel_event_invalid"))?;
+        let payload_hash =
+            crate::postgres_store::payload_hash(&payload).map_err(RuntimeError::from_store)?;
+        let event_key = format!("compat/control/{run_id}/cancelled");
+        let digest = Sha256::digest(event_key.as_bytes());
+        let mut event_bytes = [0u8; 16];
+        event_bytes.copy_from_slice(&digest[..16]);
+        let event_id = Uuid::from_bytes(event_bytes);
+        sqlx::query("SELECT append_assistant_runtime_item($1,$1,$2,$3,$4,$5,$6,$7,NULL,'compat/v1/cancelled','assistant_turn_event_v1','cancelled',$8,$9)")
+            .bind(Uuid::parse_str(&thread_id.to_string()).map_err(|_| RuntimeError::bad_request("invalid_thread_id"))?)
+            .bind(required_header(&headers,TENANT_HEADER)?).bind(required_header(&headers,USER_HEADER)?).bind(required_header(&headers,SESSION_HEADER)?)
+            .bind(event_id).bind(event_key).bind(&turn_id).bind(payload).bind(payload_hash)
+            .execute(&mut *transaction).await.map_err(|_| RuntimeError::unavailable("runtime_cancel_receipt_unavailable"))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::unavailable("runtime_cancel_store_unavailable"))?;
     state.cancel_turn(&turn_id);
-    request_typed(
-        &state,
-        ClientRequest::TurnInterrupt {
-            request_id: RequestId::String(format!("turn-interrupt-{thread_id}-{turn_id}")),
-            params: TurnInterruptParams {
-                thread_id: thread_id.to_string(),
-                turn_id,
+    let locally_owned = Uuid::parse_str(&turn_id)
+        .ok()
+        .and_then(|run| state.store.execution_claim(run))
+        .is_some();
+    let recovering = state
+        .recovering_threads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&thread_id);
+    if cancelled && locally_owned && !recovering {
+        // Durable intent is already authoritative; a process-local interrupt
+        // notification may be unavailable during a concurrent Core shutdown.
+        let _ = request_typed::<TurnInterruptResponse>(
+            &state,
+            ClientRequest::TurnInterrupt {
+                request_id: RequestId::String(format!("turn-interrupt-{thread_id}-{turn_id}")),
+                params: TurnInterruptParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id,
+                },
             },
-        },
-        "invalid_agent_turn_interrupt_response",
-    )
-    .await
+            "invalid_agent_turn_interrupt_response",
+        )
+        .await;
+    }
+    serde_json::from_value(json!({}))
+        .map(Json)
+        .map_err(|_| RuntimeError::internal("invalid_agent_turn_interrupt_response"))
 }
 
-fn resume_params(
+pub(super) fn resume_params(
     thread_id: ThreadId,
     body: ResumeThreadRequest,
 ) -> Result<ThreadResumeParams, RuntimeError> {

@@ -8778,7 +8778,7 @@
           }
         }
       },
-      "post": {
+      "delete": {
         "tags": [
           "LangGraph"
         ],
@@ -8817,7 +8817,7 @@
           }
         }
       },
-      "patch": {
+      "post": {
         "tags": [
           "LangGraph"
         ],
@@ -8895,7 +8895,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "LangGraph"
         ],
@@ -8936,54 +8936,6 @@
       }
     },
     "/api/v1/proxy/{service_name}/{path}": {
-      "options": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
       "get": {
         "tags": [
           "Transparent Proxy"
@@ -9032,7 +8984,7 @@
           }
         }
       },
-      "post": {
+      "options": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9080,7 +9032,55 @@
           }
         }
       },
-      "patch": {
+      "delete": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9176,7 +9176,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9274,6 +9274,45 @@
       }
     },
     "/api/v1/proxy/{service_name}": {
+      "get": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "options": {
         "tags": [
           "Transparent Proxy"
@@ -9313,7 +9352,7 @@
           }
         }
       },
-      "get": {
+      "delete": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9391,45 +9430,6 @@
           }
         }
       },
-      "patch": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
       "put": {
         "tags": [
           "Transparent Proxy"
@@ -9469,7 +9469,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "Transparent Proxy"
         ],
@@ -9689,7 +9689,7 @@
           }
         }
       },
-      "post": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9727,7 +9727,7 @@
           }
         }
       },
-      "patch": {
+      "post": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9803,7 +9803,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "Knowledge Base"
         ],
@@ -9882,7 +9882,7 @@
           }
         }
       },
-      "post": {
+      "delete": {
         "tags": [
           "KB Tools"
         ],
@@ -9921,7 +9921,7 @@
           }
         }
       },
-      "patch": {
+      "post": {
         "tags": [
           "KB Tools"
         ],
@@ -9999,7 +9999,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "KB Tools"
         ],
@@ -15746,6 +15746,181 @@
         }
       }
     },
+    "/api/v1/assistant/memory": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get Memory",
+        "operationId": "get_memory_api_v1_assistant_memory_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Update Memory Preference",
+        "operationId": "update_memory_preference_api_v1_assistant_memory_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryPreferenceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/memory/items": {
+      "put": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Put Memory Item",
+        "operationId": "put_memory_item_api_v1_assistant_memory_items_put",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryItemUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Delete Memory Item",
+        "operationId": "delete_memory_item_api_v1_assistant_memory_items_delete",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/sessions/{session_id}/tools": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get Session Tools",
+        "operationId": "get_session_tools_api_v1_assistant_sessions__session_id__tools_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/assistant/sessions": {
       "post": {
         "tags": [
@@ -16417,6 +16592,59 @@
         }
       }
     },
+    "/api/v1/assistant/quiz/{quiz_id}/attempts/{attempt_id}": {
+      "get": {
+        "tags": [
+          "quiz"
+        ],
+        "summary": "Get Attempt Result",
+        "operationId": "get_attempt_result_api_v1_assistant_quiz__quiz_id__attempts__attempt_id__get",
+        "parameters": [
+          {
+            "name": "quiz_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Quiz Id"
+            }
+          },
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Attempt Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizAttemptResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/assistant/quiz/{quiz_id}/attempts": {
       "get": {
         "tags": [
@@ -16553,6 +16781,58 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicQuizAttemptStartResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/quiz/public/{share_code}/attempts/result": {
+      "post": {
+        "tags": [
+          "quiz-public"
+        ],
+        "summary": "Get Shared Quiz Attempt Result",
+        "operationId": "get_shared_quiz_attempt_result_api_v1_quiz_public__share_code__attempts_result_post",
+        "parameters": [
+          {
+            "name": "share_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Share Code"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicQuizAttemptResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizAttemptResponse"
                 }
               }
             }
@@ -18048,6 +18328,75 @@
         }
       }
     },
+    "/api/v1/assistant/sessions/{session_id}/share-preview": {
+      "get": {
+        "tags": [
+          "conversation-shares"
+        ],
+        "summary": "Preview Share",
+        "description": "Show the owner exactly what a visitor will receive before sharing.",
+        "operationId": "preview_share_api_v1_assistant_sessions__session_id__share_preview_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "include_artifacts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Artifacts"
+            }
+          },
+          {
+            "name": "expires_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 365,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/assistant/sessions/{session_id}/share": {
       "post": {
         "tags": [
@@ -18308,6 +18657,22 @@
               "minimum": 1,
               "default": 50,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
             }
           }
         ],
@@ -21496,6 +21861,59 @@
         }
       }
     },
+    "/api/v2/agent/threads/{thread_id}/turns/{turn_id}:recover": {
+      "post": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Recover Turn",
+        "operationId": "recover_turn_api_v2_agent_threads__thread_id__turns__turn_id__recover_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          },
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Turn Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Recover Turn Api V2 Agent Threads  Thread Id  Turns  Turn Id  Recover Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/agent/threads/{thread_id}/approvals/{approval_id}": {
       "get": {
         "tags": [
@@ -23511,7 +23929,7 @@
           }
         }
       },
-      "post": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
@@ -23549,7 +23967,7 @@
           }
         }
       },
-      "patch": {
+      "post": {
         "tags": [
           "Knowledge Base"
         ],
@@ -23625,7 +24043,7 @@
           }
         }
       },
-      "delete": {
+      "patch": {
         "tags": [
           "Knowledge Base"
         ],
@@ -29509,6 +29927,27 @@
             "type": "integer",
             "title": "Size Bytes"
           },
+          "ready": {
+            "type": "boolean",
+            "title": "Ready",
+            "default": true
+          },
+          "variant": {
+            "type": "string",
+            "title": "Variant",
+            "default": "raw"
+          },
+          "parent_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Artifact Id"
+          },
           "mime_type": {
             "anyOf": [
               {
@@ -30714,6 +31153,18 @@
             ],
             "title": "Provider",
             "description": "Provider used"
+          },
+          "effective_model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Model Id",
+            "description": "Configured image model used by the provider"
           },
           "images": {
             "items": {
@@ -33183,6 +33634,18 @@
             "type": "boolean",
             "title": "Include Artifacts",
             "default": true
+          },
+          "preview_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Hash"
           }
         },
         "type": "object",
@@ -36182,6 +36645,18 @@
             "title": "Provider",
             "description": "Provider used for generation (dashscope/google)"
           },
+          "effective_model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Model Id",
+            "description": "Configured image model used by the provider"
+          },
           "duration_ms": {
             "anyOf": [
               {
@@ -38104,6 +38579,41 @@
         ],
         "title": "MCPToolResponse"
       },
+      "MemoryItemUpdate": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Key"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "MemoryItemUpdate"
+      },
+      "MemoryPreferenceUpdate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "MemoryPreferenceUpdate"
+      },
       "MessageCreate": {
         "properties": {
           "content": {
@@ -39643,6 +40153,21 @@
         "title": "ProviderUpdate",
         "description": "Request to update a provider."
       },
+      "PublicQuizAttemptResultRequest": {
+        "properties": {
+          "attempt_token": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Attempt Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_token"
+        ],
+        "title": "PublicQuizAttemptResultRequest"
+      },
       "PublicQuizAttemptStartResponse": {
         "properties": {
           "attempt_token": {
@@ -39924,6 +40449,11 @@
             "format": "uuid",
             "title": "Attempt Id"
           },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "default": false
+          },
           "total_score": {
             "type": "number",
             "title": "Total Score"
@@ -40091,6 +40621,19 @@
             "type": "object",
             "title": "Answers",
             "description": "question_id → selected option label"
+          },
+          "attempt_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id",
+            "description": "Stable id for retrying this answer submission"
           }
         },
         "type": "object",

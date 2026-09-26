@@ -1298,6 +1298,29 @@ impl ThreadRequestProcessor {
         self.thread_state_manager.clear_all_listeners().await;
     }
 
+    pub(crate) async fn suspend_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::io::Result<codex_protocol::turn_input::SuspendTurnOutcome> {
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(std::io::Error::other)?;
+        let outcome = thread
+            .suspend_turn_and_shutdown()
+            .await
+            .map_err(std::io::Error::other)?;
+        if matches!(
+            outcome,
+            codex_protocol::turn_input::SuspendTurnOutcome::Suspended { .. }
+        ) {
+            self.thread_manager.remove_thread(&thread_id).await;
+            self.finalize_thread_teardown(thread_id).await;
+        }
+        Ok(outcome)
+    }
+
     pub(crate) async fn shutdown_threads(&self) {
         let report = self
             .thread_manager

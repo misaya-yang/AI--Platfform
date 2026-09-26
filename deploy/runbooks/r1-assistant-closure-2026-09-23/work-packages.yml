@@ -1,0 +1,87 @@
+schema_version: harness/work-package/v1
+program: r1-assistant-daily-use
+base_sha: 92c98c0b85c7b9b72254e5023e6086fd8d4792df
+packages:
+  - id: DR-01
+    state: verified
+    result: Original run/turn recovers with exclusive execution ownership and no duplicated side effects.
+    base_sha: 92c98c0b85c7b9b72254e5023e6086fd8d4792df
+    depends_on: [DR-00A:direct_verified]
+    owned_paths:
+      - rust/agent-runtime-overlay/**
+      - src/services/agent_runtime/**
+      - src/api/internal/**
+      - src/api/v1/_assistant_routes/runs.py
+      - src/api/v2/agent.py
+      - database/migrations/2026_08_post_kb_v1/**
+      - packages/ai-gateway-contracts/src/ai_gateway_contracts/database_revision.py
+      - tests/**
+      - scripts/harness/agent_runtime_supply_chain.py
+      - scripts/harness/*recovery*
+      - docker/agent-runtime/**
+      - web/e2e/**
+      - web/src/features/chat/**
+      - web/src/pages/assistant/**
+      - web/src/api/agentThreads*
+      - web/src/i18n/locales/**
+      - deploy/agent-runtime-source/**
+      - deploy/runbooks/r1-assistant-closure-2026-09-23/**
+      - docs/design/agent-runtime-durable-recovery.md
+      - docs/harness/architecture.md
+      - docs/harness/commands.md
+      - docs/plans/product-feature-completion-2026-09-23/02-assistant-tools-deliverables.md
+      - reports/product/*recovery*
+      - reports/runtime-recovery/**
+    forbidden_paths:
+      - apps/knowledge-service/**
+      - sdk/src/**
+      - billing/**
+    integration_paths: [Makefile, sdk/openapi.json]
+    must_preserve:
+      - Rust Core remains the only model/tool loop; Gateway owns governance.
+      - Tenant/user/session, original run/turn/model/snapshot and spent budget remain bound.
+      - Unknown writes never replay; one result per original call.
+      - Preserve existing dirty PRD; user now authorizes scoped commit and local main integration; no destructive cleanup.
+    direct_gates:
+      - affected Python pytest and Ruff
+      - affected frontend Node tests and type-check if changed
+      - agent-runtime-source-contract
+      - scoped Rust tests in Docker builder; hosted CI reported separately
+      - harness-check and architecture-boundary-gate
+    integration_gates:
+      - additive migration authority and isolated PostgreSQL competing-owner tests
+      - Core original-turn recovery with paired tool output and signed metadata
+      - Worker reserve/dispatch/reconcile tests with revocation and stale fences
+    live_gates:
+      - serialized final Runtime/Worker Docker build and source identity verification
+      - deterministic controlled crash matrix with no additional execution/attempt
+      - real Qwen task pending approval restart and completed-tool receipt reuse in built-in browser
+      - final make validate and make status
+    skip_policy: {required: none, optional: hosted CI cannot be claimed without an actual run}
+    rollback: Additive old-binary-compatible storage; quiesce new durable runs before old-runtime rollback.
+    review: Independent read-only reviewer; repair blocker/high findings and retest affected scenarios.
+    evidence:
+      - reports/product/runtime-durable-recovery-2026-09-26.md
+      - deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/DR-01.yml
+    stop_conditions:
+      - Credential or tenant boundary failure.
+      - Recovery would require replaying an unknown write.
+      - A conflicting writer or Compose owner is found.
+
+  - id: DR-00A
+    state: direct_verified
+    result: Frozen baseline accepts only append-only checked epochs, enabling recovery migration without weakening existing migration identity.
+    base_sha: 92c98c0b85c7b9b72254e5023e6086fd8d4792df
+    depends_on: []
+    owned_paths: [database/authority/baseline_manifest.py, tests/database/test_migration_authority_baseline_manifest.py, deploy/runbooks/r1-assistant-closure-2026-09-23/**, reports/product/runtime-durable-recovery-2026-09-26.md]
+    forbidden_paths: [database/baselines/**, database/migrations/001_*.sql, apps/**]
+    integration_paths: []
+    must_preserve: [Frozen SQL and policy hashes, original epoch history prefixes and SQL checksums, preserve unrelated work during local integration]
+    direct_gates: [baseline manifest and freeze-tools pytest, affected Ruff]
+    integration_gates: [isolated recovery authority epoch and role matrix]
+    live_gates: [not_required_for_source_provenance]
+    skip_policy: {required: none}
+    rollback: Source-only compatible authority validation fix; frozen artifacts unchanged.
+    review: Independent read-only migration authority review before resuming DR-01.
+    evidence: [reports/product/runtime-durable-recovery-2026-09-26.md]
+    stop_conditions: [A frozen input or prior epoch would be modified, Unknown migration history identity]

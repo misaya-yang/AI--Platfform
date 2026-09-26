@@ -538,6 +538,9 @@ class AgentRuntimeControlPlane:
             if lease is not None:
                 await lease.release()
 
+    async def recover_turn(self, *, runtime_thread_id: str, turn_id: str, tenant_id: str, user_id: str, session_id: str) -> dict[str, Any]:
+        return await thread_lifecycle.recover_turn(self, runtime_thread_id=runtime_thread_id, turn_id=turn_id, tenant_id=tenant_id, user_id=user_id, session_id=session_id)
+
     async def interrupt_turn(
         self,
         *,

@@ -163,6 +163,83 @@ def test_baseline_git_provenance_requires_a_prior_unchanged_source_commit(
         verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
 
 
+@pytest.mark.parametrize("source_manifest", ["missing", "empty", "one"])
+def test_frozen_provenance_allows_epoch_additions_but_not_integrated_mutation(tmp_path: Path, source_manifest: str) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "recovery@example.invalid")
+    _git(root, "config", "user.name", "Recovery Test")
+    generator = root / "scripts/freeze_arc03.py"
+    generator.parent.mkdir()
+    generator.write_text("GENERATOR = 1\n")
+    epoch_dir = root / f"database/migrations/{BASELINE_ID}"
+    epoch_dir.mkdir(parents=True)
+    changes = []
+
+    def append_change(sequence: int):
+        sql = f"SELECT {sequence};\n"
+        filename = f"{sequence:03d}_probe{sequence}.sql"
+        (epoch_dir / filename).write_text(sql)
+        changes.append({
+            "sequence": sequence, "name": f"probe{sequence}", "file": filename,
+            "sha256": _sha(sql), "owner": "owner", "transaction_mode": "transactional",
+            "rollback_class": "forward-fix-only", "preconditions": ["SELECT TRUE"],
+            "postconditions": ["SELECT TRUE"], "timeout_seconds": 300, "lock_budget_seconds": 10,
+            "resume_handler": None, "repair_handler": None, "notes": "original",
+        })
+
+    def write_manifest():
+        (epoch_dir / "manifest.yml").write_text(json.dumps({"baseline_id": BASELINE_ID, "epoch": len(changes), "changes": changes}))
+
+    if source_manifest == "one":
+        append_change(1)
+    if source_manifest != "missing":
+        write_manifest()
+    _write_baseline(root, state="pending-live-freeze", source_git_sha=None,
+                    structural_sha256=None, acl_sha256=None, extensions_sha256=None,
+                    reference_data_sha256=None, generator="scripts/freeze_arc03.py")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "freeze source")
+    source = _git(root, "rev-parse", "HEAD")
+    _, manifest_path = _write_baseline(root, source_git_sha=source, generator="scripts/freeze_arc03.py")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "frozen artifact")
+    if source_manifest != "one":
+        append_change(1)
+        write_manifest()
+        _git(root, "add", ".")
+        _git(root, "commit", "-q", "-m", "integrated epoch")
+    baseline = load_baseline_manifest(manifest_path)
+    append_change(2)
+    write_manifest()
+    verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+    manifest_text=(epoch_dir / "manifest.yml").read_text()
+    (epoch_dir / "manifest.yml").unlink()
+    with pytest.raises(AuthorityManifestError):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+    (epoch_dir / "manifest.yml").write_text(manifest_text)
+
+    changes[0]["notes"] = "changed existing metadata"
+    write_manifest()
+    with pytest.raises(AuthorityManifestError, match="immutable"):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+    changes[0]["notes"] = "original"
+    (epoch_dir / changes[0]["file"]).write_text("SELECT 999;\n")
+    write_manifest()
+    with pytest.raises(AuthorityManifestError, match="checksum"):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+    changes[0]["sha256"] = _sha("SELECT 999;\n")
+    write_manifest()
+    with pytest.raises(AuthorityManifestError, match="immutable"):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+    # A rewritten integrated epoch remains invalid after a normal commit.
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "invalid old epoch mutation")
+    with pytest.raises(AuthorityManifestError, match="immutable"):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+
+
 def test_baseline_git_provenance_rejects_fake_or_self_containing_source(
     tmp_path: Path,
 ) -> None:

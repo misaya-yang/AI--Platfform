@@ -38,8 +38,9 @@ async def test_watcher_already_terminal_releases_without_stream_or_interrupt(mon
 
 
 @pytest.mark.asyncio
-async def test_eof_without_terminal_quarantines_until_real_terminal(monkeypatch):
+async def test_eof_retries_until_original_ttl_then_quarantines_until_real_terminal(monkeypatch):
     plane, turn, lease, scope = state()
+    plane.lease_ttl_seconds = 0.03
     plane.interrupt_turn.side_effect = httpx.ReadTimeout("unconfirmed interrupt")
 
     async def empty(*_args, **kwargs):
@@ -55,6 +56,51 @@ async def test_eof_without_terminal_quarantines_until_real_terminal(monkeypatch)
     plane.database.fetchrow.return_value = {"status": "cancelled"}
     await capacity.watch_run(plane, turn, lease, **scope)
     lease.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transient", [httpx.ReadError("controlled transport loss"), capacity.AgentRuntimeControlError("fixture_unavailable", status_code=503)])
+async def test_runtime_restart_reconnects_original_cursor_without_revoking_capacity(monkeypatch, transient):
+    plane, turn, lease, scope = state()
+    plane.lease_ttl_seconds = 3
+    cursors = []
+
+    async def events(*_args, **kwargs):
+        assert {key: kwargs[key] for key in scope} == scope
+        assert kwargs["runtime_thread_id"] == turn.runtime_thread_id
+        assert kwargs["turn_id"] == turn.run_id
+        cursors.append(kwargs["after_sequence"])
+        lease.release.assert_not_awaited()
+        plane.database.execute.assert_not_awaited()
+        if len(cursors) == 1:
+            yield {"sequence": 1201, "event_type": "text_delta", "data": {"run_id": turn.run_id}}
+        elif len(cursors) == 2:
+            raise transient
+        else:
+            yield {"sequence": 1202, "event_type": "run_finished", "data": {"run_id": turn.run_id, "status": "succeeded"}}
+
+    monkeypatch.setattr(capacity.event_stream, "stream_thread_events", events)
+    await capacity.watch_run(plane, turn, lease, **scope)
+    assert cursors == [1200, 1201, 1201]
+    plane.interrupt_turn.assert_not_awaited()
+    plane.database.execute.assert_not_awaited()
+    lease.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_permission_denied_does_not_retry_runtime_subscription(monkeypatch):
+    plane, turn, lease, scope = state()
+    subscriptions = []
+
+    async def events(*_args, **_kwargs):
+        subscriptions.append(True)
+        raise capacity.AgentRuntimeControlError("fixture_forbidden", status_code=403)
+        yield
+
+    monkeypatch.setattr(capacity.event_stream, "stream_thread_events", events)
+    await capacity.watch_run(plane, turn, lease, **scope)
+    assert len(subscriptions) == 1
+    plane.interrupt_turn.assert_awaited_once()
 
 
 @pytest.mark.asyncio

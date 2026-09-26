@@ -6,19 +6,14 @@
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "codex/as02-assistant-failure-history",
+  "branch": "codex/runtime-durable-recovery",
   "active_phase": "R1-1",
-  "active_feature": "AS-03 / TL-03 J03 same-run Runtime restart recovery",
-  "active_package": "R1-1 through R1-3 integration",
-  "next_action": "J03 需增加 fenced recovery claim、持久审批重绑定、Worker 同调用回执查询/单次注入、in-process App Server 同 ID turn recover 桥和签名 lease 恢复；按重启前后多个 crash 点验证不重复执行。之后补未验证的 J05～J08/J29 与 390px 场景。",
-  "last_result": "用户授权的安全增量已选择性提交至 codex 分支，并本地快进合并到 main（首个集成提交 46af36b4）；原有未提交 PRD 草稿保留，未推送。最终独立 review 发现的批准 API 绕过与撤销分享后预签名下载已修复，31 条定向回归和 Ruff 通过。此前受影响 Python 305 passed、前端 Node 33 passed、本地 Docker Chromium 12 passed；type-check、lint、i18n、build、harness-check、architecture-boundary-gate、agent-runtime-source-contract、最终 Docker 热更新/validate/status 均通过。J03 与未验证旅程仍列为 R1 未完成。",
-  "updated_at": "2026-09-25",
+  "active_feature": "Rust durable execution and same-run restart recovery",
+  "active_package": "DR-01",
+  "next_action": "User authorized quick scoped closure and local main integration of DR-01. Recheck short gates, commit this package on codex branch and fast-forward local main; retain unrelated dirty PRD and other-thread documents.",
+  "last_result": "DR-01 verified on C4 overlay22bf4e1ecad5: Python200; Docker Rust160 passed2 explicit optional ignores; actual isolated role SQL2; ten crash/governance cases with original identity/no duplicate action; final real Qwen/browser original approval SIGTERM recovery, refresh/reopen unchanged; validate/status/source/architecture/OpenAPI/harness passed. Final read-only independent review PASS; R1 overall still incomplete.",
+  "updated_at": "2026-09-26",
   "blockers": [
-    {
-      "id": "J03-runtime-restart",
-      "reason": "当前未实现而非技术上不可实现：审批 waiter 仅在 Rust 进程内；重启后 Runtime 持久取消旧 run，需补同 run 恢复围栏、审批重绑定、工具回执对账与租约恢复。",
-      "status": "confirmed_unmet"
-    },
     {
       "id": "R1-unverified-journeys",
       "reason": "真实图片 provider 本次结果未知、无成功图片；Office 生成和认证 API 下载已通过但浏览器下载未观测；J05/J06/J07/J29 与窄屏部分旅程仍未逐项实机验收。见 reports/product/r1-progress-2026-09-23.md。",
@@ -34,7 +29,7 @@
     "integrate",
     "decide"
   ],
-  "iteration": 3,
+  "iteration": 4,
   "max_iterations": 20,
   "phases": [
     {
@@ -100,7 +95,35 @@
     "reports/product/assistant-model-selection-2026-09-23.md"
   ],
   "execution_authorization": {
-    "scope": "用户本轮明确授权完整 R1、本地 Docker 与内置浏览器，并在 2026-09-25 选择先提交且本地合并已验证的安全增量。仍不授权推送、生产部署、分支删除或共享数据破坏性操作。",
-    "parallel_agents": "只读调查与独立 review；主代理为唯一代码写入者。"
+    "scope": "持久执行与重启恢复本地范围；用户现追加授权本包收尾、提交并本地合入main。不扩展全平台语言迁移。",
+    "parallel_agents": "只读调查与独立 review；主代理为唯一代码写入者。",
+    "round_status": "DR-01 verified; local integration authorized and in progress",
+    "local_main_integration_authorized": true
+  },
+  "durable_recovery": {
+    "package": "DR-01",
+    "base_sha": "92c98c0b85c7b9b72254e5023e6086fd8d4792df",
+    "candidate": "C4",
+    "overlay_sha_prefix": "22bf4e1ecad5",
+    "state": "verified",
+    "evidence": [
+      "reports/product/runtime-durable-recovery-2026-09-26.md",
+      "deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/DR-01.yml",
+      "reports/runtime-recovery/independent-review.md"
+    ],
+    "review": "PASS"
+  },
+  "resolved_blockers": [
+    {
+      "id": "J03-runtime-restart",
+      "reason": "Original-root durable dynamic-task Runtime restart recovery implemented and local required acceptance passed; DR-01 report/receipt, final independent review PASS.",
+      "status": "resolved"
+    }
+  ],
+  "integration": {
+    "state": "in_progress",
+    "target": "main",
+    "mode": "local fast-forward",
+    "unrelated_work_preserved": true
   }
 }

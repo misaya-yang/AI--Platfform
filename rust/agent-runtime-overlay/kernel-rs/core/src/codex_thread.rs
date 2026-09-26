@@ -421,6 +421,16 @@ impl CodexThread {
         &self,
         request: RecoverTurnRequest,
     ) -> CodexResult<StartIfIdleSubmission> {
+        self.recover_turn_with_metadata_if_idle(request, None).await
+    }
+
+    /// Host-authorized recovery keeps provider lease metadata while retaining
+    /// the original turn ID and recording no new user input.
+    pub async fn recover_turn_with_metadata_if_idle(
+        &self,
+        request: RecoverTurnRequest,
+        responsesapi_client_metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> CodexResult<StartIfIdleSubmission> {
         self.session
             .services
             .agent_control
@@ -445,7 +455,13 @@ impl CodexThread {
         };
         match self
             .io
-            .submit_recover_turn(thread_settings, start_options, trace, turn_id)
+            .submit_recover_turn(
+                thread_settings,
+                start_options,
+                trace,
+                turn_id,
+                responsesapi_client_metadata,
+            )
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {

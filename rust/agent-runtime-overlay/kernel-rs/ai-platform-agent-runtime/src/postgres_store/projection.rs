@@ -43,6 +43,8 @@ impl PostgresThreadStore {
                 thread_id: ThreadId::from_u128(root_thread_id.as_u128()),
             });
         }
+        self.check_execution_write(transaction, root_thread_id)
+            .await?;
         Ok(())
     }
 
@@ -254,7 +256,7 @@ pub(crate) fn thread_uuid(thread_id: ThreadId) -> ThreadStoreResult<Uuid> {
     })
 }
 
-pub(super) fn payload_hash(payload: &Value) -> ThreadStoreResult<String> {
+pub(crate) fn payload_hash(payload: &Value) -> ThreadStoreResult<String> {
     let encoded = serde_json::to_vec(payload).map_err(json_error)?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }

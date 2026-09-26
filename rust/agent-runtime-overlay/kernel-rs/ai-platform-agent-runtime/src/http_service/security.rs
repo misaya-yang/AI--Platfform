@@ -68,6 +68,13 @@ impl RuntimeError {
         }
     }
 
+    pub(super) fn conflict(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+        }
+    }
+
     pub(super) fn not_found(code: &'static str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

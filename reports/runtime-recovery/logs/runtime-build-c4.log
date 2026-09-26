@@ -1,0 +1,71 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.runtime
+#1 transferring dockerfile: 6.37kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.95.0-bookworm
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [builder 1/5] FROM docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+#4 resolve docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 done
+#4 CACHED
+
+#5 [internal] load build context
+#5 ...
+
+#6 [runtime 2/6] RUN useradd --create-home --home-dir /var/lib/ai-platform-agent-runtime --uid 10001 agent-runtime     && install -d -o agent-runtime -g agent-runtime /workspace /var/lib/ai-platform-agent-runtime/runtime-home
+#6 DONE 0.5s
+
+#5 [internal] load build context
+#5 transferring context: 79.25MB 1.0s done
+#5 DONE 1.0s
+
+#7 [builder 2/5] RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do         if [ -f "${source_file}" ]; then             sed -i                 -e "s|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 -e "s|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 "${source_file}";         fi;     done     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 update     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30         install -y --no-install-recommends lld     && rm -rf /var/lib/apt/lists/*     && ld.lld --version
+#7 CACHED
+
+#8 [builder 3/5] WORKDIR /source/codex-rs
+#8 CACHED
+
+#9 [runtime 3/6] COPY LICENSE NOTICE /opt/ai-platform-agent-runtime/
+#9 DONE 0.2s
+
+#10 [builder 4/5] COPY codex-rs/ ./
+#10 DONE 0.7s
+
+#11 [builder 5/5] RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked     --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked     --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked     CARGO_BUILD_JOBS="1" CARGO_INCREMENTAL=0     RUSTFLAGS="-C link-arg=-fuse-ld=lld"     cargo build --locked --profile dev-small         -p ai-platform-agent-runtime --bin ai-platform-agent-runtime     && cp target/dev-small/ai-platform-agent-runtime /tmp/ai-platform-agent-runtime
+#11 0.205 info: syncing channel updates for 1.95.0-aarch64-unknown-linux-gnu
+#11 5.209 info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+#11 5.224 info: downloading 3 components
+#11 14.61    Compiling ai-platform-agent-runtime v0.0.0 (/source/codex-rs/ai-platform-agent-runtime)
+#11 33.39     Finished `dev-small` profile [unoptimized] target(s) in 20.23s
+#11 DONE 35.1s
+
+#12 [runtime 4/6] COPY --from=builder /tmp/ai-platform-agent-runtime /usr/local/bin/ai-platform-agent-runtime
+#12 DONE 0.5s
+
+#13 [runtime 5/6] COPY codex-rs/ai-platform-agent-runtime/container-entrypoint.sh /usr/local/bin/ai-platform-agent-runtime-entrypoint
+#13 DONE 0.2s
+
+#14 [runtime 6/6] WORKDIR /workspace
+#14 DONE 0.0s
+
+#15 exporting to image
+#15 exporting layers
+#15 exporting layers 3.6s done
+#15 exporting manifest sha256:a0e40a708ea5a9a0bb21c1715ef1ff0c64e9985c4e816fd7544a4e9ac3855a86 done
+#15 exporting config sha256:6a107d7a176890c039b7c52e35a617bc708bf9a9f8425430a9432eb0534bc413 done
+#15 exporting attestation manifest sha256:3f183681c0355be9c125b772e5f930bdc0b05bd290381aa8030bb61fa13386b8 done
+#15 exporting manifest list sha256:d085575ea6eed245f9f59395ef6651a482d72615f23f7c78aed60dccb8184108 done
+#15 naming to docker.io/library/ai-gateway-agent-runtime:local-279ba894152b-22bf4e1ecad5 done
+#15 unpacking to docker.io/library/ai-gateway-agent-runtime:local-279ba894152b-22bf4e1ecad5
+#15 unpacking to docker.io/library/ai-gateway-agent-runtime:local-279ba894152b-22bf4e1ecad5 0.6s done
+#15 DONE 4.3s
+agent-runtime-source-contract: ok
+AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG=ai-gateway-agent-runtime:local-279ba894152b-22bf4e1ecad5
+AI_PLATFORM_AGENT_RUNTIME_IMAGE_DIGEST=sha256:d085575ea6eed245f9f59395ef6651a482d72615f23f7c78aed60dccb8184108
+AI_PLATFORM_AGENT_RUNTIME_SCHEMA_SHA256=0bbd1819a6f910bd40f4143022897a502156d26011736e9f0455476b6d2492ab

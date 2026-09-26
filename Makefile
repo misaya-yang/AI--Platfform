@@ -96,6 +96,9 @@ agent-runtime-contract:     ## 校验 Rust Agent Runtime 已锁到独立、可�
 agent-runtime-build-local:  ## 从干净受控 fork 构建 Rust Agent Runtime 镜像
 	@bash scripts/harness/build_agent_runtime_image.sh
 
+agent-runtime-recovery-tests: ## Docker 内运行 Runtime/Worker 库测试和 Core 恢复回归
+	@bash scripts/harness/test_agent_runtime_recovery_docker.sh
+
 agent-runtime-smoke:        ## 在隔离 PostgreSQL/Docker 网络验证 Runtime 健康、Thread 和重启恢复
 	@bash scripts/harness/smoke_agent_runtime_image.sh
 

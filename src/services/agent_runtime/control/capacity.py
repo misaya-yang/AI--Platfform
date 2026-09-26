@@ -9,8 +9,11 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+
 from ....core.gateway.admission import _finish_cleanup
 from . import event_stream
+from .types import AgentRuntimeControlError
 
 logger = logging.getLogger(__name__)
 _TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -100,18 +103,31 @@ async def watch_run(plane: Any, turn: Any, lease: Any, *, tenant_id: str, user_i
             return
 
         async def consume() -> bool:
-            terminal = False
-            events = event_stream.stream_thread_events(
-                plane, runtime_thread_id=turn.runtime_thread_id, **scope,
-                turn_id=turn.run_id, after_sequence=getattr(turn, "after_sequence", 0),
-            )
-            async with contextlib.aclosing(events):
-                async for envelope in events:
-                    data = envelope.get("data") or {}
-                    if (envelope.get("event_type") in {"run_finished", "run_error"}
-                            and str(data.get("run_id") or "") == turn.run_id):
-                        terminal = True
-            return terminal
+            cursor = getattr(turn, "after_sequence", 0)
+            while True:
+                if await _terminal_in_ledger(plane, turn, scope):
+                    return True
+                events = event_stream.stream_thread_events(
+                    plane, runtime_thread_id=turn.runtime_thread_id, **scope,
+                    turn_id=turn.run_id, after_sequence=cursor,
+                )
+                try:
+                    async with contextlib.aclosing(events):
+                        async for envelope in events:
+                            cursor = max(cursor, int(envelope.get("sequence") or cursor))
+                            data = envelope.get("data") or {}
+                            if (envelope.get("event_type") in {"run_finished", "run_error", "cancelled"}
+                                    and str(data.get("run_id") or "") == str(turn.run_id)):
+                                return True
+                except AgentRuntimeControlError as exc:
+                    if exc.status_code != 503:
+                        raise
+                except httpx.TransportError:
+                    pass
+                # EOF/transport loss reconnects only the original cursor under
+                # the original watchdog TTL. Capacity loss, service shutdown
+                # and TTL still cancel this task through the existing stop path.
+                await asyncio.sleep(0.5)
 
         confirmed = await asyncio.wait_for(consume(), timeout=plane.lease_ttl_seconds)
         if not confirmed:

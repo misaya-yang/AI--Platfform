@@ -385,11 +385,17 @@ async def resume_thread(
         } if model_id is not None else {},
     )
     if response.status_code >= 400:
-        raise AgentRuntimeControlError(
+        try:
+            runtime_code = response.json().get("error")
+        except (ValueError, AttributeError):
+            runtime_code = None
+        code = (
+            "AI_PLATFORM_AGENT_RUNTIME_TURN_RECOVERING"
+            if runtime_code == "runtime_turn_recovering" else
             "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED"
-            if response.status_code == 409 else "AI_PLATFORM_AGENT_RUNTIME_THREAD_RESUME_FAILED",
-            status_code=409 if response.status_code == 409 else 503,
+            if response.status_code == 409 else "AI_PLATFORM_AGENT_RUNTIME_THREAD_RESUME_FAILED"
         )
+        raise AgentRuntimeControlError(code, status_code=409 if response.status_code == 409 else 503)
 
 
 async def verify_thread(
@@ -414,6 +420,26 @@ async def verify_thread(
         base_instructions=None,
         native_web_search_enabled=None,
     )
+
+
+async def recover_turn(
+    plane: AgentRuntimeControlPlane,
+    *,
+    runtime_thread_id: str,
+    turn_id: str,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Wake original Rust ownership reconciliation without issuing new authority."""
+    response = await plane.http_client.post(
+        f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/turns/{turn_id}/recover",
+        headers=runtime_headers(plane, tenant_id=tenant_id, user_id=user_id, session_id=session_id),
+        json={},
+    )
+    if response.status_code >= 400:
+        raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_RECOVERY_FAILED", status_code=503 if response.status_code >= 500 else response.status_code)
+    return response.json()
 
 
 async def interrupt_turn(

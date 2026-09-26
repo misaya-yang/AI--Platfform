@@ -215,6 +215,15 @@ pub trait ExecutionStore: Send + Sync {
         identity: &CapabilityIdentity,
     ) -> Result<RuntimeCapabilityBinding, StoreError>;
     async fn reserve(&self, execution: NewExecution) -> Result<ReserveOutcome, StoreError>;
+    /// Production stores validate and mutate under the same owner lock.
+    async fn reserve_owned(
+        &self,
+        execution: NewExecution,
+        _owner: Option<&str>,
+        _fence: Option<i64>,
+    ) -> Result<ReserveOutcome, StoreError> {
+        self.reserve(execution).await
+    }
     async fn get(
         &self,
         scope: &CapabilityScopeV2,
@@ -256,6 +265,15 @@ pub trait ExecutionStore: Send + Sync {
         scope: &CapabilityScopeV2,
         execution_id: &str,
     ) -> Result<ExecutionRecord, StoreError>;
+    async fn cancel_owned(
+        &self,
+        scope: &CapabilityScopeV2,
+        execution_id: &str,
+        _owner: Option<&str>,
+        _fence: Option<i64>,
+    ) -> Result<ExecutionRecord, StoreError> {
+        self.cancel(scope, execution_id).await
+    }
 }
 
 pub type DynStore = Arc<dyn ExecutionStore>;
@@ -440,8 +458,7 @@ fn same_scope(record: &ExecutionRecord, scope: &CapabilityScopeV2) -> bool {
 fn same_reservation(record: &ExecutionRecord, requested: &NewExecution) -> bool {
     let left = &record.execution;
     let right = &requested.execution;
-    left.lease_id == right.lease_id
-        && left.tenant_id == right.tenant_id
+    left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.session_id == right.session_id
         && left.run_id == right.run_id

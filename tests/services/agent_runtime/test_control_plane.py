@@ -1385,3 +1385,30 @@ async def test_dynamic_tool_catalog_does_not_depend_on_turn_scoped_bindings() ->
     unbound = await fingerprint_for(None)
     bound = await fingerprint_for({"knowledge": {"dataset_ids": ["dataset-a"]}})
     assert unbound == bound
+
+
+@pytest.mark.asyncio
+async def test_recovery_only_wakes_original_scoped_turn_without_new_authority() -> None:
+    thread, run = str(uuid.uuid4()), str(uuid.uuid4())
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/internal/v1/threads/{thread}/turns/{run}/recover"
+        assert json.loads(request.content) == {}
+        assert request.headers["x-ai-tenant-id"] == "tenant-a"
+        assert request.headers["x-ai-user-id"] == "user-a"
+        assert request.headers["x-ai-session-id"] == "session-a"
+        requests.append(request)
+        return httpx.Response(200, request=request, json={"runId": run, "turnId": run, "status": "recovery_requested"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        plane = AgentRuntimeControlPlane(
+            database=SimpleNamespace(), model_service=SimpleNamespace(), provider_service=SimpleNamespace(),
+            assignment_store=SimpleNamespace(), lease_signer=RuntimeModelLeaseSigner("x" * 32),
+            runtime_url="http://runtime.test", runtime_internal_token="fixture-token", model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+            kernel_revision="kernel-1", http_client=client,
+        )
+        for _ in range(2):
+            result = await plane.recover_turn(runtime_thread_id=thread, turn_id=run, tenant_id="tenant-a", user_id="user-a", session_id="session-a")
+            assert result["turnId"] == run
+    assert len(requests) == 2

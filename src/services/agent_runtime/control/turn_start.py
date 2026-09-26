@@ -30,6 +30,7 @@ from .capacity import note_dispatch
 from .http_headers import runtime_headers
 from .tool_policy import runtime_tool_policy
 from .types import (
+    BASE_AGENT_INSTRUCTIONS_V1,
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
     AgentTurn,
@@ -490,7 +491,16 @@ async def start_turn(
         "capability_revision": capability_revision,
         "capabilities": profile,
         "instructions": {
+            "baseInstructions": BASE_AGENT_INSTRUCTIONS_V1,
             "developerInstructions": agent_spec["developerInstructions"],
+        },
+        "runtime_resume_config": {
+            "model": model_id,
+            "modelPlaneBaseUrl": plane.model_plane_base_url,
+            "baseInstructions": BASE_AGENT_INSTRUCTIONS_V1,
+            "developerInstructions": agent_spec["developerInstructions"],
+            "modelContextWindow": int(model.get("context_window") or 128000),
+            "nativeWebSearchEnabled": native_web_search_enabled,
         },
         "agent_spec": agent_spec,
         "memory": {

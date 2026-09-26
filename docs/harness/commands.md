@@ -50,6 +50,10 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Preview / load local demo data | `make seed-demo` / `make seed-demo-apply` |
 
 `*-build-local` means the Docker daemon is local; Cargo runs only in the multi-stage Docker builder.
+`make agent-runtime-recovery-tests` runs Runtime/Worker library tests and the
+scoped Core original-turn recovery/suspension regressions inside that builder,
+using `AI_PLATFORM_AGENT_RUNTIME_SOURCE` for the clean pinned upstream. It is
+local Docker evidence, separate from the hosted CI gate.
 Do not run host Cargo/Rust commands. `make rust-changed-crate-gate` is a hosted-CI entrypoint on this
 machine, not a local acceptance command.
 

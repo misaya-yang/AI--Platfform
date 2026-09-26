@@ -160,10 +160,25 @@ async fn async_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let runtime = RuntimeHttpService::start(kernel, store, args.internal_token)?;
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     info!(address = %args.bind, "AI Platform Agent runtime is ready");
-    let result = axum::serve(listener, runtime.router())
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let execution_shutdown = runtime.execution_shutdown_token();
+    let stop_accepting = tokio_util::sync::CancellationToken::new();
+    let stop_http = stop_accepting.clone();
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(listener, runtime.router())
+            .with_graceful_shutdown(async move { stop_http.cancelled().await }),
+    );
+    tokio::pin!(server);
+    let result = tokio::select! {
+        result = &mut server => result,
+        () = shutdown_signal() => Ok(()),
+        () = execution_shutdown.cancelled() => {
+            tracing::warn!("execution ownership lost; retiring Runtime instance");
+            Ok(())
+        },
+    };
+    stop_accepting.cancel();
     runtime.shutdown().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut server).await;
     result?;
     Ok(())
 }
@@ -236,6 +251,14 @@ fn prepare_gateway_model_catalog(agent_home: &Path) -> std::io::Result<PathBuf> 
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
 }
 

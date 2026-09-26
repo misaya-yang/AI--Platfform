@@ -193,23 +193,32 @@ pub(super) async fn create_execution(
     })?;
     let outcome = state
         .store
-        .reserve(NewExecution {
-            execution,
-            arguments,
-            resource_binding: resource_binding_value(
-                &runtime_binding,
-                &scope,
-                &request.lease.run_id,
-                &descriptor,
-            ),
-            approval_policy: descriptor.approval_policy,
-            approval_id: request.lease.approval_id,
-            approval_status: if matches!(descriptor.effect, CapabilityEffect::Read) {
-                "not_required".to_string()
-            } else {
-                "approved".to_string()
+        .reserve_owned(
+            NewExecution {
+                execution,
+                arguments,
+                resource_binding: resource_binding_value(
+                    &runtime_binding,
+                    &scope,
+                    &request.lease.run_id,
+                    &descriptor,
+                ),
+                approval_policy: descriptor.approval_policy,
+                approval_id: request.lease.approval_id,
+                approval_status: if matches!(descriptor.effect, CapabilityEffect::Read) {
+                    "not_required".to_string()
+                } else {
+                    "approved".to_string()
+                },
             },
-        })
+            headers
+                .get("x-runtime-execution-owner")
+                .and_then(|value| value.to_str().ok()),
+            headers
+                .get("x-runtime-execution-fence")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok()),
+        )
         .await
         .map_err(store_error)?;
     let actual_id = outcome.record.execution.execution_id.clone();
@@ -312,7 +321,17 @@ pub(super) async fn cancel_execution(
     validate_execution_id(execution_id)?;
     let cancelled = state
         .store
-        .cancel(&scope, execution_id)
+        .cancel_owned(
+            &scope,
+            execution_id,
+            headers
+                .get("x-runtime-execution-owner")
+                .and_then(|value| value.to_str().ok()),
+            headers
+                .get("x-runtime-execution-fence")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok()),
+        )
         .await
         .map_err(store_error)?;
     state.request_cancel(execution_id).await;

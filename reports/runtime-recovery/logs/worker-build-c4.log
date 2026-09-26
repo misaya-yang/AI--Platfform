@@ -1,0 +1,88 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.capability-worker
+#1 transferring dockerfile: 6.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.95.0-bookworm
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/python:3.11-slim-bookworm
+#3 ...
+
+#4 [auth] library/python:pull token for registry-1.docker.io
+#4 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/python:3.11-slim-bookworm
+#3 DONE 3.1s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [runtime 1/8] FROM docker.io/library/python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b
+#6 resolve docker.io/library/python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b done
+#6 DONE 0.0s
+
+#7 [builder 1/5] FROM docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+#7 resolve docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 done
+#7 DONE 0.0s
+
+#8 [runtime 2/8] RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do         if [ -f "${source_file}" ]; then             sed -i                 -e "s|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 -e "s|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 "${source_file}";         fi;     done     && update_ok=0     && for attempt in 1 2 3 4 5 6 7 8; do         if apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update; then             update_ok=1;             break;         fi;         rm -rf /var/lib/apt/lists/partial;         if [ "${attempt}" = 3 ]; then             for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do                 if [ -f "${source_file}" ]; then                     sed -i                         -e "s|https://mirrors.aliyun.com/debian-security|https://deb.debian.org/debian-security|g"                         -e "s|https://mirrors.aliyun.com/debian|https://deb.debian.org/debian|g"                         "${source_file}";                 fi;             done;         fi;         sleep "$((attempt * 2))";     done     && [ "${update_ok}" = 1 ]     && install_ok=0     && for attempt in 1 2 3 4 5 6; do         if apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60             install -y --no-install-recommends --fix-missing             fonts-noto-cjk; then             install_ok=1;             break;         fi;         if [ "${attempt}" = 2 ]; then             for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do                 if [ -f "${source_file}" ]; then                     sed -i                         -e "s|https://mirrors.aliyun.com/debian-security|https://deb.debian.org/debian-security|g"                         -e "s|https://mirrors.aliyun.com/debian|https://deb.debian.org/debian|g"                         "${source_file}";                 fi;             done;             apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=60 update;         fi;         sleep "$((attempt * 2))";     done     && [ "${install_ok}" = 1 ]     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [internal] load build context
+#9 ...
+
+#10 [runtime 3/8] RUN install -d -m 0700 -o 10001 -g 10001 /workspace
+#10 DONE 0.5s
+
+#9 [internal] load build context
+#9 transferring context: 79.25MB 1.1s done
+#9 DONE 1.1s
+
+#11 [builder 3/5] WORKDIR /source/codex-rs
+#11 CACHED
+
+#12 [builder 2/5] RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do         if [ -f "${source_file}" ]; then             sed -i                 -e "s|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 -e "s|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 "${source_file}";         fi;     done     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 update     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30         install -y --no-install-recommends lld     && rm -rf /var/lib/apt/lists/*     && ld.lld --version
+#12 CACHED
+
+#13 [builder 4/5] COPY codex-rs/ ./
+#13 CACHED
+
+#14 [runtime 4/8] COPY LICENSE NOTICE /opt/ai-platform-capability-worker/
+#14 DONE 0.1s
+
+#15 [builder 5/5] RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked     --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked     --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked     CARGO_BUILD_JOBS="1" CARGO_INCREMENTAL=0     RUSTFLAGS="-C link-arg=-fuse-ld=lld"     cargo build --locked --profile dev-small         -p ai-platform-capability-worker         --bin ai-platform-capability-worker         --bin ai-platform-capability-worker-health         --bin ai-platform-python-supervisor     && cp target/dev-small/ai-platform-capability-worker /tmp/     && cp target/dev-small/ai-platform-capability-worker-health /tmp/     && cp target/dev-small/ai-platform-python-supervisor /tmp/
+#15 0.298 info: syncing channel updates for 1.95.0-aarch64-unknown-linux-gnu
+#15 3.843 info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+#15 3.859 info: downloading 3 components
+#15 15.17     Finished `dev-small` profile [unoptimized] target(s) in 1.17s
+#15 DONE 15.6s
+
+#16 [runtime 5/8] COPY --from=builder /tmp/ai-platform-capability-worker /usr/local/bin/
+#16 DONE 0.2s
+
+#17 [runtime 6/8] COPY --from=builder /tmp/ai-platform-capability-worker-health /usr/local/bin/
+#17 DONE 0.0s
+
+#18 [runtime 7/8] COPY --from=builder /tmp/ai-platform-python-supervisor /usr/local/bin/
+#18 DONE 0.0s
+
+#19 [runtime 8/8] WORKDIR /workspace
+#19 DONE 0.0s
+
+#20 exporting to image
+#20 exporting layers
+#20 exporting layers 1.7s done
+#20 exporting manifest sha256:70d9ac9105afd40e0cbacea37a9c6b57aa593bb746c546f2104a19ded6c19fef done
+#20 exporting config sha256:4e2f438faf0c7c7eea73c3ec41c8c2c876f0d9e1eba64287600a90da471449b1 done
+#20 exporting attestation manifest sha256:4dea5986887e8d3e5f824366738a4d09e5bef1c2de522dce0e473b7c0d8e5e5e done
+#20 exporting manifest list sha256:0c449319307187e052d82bed40bb63b27d619da4a730144475a8e768d655dc0e done
+#20 naming to docker.io/library/ai-gateway-agent-capability-worker:local-279ba894152b-22bf4e1ecad5 done
+#20 unpacking to docker.io/library/ai-gateway-agent-capability-worker:local-279ba894152b-22bf4e1ecad5
+#20 unpacking to docker.io/library/ai-gateway-agent-capability-worker:local-279ba894152b-22bf4e1ecad5 0.3s done
+#20 DONE 2.1s
+agent-runtime-source-contract: ok
+AGENT_CAPABILITY_WORKER_IMAGE_TAG=ai-gateway-agent-capability-worker:local-279ba894152b-22bf4e1ecad5
+AGENT_CAPABILITY_WORKER_IMAGE_DIGEST=sha256:0c449319307187e052d82bed40bb63b27d619da4a730144475a8e768d655dc0e

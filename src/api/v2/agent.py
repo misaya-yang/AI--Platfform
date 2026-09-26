@@ -273,13 +273,16 @@ async def create_thread(
     if existing:
         if control is None:
             raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
-        await control.verify_thread(
-            runtime_thread_id=existing.runtime_thread_id,
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-            session_id=session_id,
-            model_id=model_id,
-        )
+        try:
+            await control.verify_thread(
+                runtime_thread_id=existing.runtime_thread_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+                model_id=model_id,
+            )
+        except AgentRuntimeControlError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
         return {"thread": _thread_payload(existing)}
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
@@ -465,6 +468,21 @@ async def interrupt_turn(
             detail={"code": exc.code},
         ) from exc
     return {"schema_version": "agent-turn/v2", "turn_id": turn_id, "status": "interrupt_requested"}
+
+
+@router.post("/threads/{thread_id}/turns/{turn_id}:recover")
+async def recover_turn(thread_id: str, turn_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
+    _require_actor(user)
+    thread = await _get_thread(request, user, thread_id)
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    recover = getattr(control, "recover_turn", None)
+    if recover is None:
+        raise HTTPException(status_code=501, detail={"code": "AGENT_RUNTIME_RECOVERY_UNAVAILABLE"})
+    try:
+        result = await recover(runtime_thread_id=thread.runtime_thread_id, turn_id=turn_id, tenant_id=user.tenant_id, user_id=user.user_id, session_id=thread.session_id)
+    except AgentRuntimeControlError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    return {"schema_version": "agent-turn/v2", "turn_id": turn_id, "status": result.get("status", "recovery_requested")}
 
 
 @router.get("/threads/{thread_id}/approvals/{approval_id}")

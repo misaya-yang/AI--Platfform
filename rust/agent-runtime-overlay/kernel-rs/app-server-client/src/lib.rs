@@ -268,6 +268,10 @@ impl InProcessClientStartArgs {
 /// Each variant carries a oneshot sender so the caller can `await` the
 /// result without holding a mutable reference to the client.
 enum ClientCommand {
+    SuspendThread {
+        thread_id: codex_protocol::ThreadId,
+        response_tx: oneshot::Sender<IoResult<codex_protocol::turn_input::SuspendTurnOutcome>>,
+    },
     Request {
         request: Box<ClientRequest>,
         thread_start_options: Option<AppServerThreadStartOptions>,
@@ -428,6 +432,12 @@ impl InProcessAppServerClient {
                             }) => {
                                 let send_result = request_sender.fail_server_request(request_id, error);
                                 let _ = response_tx.send(send_result);
+                            }
+                            Some(ClientCommand::SuspendThread { thread_id, response_tx }) => {
+                                let request_sender = request_sender.clone();
+                                tokio::spawn(async move {
+                                    let _ = response_tx.send(request_sender.suspend_thread(thread_id).await);
+                                });
                             }
                             Some(ClientCommand::Shutdown { response_tx }) => {
                                 let shutdown_result = handle.shutdown().await;
@@ -727,6 +737,25 @@ impl InProcessAppServerClient {
 }
 
 impl InProcessAppServerRequestHandle {
+    pub async fn suspend_thread(
+        &self,
+        thread_id: codex_protocol::ThreadId,
+    ) -> IoResult<codex_protocol::turn_input::SuspendTurnOutcome> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::SuspendThread {
+                thread_id,
+                response_tx,
+            })
+            .await
+            .map_err(|_| {
+                IoError::new(ErrorKind::BrokenPipe, "suspension request channel closed")
+            })?;
+        response_rx.await.map_err(|_| {
+            IoError::new(ErrorKind::BrokenPipe, "suspension response channel closed")
+        })?
+    }
+
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         self.request_inner(
             request, /*thread_start_options*/ None, /*turn_start_options*/ None,

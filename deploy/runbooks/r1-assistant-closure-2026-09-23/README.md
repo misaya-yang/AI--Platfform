@@ -36,3 +36,8 @@
 ## 2026-09-23 阶段收口
 
 最终 Runtime/Worker Docker 镜像、真实 Qwen 文本附件读取/刷新、Quiz 审批作答、KB 检索与受限分享等切片的结果，以及逐需求未验证项见[验收记录](../../../reports/product/r1-progress-2026-09-23.md)。独立只读 reviewer 的具体发现、修正和复核结论也在该记录中。**R1 未完成**：J03 待审批 run 在 Runtime 重启后不能安全地以同一 run 续接；其余未验证的 J01～J08/J29 用例仍需按报告补齐。当前分支及未提交 PRD/代码保留，下一步以 `loop-state.json` 的 blocker 和 next_action 为准。
+
+
+## 2026-09-26 DR-01 收口
+
+Runtime 同run重启恢复缺口已完成本地范围验收；最终 C4 使用 durable owner/fence、原审批与Worker回执，接通 Core 原turn恢复。真实浏览器 SIGTERM 和明确标注的十类受控崩溃/治理矩阵通过。取消历史、恢复正文去重、未知状态与诊断指引已复测。证据见[DR-01报告](../../../reports/product/runtime-durable-recovery-2026-09-26.md)与[收据](receipts/DR-01.yml)。旧阶段失败记录保留为历史事实；R1其它未验证旅程仍保持进行中。

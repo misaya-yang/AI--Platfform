@@ -34,6 +34,8 @@ mod approvals;
 mod capability_dispatch;
 mod events;
 mod projection;
+mod recovery;
+pub(crate) mod recovery_fault;
 mod security;
 mod thread_lifecycle;
 mod threads;
@@ -64,6 +66,11 @@ pub struct RuntimeHttpState {
     readonly_by_turn: Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
     turn_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     capability_client: reqwest::Client,
+    recovery_notify: Arc<tokio::sync::Notify>,
+    recovering_threads: Arc<Mutex<HashSet<ThreadId>>>,
+    recovery_shutdown: CancellationToken,
+    execution_shutdown: CancellationToken,
+    thread_gates: Arc<Mutex<HashMap<ThreadId, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +206,15 @@ pub struct RuntimeHttpService {
 }
 
 impl RuntimeHttpState {
+    pub(super) fn thread_gate(&self, thread_id: ThreadId) -> Arc<tokio::sync::Mutex<()>> {
+        self.thread_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     pub(super) fn cancel_turn(&self, turn_id: &str) {
         if let Some(token) = self
             .turn_cancellations
@@ -259,21 +275,34 @@ impl RuntimeHttpService {
             capability_client,
             shutdown_rx,
         ));
+        let state = RuntimeHttpState {
+            store,
+            requests,
+            approvals,
+            events,
+            internal_token: internal_token.into(),
+            kernel_ready,
+            readonly_by_turn,
+            turn_cancellations,
+            capability_client: capability_health_client,
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
+            recovering_threads: Arc::new(Mutex::new(HashSet::new())),
+            recovery_shutdown: CancellationToken::new(),
+            execution_shutdown: CancellationToken::new(),
+            thread_gates: Arc::new(Mutex::new(HashMap::new())),
+        };
+        tokio::spawn(recovery::recovery_loop(state.clone()));
         Ok(Self {
-            state: RuntimeHttpState {
-                store,
-                requests,
-                approvals,
-                events,
-                internal_token: internal_token.into(),
-                kernel_ready,
-                readonly_by_turn,
-                turn_cancellations,
-                capability_client: capability_health_client,
-            },
+            state,
             shutdown_tx: Some(shutdown_tx),
             event_task,
         })
+    }
+
+    /// Loss of a live execution fence retires this kernel instance. The
+    /// supervisor restarts it with a new identity instead of reusing stale tasks.
+    pub fn execution_shutdown_token(&self) -> CancellationToken {
+        self.state.execution_shutdown.clone()
     }
 
     pub fn router(&self) -> Router {
@@ -293,6 +322,10 @@ impl RuntimeHttpService {
             .route(
                 "/internal/v1/threads/{thread_id}/turns",
                 post(start_turn).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
+            .route(
+                "/internal/v1/threads/{thread_id}/turns/{turn_id}/recover",
+                post(recovery::recover_turn),
             )
             .route(
                 "/internal/v1/threads/{thread_id}/turns/{turn_id}/interrupt",
@@ -315,6 +348,7 @@ impl RuntimeHttpService {
     }
 
     pub async fn shutdown(mut self) {
+        self.state.recovery_shutdown.cancel();
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }

@@ -533,3 +533,38 @@ async def test_v2_approval_route_does_not_leak_cross_tenant_approval() -> None:
     with pytest.raises(Exception) as exc_info:
         await get_thread_approval(str(db.thread["runtime_thread_id"]), "approval-1", _request(state), user)
     assert getattr(exc_info.value, "status_code", None) == 404
+
+
+@pytest.mark.asyncio
+async def test_recovery_reuses_original_identity_and_denies_foreign_actor() -> None:
+    from fastapi import HTTPException
+
+    from src.api.v2.agent import recover_turn
+
+    db = _Database()
+    thread, run = str(uuid4()), str(uuid4())
+    db.thread = {
+        "runtime_thread_id": thread, "tenant_id": "tenant-a", "user_id": "user-a", "session_id": "session-a",
+        "kernel_owner": "agent", "source_kind": "native", "import_status": "not_required", "last_sequence": 4,
+    }
+    calls = []
+
+    class _Assignments:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
+
+    class _Control:
+        async def recover_turn(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "recovery_requested"}
+
+    state = SimpleNamespace(database=db, assistant_runtime_assignments=_Assignments(), agent_runtime_control=_Control())
+    actor = UserContext(user_id="user-a", tenant_id="tenant-a", tier="normal", is_authenticated=True, roles=["user"], ip="127.0.0.1")
+    for _ in range(2):
+        result = await recover_turn(thread, run, _request(state), actor)
+        assert result["turn_id"] == run
+    assert calls == [{"runtime_thread_id": thread, "turn_id": run, "tenant_id": "tenant-a", "user_id": "user-a", "session_id": "session-a"}] * 2
+    with pytest.raises(HTTPException) as denied:
+        await recover_turn(thread, run, _request(state), UserContext(user_id="user-other", tenant_id="tenant-a", tier="normal", is_authenticated=True, roles=["user"], ip="127.0.0.1"))
+    assert denied.value.status_code == 404
+    assert len(calls) == 2

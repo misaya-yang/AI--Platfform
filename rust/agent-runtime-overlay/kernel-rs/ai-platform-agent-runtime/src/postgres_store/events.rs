@@ -370,6 +370,16 @@ impl PostgresThreadStore {
                 thread_id: ThreadId::from_u128(kernel_thread_uuid.as_u128()),
             });
         }
+        if let Some(row) = sqlx::query("SELECT event_id,sequence,payload FROM assistant_runtime_items WHERE kernel_thread_id=$1 AND event_key=$2")
+            .bind(kernel_thread_uuid).bind(event_key).fetch_optional(&mut *transaction).await.map_err(store_error)? {
+            let original: AssistantTurnEventV1 = serde_json::from_value(row.try_get("payload").map_err(store_error)?).map_err(json_error)?;
+            if row.try_get::<Uuid,_>("event_id").map_err(store_error)? != event_id || !same_event_fact(&original, event) {
+                return Err(ThreadStoreError::Conflict { message: "original runtime event facts changed".to_string() });
+            }
+            let sequence = row.try_get("sequence").map_err(store_error)?;
+            transaction.commit().await.map_err(store_error)?;
+            return Ok(sequence);
+        }
         let sequence = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT append_assistant_runtime_item(
@@ -436,5 +446,30 @@ impl PostgresThreadStore {
                 Ok(SequencedAssistantTurnEventV1 { sequence, event })
             })
             .collect()
+    }
+}
+
+// Restarting projection may allocate another local timestamp. Preserve the
+// saved timestamp; event identity, schema, parameters and facts remain exact.
+fn same_event_fact(original: &AssistantTurnEventV1, replay: &AssistantTurnEventV1) -> bool {
+    original.schema_version == replay.schema_version
+        && original.event_type == replay.event_type
+        && original.data == replay.data
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    #[test]
+    fn recovery_event_reuses_original_timestamp_but_never_changes_facts() {
+        let original = AssistantTurnEventV1::new(
+            "approval_required",
+            serde_json::json!({"approval_id":"original","arguments_hash":"original-hash"}),
+        );
+        let mut replay = original.clone();
+        replay.timestamp += 10.0;
+        assert!(same_event_fact(&original, &replay));
+        replay.data["arguments_hash"] = serde_json::json!("changed-hash");
+        assert!(!same_event_fact(&original, &replay));
     }
 }

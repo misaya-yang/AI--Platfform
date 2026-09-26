@@ -43,6 +43,8 @@ impl PostgresThreadStore {
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
+            instance_id: Uuid::now_v7(),
+            execution_claims: Default::default(),
             pending_metadata: Default::default(),
             write_failures: Default::default(),
             terminal_identity_cache: Default::default(),

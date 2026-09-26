@@ -8,6 +8,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+import yaml
+
 from .manifest import (
     _CHANGE_FILE_RE,
     BASELINE_MANIFEST_SCHEMA,
@@ -369,8 +371,13 @@ def verify_baseline_git_provenance(
         *_BASELINE_PROVENANCE_INPUTS,
         generator.as_posix(),
         cutover_rel,
+        # Epochs extend the frozen database; they are not baseline generator
+        # inputs after freeze. Their own immutable history is checked below.
+        f":(exclude)database/migrations/{baseline.baseline_id}/**",
     ]
-    comparison = git("diff", "--quiet", source, "HEAD", "--", *inputs)
+    if git("diff", "--quiet", source, "--", generator.as_posix(), cutover_rel).returncode != 0:
+        raise AuthorityManifestError(f"baseline manifest {path}: authority inputs differ from source_git_sha")
+    comparison = git("diff", "--quiet", source, "--", *inputs)
     if comparison.returncode == 1:
         raise AuthorityManifestError(
             f"baseline manifest {path}: authority inputs differ from source_git_sha"
@@ -380,3 +387,54 @@ def verify_baseline_git_provenance(
         raise AuthorityManifestError(
             f"baseline manifest {path}: cannot verify source provenance: {detail}"
         )
+    _verify_epoch_additions(baseline.baseline_id, source, repo_root, git)
+
+
+def _verify_epoch_additions(baseline_id: str, source: str, repo_root: Path, git) -> None:
+    """Freeze each integrated epoch prefix while allowing checked additions.
+
+    The freeze source may have an empty epoch. Therefore checking only that
+    source is insufficient: integrated first-parent history and the working
+    manifest must retain every earlier descriptor exactly. The manifest loader
+    independently binds every current SQL file to its immutable checksum.
+    """
+    relative = f"database/migrations/{baseline_id}/manifest.yml"
+    current = repo_root / relative
+    initial = git("show", f"{source}:{relative}")
+    if initial.returncode != 0:
+        tree = git("ls-tree", source, "--", relative)
+        if tree.returncode != 0 or tree.stdout.strip():
+            raise AuthorityManifestError("cannot read the source epoch manifest")
+    revisions = git("log", "--first-parent", "--reverse", "--format=%H", f"{source}..HEAD", "--", relative)
+    if revisions.returncode != 0:
+        raise AuthorityManifestError("cannot verify integrated epoch history")
+    if initial.returncode != 0 and not current.exists():
+        if not revisions.stdout.strip():
+            return
+        raise AuthorityManifestError("an integrated epoch manifest was removed")
+    from .manifest import load_epoch_manifest
+
+    load_epoch_manifest(current)
+
+    def descriptors(text: str) -> list[object]:
+        try:
+            raw = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise AuthorityManifestError("epoch provenance contains invalid YAML") from exc
+        if not isinstance(raw, dict) or raw.get("baseline_id") != baseline_id or not isinstance(raw.get("changes"), list):
+            raise AuthorityManifestError("epoch provenance has an invalid baseline or changes")
+        return raw["changes"]
+
+    previous = descriptors(initial.stdout) if initial.returncode == 0 else []
+    candidates = []
+    for revision in revisions.stdout.splitlines():
+        recorded = git("show", f"{revision}:{relative}")
+        if recorded.returncode != 0:
+            raise AuthorityManifestError("an integrated epoch manifest was removed")
+        candidates.append(recorded.stdout)
+    candidates.append(current.read_text(encoding="utf-8"))
+    for candidate in candidates:
+        changes = descriptors(candidate)
+        if changes[:len(previous)] != previous or len(changes) < len(previous):
+            raise AuthorityManifestError("integrated epoch changes are immutable; only additions are allowed")
+        previous = changes

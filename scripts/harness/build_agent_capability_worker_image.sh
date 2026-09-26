@@ -70,7 +70,7 @@ verify_overlay_upstream_base(
 PY_VERIFY_UPSTREAM
 
 git -C "$source_root" archive "$upstream_sha" | tar -x -C "$build_context"
-cp -R "$overlay_root/kernel-rs/." "$build_context/codex-rs/"
+cp -Rp "$overlay_root/kernel-rs/." "$build_context/codex-rs/"
 
 monitor_build_memory() {
     local build_pid="$1"

@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
 
 use codex_app_server::in_process::InProcessServerEvent;
@@ -34,7 +33,7 @@ use crate::PostgresThreadStore;
 use crate::SequencedAssistantTurnEventV1;
 use crate::approval_control::ApprovalBroker;
 use crate::capability_execution::{
-    CapabilityExecutionOutcome, ReadonlyCapabilityBinding, execute_capability,
+    CapabilityExecutionOutcome, ReadonlyCapabilityBinding, execute_capability_with_existing,
 };
 use crate::capability_worker::CapabilityWorkerClient;
 use crate::postgres_store::PlatformLifecycleEvent;
@@ -56,11 +55,11 @@ pub(super) async fn route_kernel_events(
     let request_handle = kernel.request_handle();
     let dynamic_tool_slots = Arc::new(Semaphore::new(16));
     let runtime_cancel = CancellationToken::new();
+    let mut dynamic_tasks = tokio::task::JoinSet::new();
     let mut text_projection = TextProjectionState::default();
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
-                runtime_cancel.cancel();
                 break;
             },
             event = kernel.next_event() => {
@@ -137,7 +136,7 @@ pub(super) async fn route_kernel_events(
                                 cancellations.entry(params.turn_id.clone())
                                     .or_insert_with(|| parent.child_token()).clone()
                             };
-                            tokio::spawn(async move {
+                            dynamic_tasks.spawn(async move {
                                 let _permit = permit;
                                 let result = handle_dynamic_tool_call(
                                     &params,
@@ -197,10 +196,106 @@ pub(super) async fn route_kernel_events(
         }
     }
     kernel_ready.store(false, Ordering::Release);
-    let _ = kernel.shutdown().await;
+    dynamic_tasks.abort_all();
+    while dynamic_tasks.join_next().await.is_some() {}
+    let claims: Vec<_> = store
+        .execution_claims
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect();
+    let mut suspended = true;
+    for claim in claims {
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT status IN ('running','awaiting_approval') FROM assistant_runs WHERE run_id=$1",
+        )
+        .bind(claim.run_id)
+        .fetch_optional(&store.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+        if !active {
+            continue;
+        }
+        match request_handle.suspend_thread(claim.thread_id).await {
+            Ok(
+                codex_protocol::turn_input::SuspendTurnOutcome::Suspended { .. }
+                | codex_protocol::turn_input::SuspendTurnOutcome::NotActive,
+            ) => {}
+            result => {
+                warn!(run_id=%claim.run_id, ?result, "turn suspension unavailable; retaining owner until process failure recovery");
+                suspended = false;
+            }
+        }
+    }
+    if suspended {
+        let _ = kernel.shutdown().await;
+    }
 }
 
-async fn handle_dynamic_tool_call(
+pub(super) async fn handle_dynamic_tool_call(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    root_turn_id: &str,
+    store: &PostgresThreadStore,
+    readonly_by_turn: &Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
+    capability_client: &reqwest::Client,
+    approvals: &ApprovalBroker,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value, String> {
+    let run_id = Uuid::parse_str(root_turn_id).map_err(|_| "dynamic_tool_turn_invalid")?;
+    let saved = store
+        .begin_invocation(run_id, params)
+        .await
+        .map_err(|_| "dynamic_invocation_persistence_failed")?;
+    let response = if let Some(response) = saved {
+        response
+    } else {
+        super::recovery_fault::pause("invocation_saved", params, cancel).await;
+        let response = handle_dynamic_tool_call_inner(
+            params,
+            root_turn_id,
+            store,
+            readonly_by_turn,
+            capability_client,
+            approvals,
+            events,
+            cancel,
+        )
+        .await?;
+        store
+            .finish_invocation(run_id, params, &response)
+            .await
+            .map_err(|_| "dynamic_result_persistence_failed")?;
+        response
+    };
+    // Cold recovery bypasses Core's live tool completion notification. Project
+    // the durable fact even when reusing a journal response, never its raw error.
+    let thread_id =
+        ThreadId::from_string(&params.thread_id).map_err(|_| "dynamic_tool_thread_invalid")?;
+    let unknown: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM assistant_runtime_items WHERE kernel_thread_id=$1 AND turn_id=$2 AND event_key=$3 AND event_type='agent-runtime/tool-lifecycle' AND item_type='tool_result' AND status='side_effect_unknown')",
+    )
+    .bind(Uuid::parse_str(&params.thread_id).map_err(|_| "dynamic_tool_thread_invalid")?)
+    .bind(&params.turn_id)
+    .bind(format!("tool-result/{}/{}", params.turn_id, params.call_id))
+    .fetch_one(&store.pool)
+    .await
+    .map_err(|_| "dynamic_tool_result_receipt_failed")?;
+    if unknown {
+        let event = crate::AssistantTurnEventV1::new(
+            "side_effect_unknown",
+            serde_json::json!({"run_id": root_turn_id, "tool_call_id": params.call_id}),
+        );
+        persist_capability_projection(params, thread_id, event, store, events).await?;
+    }
+    super::recovery_fault::pause("invocation_result_saved", params, cancel).await;
+    Ok(response)
+}
+
+pub(super) async fn handle_dynamic_tool_call_inner(
     params: &codex_app_server_protocol::DynamicToolCallParams,
     root_turn_id: &str,
     store: &PostgresThreadStore,
@@ -341,6 +436,16 @@ async fn handle_dynamic_tool_call(
             "capability worker is not ready for this capability",
         ));
     }
+    let existing_execution_id:Option<Uuid>=sqlx::query_scalar("SELECT execution_id FROM assistant_capability_executions WHERE run_id=$1 AND tool_call_id=$2 AND attempt_id=$2 AND tenant_id=$3 AND user_id=$4 AND session_id=$5 AND arguments_sha256=$6")
+        .bind(Uuid::parse_str(root_turn_id).map_err(|_|"dynamic_tool_turn_invalid")?).bind(&execution_params.call_id)
+        .bind(&identity.tenant_id).bind(&identity.user_id).bind(&identity.session_id)
+        .bind(ai_platform_capability_contract::canonical_json_hash(&params.arguments).map_err(|_|"dynamic_tool_arguments_invalid")?.trim_start_matches("sha256:").to_string())
+        .fetch_optional(&store.pool).await.map_err(|_|"execution_receipt_lookup_failed")?;
+    let existing_execution_id = existing_execution_id.map(|id| id.to_string());
+    let owner = store
+        .assert_execution(Uuid::parse_str(root_turn_id).map_err(|_| "dynamic_tool_turn_invalid")?)
+        .await
+        .map_err(|_| "execution_fence_lost")?;
     let mut approval_id = None;
     if effect != CapabilityEffect::Read {
         let (id, receiver) = approvals
@@ -378,12 +483,10 @@ async fn handle_dynamic_tool_call(
             .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
             return Ok(structured_capability_response(false, &error));
         }
-        let decision = tokio::select! {
-            decision = tokio::time::timeout(Duration::from_secs(600), receiver) => {
-                decision.ok().and_then(Result::ok)
-            }
-            () = cancel.cancelled() => None,
-        };
+        super::recovery_fault::pause("approval_saved", params, cancel).await;
+        let decision = approvals
+            .wait_dynamic_decision(id, receiver, store, cancel)
+            .await;
         let Some(decision) = decision else {
             approvals
                 .cancel_dynamic(
@@ -470,6 +573,7 @@ async fn handle_dynamic_tool_call(
     }
     let internal_token = std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default();
     let approval_id_string = approval_id.map(|id| id.to_string());
+    super::recovery_fault::pause("before_dispatch", params, cancel).await;
     let mut result: Result<CapabilityExecutionOutcome, String> = if worker_enabled {
         let worker_url = worker_url
             .filter(|value| !value.trim().is_empty())
@@ -486,11 +590,12 @@ async fn handle_dynamic_tool_call(
                 )
                 .map(|worker| {
                     worker
+                        .with_execution_owner(owner.owner_id.to_string(), owner.fence)
                         .with_trace_context(binding.trace_context.clone(), root_turn_id.to_string())
                 })
                 .map_err(|error| error.code().to_string());
                 match worker {
-                    Ok(worker) => execute_capability(
+                    Ok(worker) => execute_capability_with_existing(
                         &worker,
                         &identity,
                         &ReadonlyCapabilityBinding {
@@ -504,6 +609,7 @@ async fn handle_dynamic_tool_call(
                         effect,
                         approval_id_string.as_deref(),
                         cancel,
+                        existing_execution_id.as_deref(),
                     )
                     .await
                     .map_err(|error| error.code().to_string()),
@@ -549,6 +655,7 @@ async fn handle_dynamic_tool_call(
     {
         result = Err("capability_projection_failed".to_string());
     }
+    super::recovery_fault::pause("worker_result_observed", params, cancel).await;
     let (status, detail) = match &result {
         Ok(outcome) => (
             capability_status_name(outcome.status),
@@ -580,8 +687,14 @@ async fn handle_dynamic_tool_call(
     result.map(|outcome| outcome.response)
 }
 
-fn selected_attachment_is_bound(payload: &serde_json::Value, arguments: &serde_json::Value) -> bool {
-    let Some(attachment_id) = arguments.get("attachment_id").and_then(serde_json::Value::as_str) else {
+fn selected_attachment_is_bound(
+    payload: &serde_json::Value,
+    arguments: &serde_json::Value,
+) -> bool {
+    let Some(attachment_id) = arguments
+        .get("attachment_id")
+        .and_then(serde_json::Value::as_str)
+    else {
         return false;
     };
     payload
@@ -1078,12 +1191,17 @@ mod tests {
             "payload": {"content_ref": "art_1111111111111111"}
         }]});
         assert!(selected_attachment_is_bound(
-            &payload, &serde_json::json!({"attachment_id": "art_1111111111111111"})
+            &payload,
+            &serde_json::json!({"attachment_id": "art_1111111111111111"})
         ));
         assert!(!selected_attachment_is_bound(
-            &payload, &serde_json::json!({"attachment_id": "art_2222222222222222"})
+            &payload,
+            &serde_json::json!({"attachment_id": "art_2222222222222222"})
         ));
-        assert!(!selected_attachment_is_bound(&payload, &serde_json::json!({})));
+        assert!(!selected_attachment_is_bound(
+            &payload,
+            &serde_json::json!({})
+        ));
     }
 
     #[test]

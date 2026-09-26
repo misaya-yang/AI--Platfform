@@ -353,7 +353,9 @@ class AgentThreadStore:
                            ,(
                                SELECT jsonb_agg(
                                    jsonb_build_object(
-                                       'event_type', replace(runtime.event_type, 'compat/v1/', ''),
+                                       'event_type', CASE WHEN runtime.event_type = 'agent-runtime/tool-lifecycle'
+                                                          THEN 'side_effect_unknown'
+                                                          ELSE replace(runtime.event_type, 'compat/v1/', '') END,
                                        'data', runtime.payload #> '{data}',
                                        'timestamp', EXTRACT(EPOCH FROM runtime.created_at)
                                    ) ORDER BY runtime.sequence
@@ -363,7 +365,7 @@ class AgentThreadStore:
                                   AND runtime.tenant_id = item.tenant_id
                                   AND runtime.user_id = item.user_id
                                   AND runtime.turn_id = active_turn.turn_id
-                                  AND runtime.event_type IN (
+                                  AND (runtime.event_type IN (
                                       'compat/v1/subagent_started',
                                       'compat/v1/subagent_step',
                                       'compat/v1/subagent_finished',
@@ -375,7 +377,9 @@ class AgentThreadStore:
                                       'compat/v1/run_finished',
                                       'compat/v1/run_error',
                                       'compat/v1/cancelled'
-                                  )
+                                  ) OR (runtime.event_type = 'agent-runtime/tool-lifecycle'
+                                        AND runtime.item_type = 'tool_result'
+                                        AND runtime.status = 'side_effect_unknown'))
                            ) AS runtime_events
                       FROM assistant_runtime_items AS item
                       JOIN LATERAL (
@@ -405,7 +409,13 @@ class AgentThreadStore:
                            ) AS content,
                            MAX(delta.sequence) AS sequence,
                            delta.turn_id AS run_id,
-                           MAX(delta.created_at) AS created_at,
+                           COALESCE((
+                               SELECT stopped.finished_at FROM assistant_runs AS stopped
+                                WHERE stopped.run_id::text = delta.turn_id
+                                  AND stopped.harness_thread_id = delta.runtime_thread_id
+                                  AND stopped.tenant_id = delta.tenant_id AND stopped.user_id = delta.user_id
+                                  AND stopped.status = 'cancelled'
+                           ), MAX(delta.created_at)) AS created_at,
                            (
                                SELECT string_agg(
                                    reasoning.payload #>> '{data,content}',
@@ -423,7 +433,9 @@ class AgentThreadStore:
                            (
                                SELECT jsonb_agg(
                                    jsonb_build_object(
-                                       'event_type', replace(runtime.event_type, 'compat/v1/', ''),
+                                       'event_type', CASE WHEN runtime.event_type = 'agent-runtime/tool-lifecycle'
+                                                          THEN 'side_effect_unknown'
+                                                          ELSE replace(runtime.event_type, 'compat/v1/', '') END,
                                        'data', runtime.payload #> '{data}',
                                        'timestamp', EXTRACT(EPOCH FROM runtime.created_at)
                                    ) ORDER BY runtime.sequence
@@ -433,7 +445,7 @@ class AgentThreadStore:
                                   AND runtime.tenant_id = delta.tenant_id
                                   AND runtime.user_id = delta.user_id
                                   AND runtime.turn_id = delta.turn_id
-                                  AND runtime.event_type IN (
+                                  AND (runtime.event_type IN (
                                       'compat/v1/subagent_started',
                                       'compat/v1/subagent_step',
                                       'compat/v1/subagent_finished',
@@ -445,15 +457,21 @@ class AgentThreadStore:
                                       'compat/v1/run_finished',
                                       'compat/v1/run_error',
                                       'compat/v1/cancelled'
-                                  )
+                                  ) OR (runtime.event_type = 'agent-runtime/tool-lifecycle'
+                                        AND runtime.item_type = 'tool_result'
+                                        AND runtime.status = 'side_effect_unknown'))
                            ) AS runtime_events
                       FROM assistant_runtime_items AS delta
-                      JOIN assistant_runtime_items AS started
-                        ON started.runtime_thread_id = delta.runtime_thread_id
-                       AND started.tenant_id = delta.tenant_id
-                       AND started.user_id = delta.user_id
-                       AND started.turn_id = delta.turn_id
-                       AND started.event_type = 'compat/v1/run_started'
+                      LEFT JOIN LATERAL (
+                           SELECT start.sequence
+                             FROM assistant_runtime_items AS start
+                            WHERE start.runtime_thread_id = delta.runtime_thread_id
+                              AND start.tenant_id = delta.tenant_id
+                              AND start.user_id = delta.user_id
+                              AND start.turn_id = delta.turn_id
+                              AND start.event_type = 'compat/v1/run_started'
+                            ORDER BY start.sequence ASC LIMIT 1
+                      ) AS started ON TRUE
                      WHERE delta.runtime_thread_id = $1
                        AND delta.tenant_id = $2 AND delta.user_id = $3
                        AND delta.event_type IN (
@@ -463,6 +481,19 @@ class AgentThreadStore:
                            'compat/v1/run_error',
                            'compat/v1/cancelled'
                        )
+                       AND (started.sequence IS NOT NULL OR (
+                           delta.event_type = 'compat/v1/cancelled' AND EXISTS (
+                               SELECT 1 FROM assistant_runs AS stopped
+                                JOIN assistant_runtime_snapshots AS snapshot ON snapshot.run_id = stopped.run_id
+                                 AND snapshot.runtime_thread_id = stopped.harness_thread_id
+                                 AND snapshot.tenant_id = stopped.tenant_id AND snapshot.user_id = stopped.user_id
+                                 AND snapshot.session_id = stopped.session_id
+                                WHERE stopped.run_id::text = delta.turn_id
+                                  AND stopped.harness_thread_id = delta.runtime_thread_id
+                                  AND stopped.tenant_id = delta.tenant_id AND stopped.user_id = delta.user_id
+                                  AND stopped.status = 'cancelled' AND stopped.engine = 'agent_runtime'
+                           )
+                       ))
                        AND NOT EXISTS (
                            SELECT 1
                              FROM assistant_runtime_items AS completed
@@ -476,10 +507,11 @@ class AgentThreadStore:
                               AND NOT EXISTS (
                                   SELECT 1
                                     FROM assistant_runtime_items AS next_started
-                                   WHERE next_started.runtime_thread_id = started.runtime_thread_id
-                                     AND next_started.tenant_id = started.tenant_id
-                                     AND next_started.user_id = started.user_id
+                                   WHERE next_started.runtime_thread_id = delta.runtime_thread_id
+                                     AND next_started.tenant_id = delta.tenant_id
+                                     AND next_started.user_id = delta.user_id
                                      AND next_started.event_type = 'compat/v1/run_started'
+                                     AND next_started.turn_id IS DISTINCT FROM delta.turn_id
                                      AND next_started.sequence > started.sequence
                                      AND next_started.sequence <= completed.sequence
                               )
@@ -588,6 +620,7 @@ class AgentThreadStore:
                 steps: list[dict[str, Any]] = []
                 summary_status = "succeeded"
                 outcome_uncertain = False
+                cancelled = False
                 terminal_reason: str | None = None
                 for runtime_event in runtime_events:
                     if not isinstance(runtime_event, dict):
@@ -638,11 +671,14 @@ class AgentThreadStore:
                         summary_status = "failed"
                         if event_type == "cancelled" or data.get("status") == "cancelled":
                             summary_status = "cancelled"
+                            cancelled = True
                             if data.get("terminal_reason") == "runtime_restart_interrupted":
                                 terminal_reason = "runtime_restart_interrupted"
                         envelope = data.get("terminal_envelope")
                         if isinstance(envelope, dict) and envelope.get("exit_reason") == "side_effect_unknown":
                             outcome_uncertain = True
+                if cancelled:
+                    summary_status = "cancelled"
                 if steps or summary_status != "succeeded" or not text:
                     metadata["process_summary"] = {
                         "collapsed": True,

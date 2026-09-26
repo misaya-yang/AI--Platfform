@@ -1,0 +1,242 @@
+agent-runtime-source-contract: ok
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.runtime
+#1 transferring dockerfile: 6.37kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.95.0-bookworm
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [builder 1/5] FROM docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+#4 resolve docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 79.24MB 0.8s done
+#5 DONE 0.9s
+
+#6 [builder 3/5] WORKDIR /source/codex-rs
+#6 CACHED
+
+#7 [builder 4/5] COPY codex-rs/ ./
+#7 CACHED
+
+#8 [builder 2/5] RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do         if [ -f "${source_file}" ]; then             sed -i                 -e "s|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g"                 -e "s|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 -e "s|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g"                 "${source_file}";         fi;     done     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30 update     && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=30         install -y --no-install-recommends lld     && rm -rf /var/lib/apt/lists/*     && ld.lld --version
+#8 CACHED
+
+#9 [builder 5/5] RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked     --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked     --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked     CARGO_BUILD_JOBS="1" CARGO_INCREMENTAL=0     RUSTFLAGS="-C link-arg=-fuse-ld=lld"     cargo build --locked --profile dev-small         -p ai-platform-agent-runtime --bin ai-platform-agent-runtime     && cp target/dev-small/ai-platform-agent-runtime /tmp/ai-platform-agent-runtime
+#9 CACHED
+
+#10 [scoped-tests 1/1] RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked     --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked     --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked     CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTFLAGS="-C link-arg=-fuse-ld=lld"     cargo test --locked --profile dev-small -p ai-platform-agent-runtime --lib     && CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTFLAGS="-C link-arg=-fuse-ld=lld"        cargo test --locked --profile dev-small -p ai-platform-capability-worker --lib
+#10 1.618    Compiling ai-platform-agent-runtime v0.0.0 (/source/codex-rs/ai-platform-agent-runtime)
+#10 24.61     Finished `dev-small` profile [unoptimized] target(s) in 24.43s
+#10 25.22      Running unittests src/lib.rs (target/dev-small/deps/ai_platform_agent_runtime-803460a5157bad6e)
+#10 25.24
+#10 25.24 running 79 tests
+#10 25.31 test capability_execution::tests::cancellation_confirms_worker_and_projects_the_terminal_event ... ok
+#10 25.31 test capability_execution::tests::completion_race_returns_worker_success_instead_of_overriding_it ... ok
+#10 25.31 test capability_execution::tests::every_terminal_status_projects_one_dynamic_tool_result ... ok
+#10 25.35 test capability_execution::tests::nonterminal_cancel_response_is_rejected_without_event_drain ... ok
+#10 25.40 test capability_execution::tests::missing_terminal_event_is_rejected_after_grace_period ... ok
+#10 25.40 test capability_execution::tests::succeeded_event_with_failed_response_is_rejected ... ok
+#10 25.40 test capability_execution::tests::uncertain_worker_acceptance_is_never_an_ordinary_write_failure ... ok
+#10 25.40 test capability_execution::tests::versionless_platform_capability_binds_to_null_wire_version ... ok
+#10 25.40 test capability_execution::tests::worker_content_items_are_normalized_to_app_server_wire_shape ... ok
+#10 25.40 test capability_execution::tests::pre_cancelled_write_never_reaches_worker_create ... ok
+#10 25.45 test capability_plane::tests::dynamic_call_rejects_approval_result_in_read_only_channel ... ok
+#10 25.45 test capability_plane::tests::dynamic_call_projects_fake_knowledge_result_for_next_turn ... ok
+#10 25.45 test capability_plane::tests::invoke_wire_contains_snapshot_allowlist_and_expected_identity ... ok
+#10 25.45 test capability_plane::tests::rejects_userinfo_and_invalid_scheme ... ok
+#10 25.45 test capability_worker::tests::base_url_is_fixed_to_the_private_capability_prefix ... ok
+#10 25.50 test capability_worker::tests::arc05_health_requires_worker_core_ready_schema ... ok
+#10 25.50 test capability_worker::tests::event_page_enforces_one_chunk_of_producer_ahead ... ok
+#10 25.50 test http_service::capability_dispatch::tests::attachment_dispatch_accepts_only_this_turns_selected_id ... ok
+#10 25.50 test http_service::capability_dispatch::tests::child_dispatches_use_root_authority_and_distinct_execution_identity ... ok
+#10 25.50 test http_service::capability_dispatch::tests::code_result_projects_stdout_and_durable_artifacts ... ok
+#10 25.50 test http_service::capability_dispatch::tests::document_result_projects_downloadable_artifact ... ok
+#10 25.50 test http_service::capability_dispatch::tests::knowledge_result_projects_citation_identity ... ok
+#10 25.50 test http_service::recovery::tests::recovery_preserves_original_pending_call_and_rejects_superseded_turn ... ok
+#10 25.50 test http_service::recovery::tests::recovery_rejects_mutation_of_original_call_identity ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::empty_resume_keeps_the_upstream_persisted_metadata_path ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::incomplete_or_untrusted_platform_resume_config_is_rejected ... ok
+#10 25.50 test capability_worker::tests::bounded_bytes_rejects_chunked_body_without_content_length ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::platform_resume_preserves_profile_declared_native_web_search ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::platform_resume_carries_model_context_and_compaction_limits ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::platform_resume_rebinds_stable_system_and_developer_instructions ... ok
+#10 25.50 test http_service::turns::turn_request_tests::capability_result_status_does_not_treat_failed_response_as_success ... ok
+#10 25.50 test http_service::thread_lifecycle::tests::platform_resume_reinstates_the_private_responses_provider ... ok
+#10 25.50 test http_service::turns::turn_request_tests::capability_worker_requires_explicit_true_flag ... ok
+#10 25.50 test http_service::turns::turn_request_tests::memory_mode_does_not_enable_unscoped_local_storage ... ok
+#10 25.50 test http_service::turns::turn_request_tests::completed_agent_message_falls_back_only_when_no_delta_was_seen ... ok
+#10 25.50 test http_service::turns::turn_request_tests::model_limits_are_profile_driven_and_conflicts_fail_closed ... ok
+#10 25.50 test http_service::turns::turn_request_tests::signed_turn_request_contract_is_bounded ... ok
+#10 25.50 test http_service::turns::turn_request_tests::subagent_projection_deduplicates_starts_and_repairs_late_receiver_identity ... ok
+#10 25.50 test http_service::turns::turn_request_tests::official_thread_instructions_use_stable_camel_case_fields ... ok
+#10 25.50 test platform_lifecycle::tests::abnormal_terminal_status_respects_dispatch_effect ... ok
+#10 25.50 test http_service::turns::turn_request_tests::terminal_admission_failure_is_an_explicit_non_durable_failure ... ok
+#10 25.50 test platform_lifecycle::tests::approval_binding_extracts_the_exact_exec_command_argument ... ok
+#10 25.50 test platform_lifecycle::tests::native_agent_control_tools_do_not_require_external_action_approval ... ok
+#10 25.50 test platform_lifecycle::tests::lifecycle_owner_matches_nested_and_legacy_dynamic_namespaces ... ok
+#10 25.50 test platform_lifecycle::tests::persisted_call_reducer_preserves_effect_and_terminal_fence ... ok
+#10 25.50 test platform_lifecycle::tests::restart_recovery_classifies_every_unpaired_published_call ... ok
+#10 25.50 test postgres_store_contract_tests::agent_thread_start_round_trips_through_postgres_store ... ignored, requires local PostgreSQL and AI_PLATFORM_RUNTIME_MIGRATION_PATH
+#10 25.50 test postgres_store::events::replay_tests::recovery_event_reuses_original_timestamp_but_never_changes_facts ... ok
+#10 25.50 test readonly_capabilities::tests::deferred_write_resolution_requires_exact_allowlist_identity ... ok
+#10 25.50 test readonly_capabilities::tests::dynamic_tool_resolution_requires_snapshot_allowlist_identity ... ok
+#10 25.50 test readonly_capabilities::tests::dynamic_tools_require_an_explicit_readonly_descriptor ... ok
+#10 25.50 test readonly_capabilities::tests::discovery_is_metadata_bound_and_stably_sorted ... ok
+#10 25.50 test readonly_capabilities::tests::native_child_controls_never_resolve_as_dynamic_worker_tools ... ok
+#10 25.50 test readonly_capabilities::tests::missing_effect_metadata_is_not_visible ... ok
+#10 25.50 test readonly_capabilities::tests::render_turn_input_rejects_foreign_payload_and_marks_context ... ok
+#10 25.50 test readonly_capabilities::tests::render_turn_input_does_not_dump_tool_catalogs ... ok
+#10 25.50 test readonly_capabilities::tests::tenant_and_revision_mismatch_fail_closed ... ok
+#10 25.50 test readonly_capabilities::tests::unified_projection_keeps_external_data_non_authoritative ... ok
+#10 25.50 test readonly_capabilities::tests::write_descriptor_is_not_visible ... ok
+#10 25.50 test tool_lifecycle::tests::consumed_approval_id_cannot_be_published_again ... ok
+#10 25.50 test tool_lifecycle::tests::crash_recovery_times_out_dispatched_reads ... ok
+#10 25.50 test tool_lifecycle::tests::dispatch_fence_and_terminal_result_are_idempotent ... ok
+#10 25.50 test tool_lifecycle::tests::duplicate_call_id_cannot_change_arguments_or_effect ... ok
+#10 25.50 test tool_lifecycle::tests::interruption_closes_undispatched_and_unknown_effects_without_retry ... ok
+#10 25.50 test tool_lifecycle::tests::write_requires_exact_one_time_approval ... ok
+#10 25.50 test tool_policy::tests::absent_legacy_policy_is_never_unrestricted ... ok
+#10 25.50 test tool_policy::tests::namespace_identity_survives_policy_normalization ... ok
+#10 25.50 test tool_policy::tests::native_search_needs_authority_not_a_model_capability_flag ... ok
+#10 25.50 test tool_policy::tests::resume_can_narrow_but_cannot_widen_original_ceiling ... ok
+#10 25.53 test trace_context::tests::arc05_filters_untrusted_headers_and_adds_correlations ... ok
+#10 25.53 test v1_projector::tests::native_subagent_completion_is_separate_from_spawn_acceptance ... ok
+#10 25.53 test v1_projector::tests::non_successful_tool_statuses_are_projected_as_failures ... ok
+#10 25.53 test v1_projector::tests::same_named_dynamic_tools_keep_distinct_namespaces ... ok
+#10 25.53 test v1_projector_tests::collaboration_item_projects_stable_child_lifecycle ... ok
+#10 25.53 test v1_projector_tests::dynamic_tool_item_projects_one_start_and_one_terminal_pair ... ok
+#10 25.53 test v1_projector_tests::hosted_web_search_completion_projects_success_without_a_status_field ... ok
+#10 25.53 test v1_projector_tests::turn_terminal_status_maps_to_one_v1_terminal_envelope ... ok
+#10 25.53 test v1_projector_tests::visible_text_and_reasoning_summary_map_without_raw_reasoning ... ok
+#10 25.76 test tests::kernel_uses_agent_thread_lifecycle_with_platform_store ... ok
+#10 25.76
+#10 25.76 test result: ok. 78 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.52s
+#10 25.76
+#10 27.19     Finished `dev-small` profile [unoptimized] target(s) in 1.31s
+#10 27.20      Running unittests src/lib.rs (target/dev-small/deps/ai_platform_capability_worker-569bcf54f14ae73f)
+#10 27.23
+#10 27.23 running 81 tests
+#10 27.23 test attachment_capabilities::tests::endpoint_has_no_caller_controlled_path ... ok
+#10 27.23 test attachment_capabilities::tests::rejects_path_like_attachment_ids_and_unbounded_reads ... ok
+#10 27.23 test confluence_write_broker::tests::envelope_contains_no_credential_and_uses_fixed_path ... ok
+#10 27.23 test attachment_capabilities::tests::omitted_max_chars_uses_bounded_default ... ok
+#10 27.23 test confluence_write_broker::tests::upstream_5xx_is_side_effect_unknown_but_4xx_is_definitive ... ok
+#10 27.24 test external_write_capabilities::tests::confluence_requires_verified_binding_and_rejects_secret_or_url_fields ... ok
+#10 27.24 test external_write_capabilities::tests::four_x_is_definitive_failure_and_unknown_is_not_retried ... ok
+#10 27.24 test external_write_capabilities::tests::broker_receives_original_arguments_when_defaults_are_omitted ... ok
+#10 27.24 test external_write_capabilities::tests::validates_scope_and_args_before_broker_call ... ok
+#10 27.24 test external_write_capabilities::tests::strict_image_quiz_and_confluence_shapes ... ok
+#10 27.25 test http_service::tests::cloned_state_shares_the_same_immutable_registry ... ok
+#10 27.26 test http_service::tests::arc05_readiness_uses_store_and_reports_optional_capabilities ... ok
+#10 27.26 test http_service::tests::declarative_kind_tag_binds_snapshot_capability_type ... ok
+#10 27.26 test http_service::tests::deterministic_event_ids_are_distinct ... ok
+#10 27.26 test http_service::tests::dynamic_descriptor_schema_and_connector_tampering_is_rejected ... ok
+#10 27.26 test http_service::tests::dynamic_mcp_descriptor_is_accepted_without_static_catalog_entry ... ok
+#10 27.26 test http_service::tests::event_payload_limit_is_bounded ... ok
+#10 27.26 test http_service::tests::default_registry_hides_fixtures_and_unimplemented_capabilities ... ok
+#10 27.26 test http_service::tests::fixture_flag_adds_only_the_two_contract_fixtures ... ok
+#10 27.26 test image_write_broker::tests::endpoint_is_fixed_to_private_image_route ... ok
+#10 27.27 test image_write_broker::tests::envelope_contains_no_provider_secret_or_binary ... ok
+#10 27.27 test image_write_broker::tests::upstream_status_classification_preserves_unknown_effect ... ok
+#10 27.27 test local_node_broker::tests::approval_and_arguments_are_bound_before_dispatch ... ok
+#10 27.27 test local_node_broker::tests::catalog_is_exactly_three_platform_capabilities ... ok
+#10 27.27 test local_node_broker::tests::disconnect_after_dispatch_is_not_retryable_success ... ok
+#10 27.27 test local_node_broker::tests::successful_receipt_is_the_only_success_signal ... ok
+#10 27.27 test office_artifact_broker::tests::rejects_untrusted_endpoint_and_invalid_content ... ok
+#10 27.27 test http_service::tests::write_flag_exposes_only_implemented_writers ... ok
+#10 27.29 test office_capabilities::tests::invalid_store_metadata_is_side_effect_unknown ... ok
+#10 27.29 test office_capabilities::tests::rejects_argument_hash_mismatch_before_render_or_store ... ok
+#10 27.29 test office_capabilities::tests::renders_and_persists_public_output_without_fake_url ... ok
+#10 27.29 test office_capabilities::tests::replay_uses_store_idempotency_key ... ok
+#10 27.29 test platform_catalog::tests::checked_in_catalog_loads ... ok
+#10 27.30 test platform_catalog::tests::every_checked_in_record_projects_to_a_valid_descriptor ... ok
+#10 27.30 test platform_catalog::tests::metadata_category_and_permissions_fail_closed ... ok
+#10 27.30 test platform_catalog::tests::worker_registry_contains_only_implemented_read_capabilities ... ok
+#10 27.31 test platform_catalog::tests::worker_registry_exposes_implemented_writers_only_when_enabled ... ok
+#10 27.31 test python_artifact_broker::tests::body_is_the_strict_gateway_contract_without_scope_or_raw_extras ... ok
+#10 27.31 test python_artifact_broker::tests::later_rejection_after_a_persisted_artifact_is_side_effect_unknown ... ok
+#10 27.31 test python_artifact_broker::tests::only_a_first_deterministic_client_rejection_is_failed ... ok
+#10 27.31 test python_artifact_broker::tests::persistence_keeps_order_and_uses_durable_execution_scope ... ok
+#10 27.35 test python_artifact_broker::tests::proof_binds_the_durable_execution_id_not_a_lease_id ... ok
+#10 27.35 test python_artifact_broker::tests::terminal_payload_replaces_raw_output_files_with_compact_artifacts ... ok
+#10 27.35 test python_code_execution::tests::collects_files_from_the_compatibility_output_directory ... ok
+#10 27.35 test python_code_execution::tests::empty_limits_object_uses_bounded_defaults ... ok
+#10 27.35 test python_code_execution::tests::lexical_guard_is_not_fooled_by_literals ... ok
+#10 27.35 test python_code_execution::tests::linux_network_isolation_uses_an_unprivileged_namespace_wrapper ... ok
+#10 27.35 test python_code_execution::tests::request_rejects_paths_and_unbounded_limits ... ok
+#10 27.35 test quiz_capabilities::tests::catalog_hash_and_strict_shape_are_enforced ... ok
+#10 27.35 test quiz_capabilities::tests::postgres_contract_fixture_is_opt_in ... ignored, requires a disposable PostgreSQL database with migration 096
+#10 27.35 test quiz_capabilities::tests::question_semantics_are_fail_closed ... ok
+#10 27.35 test quiz_capabilities::tests::success_payload_never_contains_answers ... ok
+#10 27.35 test read_capabilities::fs::tests::html_extraction_does_not_preserve_tags ... ok
+#10 27.35 test read_capabilities::fs::tests::private_addresses_are_rejected ... ok
+#10 27.35 test read_capabilities::fs::tests::root_relative_open_rejects_replaced_file_symlink ... ok
+#10 27.35 test read_capabilities::fs::tests::root_relative_open_rejects_symlinked_parent_escape ... ok
+#10 27.35 test read_capabilities::proof::capability_proof_tests::ipv4_mapped_and_transition_v6_are_not_public ... ok
+#10 27.35 test read_capabilities::proof::capability_proof_tests::matches_python_capability_proof_fixture ... ok
+#10 27.35 test read_capabilities::proof::capability_proof_tests::observed_private_peer_is_never_masked_by_a_public_pin ... ok
+#10 27.35 test read_capabilities::proof::capability_proof_tests::pinned_public_peer_survives_missing_remote_addr ... ok
+#10 27.35 test tests::an_active_read_claim_cannot_be_replayed_until_its_lease_expires ... ok
+#10 27.35 test tests::claimed_write_is_terminalized_once_as_side_effect_unknown ... ok
+#10 27.35 test tests::event_pages_never_advance_more_than_one_event ... ok
+#10 27.35 test tests::expired_worker_lease_cannot_be_renewed_by_the_same_fence ... ok
+#10 27.35 test tests::lease_renewal_is_bound_to_the_current_dispatch_fence ... ok
+#10 27.35 test tests::published_write_is_claimable_but_active_claim_is_not_recovered ... ok
+#10 27.35 test tests::reserve_is_idempotent_and_scope_is_closed ... ok
+#10 27.35 test tests::runtime_binding_requires_exact_identity_and_scope ... ok
+#10 27.37 test office_capabilities::tests::pdf_uses_the_controlled_embedded_font_pack ... ok
+#10 27.37 test write_capabilities::tests::advisory_lock_identity_is_length_delimited_and_nul_free ... ok
+#10 27.37 test write_capabilities::tests::new_session_starts_with_a_complete_owner_bound_v2_envelope ... ok
+#10 27.37 test write_capabilities::tests::one_executor_does_not_reuse_another_request_principal ... ok
+#10 27.37 test write_capabilities::tests::todo_replacement_archives_previous_state_and_rejects_wrong_owner ... ok
+#10 27.37 test write_capabilities::tests::todo_write_does_not_require_long_term_memory_policy ... ok
+#10 27.37 test write_capabilities::tests::todo_write_rejects_unbounded_or_unknown_items ... ok
+#10 27.37 test write_capabilities::tests::todo_write_validates_and_preserves_order ... ok
+#10 27.37 test write_capabilities::tests::user_memory_delete_is_owner_scoped_and_non_retrying ... ok
+#10 27.37 test write_capabilities::tests::user_memory_requires_immutable_binding_and_cannot_raise_authority ... ok
+#10 27.37 test write_capabilities::tests::user_memory_sanitizes_and_enforces_profile ... ok
+#10 27.37 test write_capabilities::uncertainty_tests::database_failures_are_side_effect_uncertain ... ok
+#10 27.38 test trace_context::tests::arc05_task_scope_propagates_only_valid_headers ... ok
+#10 27.38
+#10 27.38 test result: ok. 80 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.15s
+#10 27.38
+#10 DONE 27.7s
+
+#11 [recovery-tests 1/1] RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked     --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked     --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked     RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTFLAGS="-C link-arg=-fuse-ld=lld"     cargo test --locked --profile dev-small -p codex-core --test durable_recovery recover_turn_preserves_model_lease_metadata_and_replacement_owner     && RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTFLAGS="-C link-arg=-fuse-ld=lld"        cargo test --locked --profile dev-small -p codex-core --test durable_recovery root_turn_suspension_preserves_unfinished_turn_history
+#11 1.369     Finished `dev-small` profile [unoptimized] target(s) in 1.07s
+#11 1.392      Running tests/durable_recovery.rs (target/dev-small/deps/durable_recovery-d6765bba22f0b064)
+#11 1.440
+#11 1.440 running 1 test
+#11 1.830 test recover_turn_preserves_model_lease_metadata_and_replacement_owner ... ok
+#11 1.830
+#11 1.830 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.39s
+#11 1.830
+#11 2.268     Finished `dev-small` profile [unoptimized] target(s) in 0.41s
+#11 2.289      Running tests/durable_recovery.rs (target/dev-small/deps/durable_recovery-d6765bba22f0b064)
+#11 2.293
+#11 2.293 running 1 test
+#11 2.528 test root_turn_suspension_preserves_unfinished_turn_history ... ok
+#11 2.528
+#11 2.528 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.23s
+#11 2.528
+#11 DONE 2.6s
+
+#12 exporting to image
+#12 exporting layers
+#12 exporting layers 5.3s done
+#12 exporting manifest sha256:5469d7e10bc14e2484ad95862af7415d5ee10cca7056ef506360749f2f5f42f1 done
+#12 exporting config sha256:6cee81f5c9faac290d9d445d07a0e152c33dc5685fe471368a195796ce805769 done
+#12 exporting attestation manifest sha256:afe8ce17124efb9a3b5dd68f5e70a2c22cb86b395310076b2fdc5e7f515544ec done
+#12 exporting manifest list sha256:3c3766ebfaa84b85011684f8b5f541546600ad6791aaa107f9705ebc87c28c5b done
+#12 naming to moby-dangling@sha256:3c3766ebfaa84b85011684f8b5f541546600ad6791aaa107f9705ebc87c28c5b done
+#12 unpacking to moby-dangling@sha256:3c3766ebfaa84b85011684f8b5f541546600ad6791aaa107f9705ebc87c28c5b
+#12 unpacking to moby-dangling@sha256:3c3766ebfaa84b85011684f8b5f541546600ad6791aaa107f9705ebc87c28c5b 1.5s done
+#12 DONE 6.9s

@@ -114,6 +114,31 @@ pub async fn execute_capability(
     approval_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<CapabilityExecutionOutcome, CapabilityExecutionError> {
+    execute_capability_with_existing(
+        worker,
+        identity,
+        binding,
+        params,
+        secret,
+        expected_effect,
+        approval_id,
+        cancel,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn execute_capability_with_existing(
+    worker: &CapabilityWorkerClient,
+    identity: &PlatformThreadIdentity,
+    binding: &ReadonlyCapabilityBinding,
+    params: &DynamicToolCallParams,
+    secret: &[u8],
+    expected_effect: CapabilityEffect,
+    approval_id: Option<&str>,
+    cancel: &CancellationToken,
+    existing_execution_id: Option<&str>,
+) -> Result<CapabilityExecutionOutcome, CapabilityExecutionError> {
     if cancel.is_cancelled() {
         return Ok(cancelled_before_dispatch());
     }
@@ -238,7 +263,10 @@ pub async fn execute_capability(
                 side_effect_unknown()
             });
         }
-        result = worker.create(&scope, &request) => result,
+        result = async {
+            if let Some(execution_id)=existing_execution_id { worker.get(&scope,execution_id).await }
+            else { worker.create(&scope,&request).await }
+        } => result,
     };
     let execution = match creation {
         Ok(execution) => execution,

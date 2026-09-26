@@ -280,7 +280,8 @@ fn normalize_bound_arguments(
     let arguments: AttachmentReadArguments =
         serde_json::from_value(raw_arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
     arguments.validate()?;
-    let body = serde_json::to_value(&arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
+    let body =
+        serde_json::to_value(&arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
     Ok((arguments, body))
 }
 
@@ -361,8 +362,7 @@ mod tests {
             "attachment_id": "art_1111111111111111", "operation": "content"
         });
         let hash = canonical_json_hash(&raw).unwrap();
-        let (args, body) =
-            normalize_bound_arguments(raw, &hash).expect("raw lease remains valid");
+        let (args, body) = normalize_bound_arguments(raw, &hash).expect("raw lease remains valid");
         assert_eq!(args.max_chars, 100_000);
         assert_eq!(body["max_chars"], 100_000);
         assert!(args.validate().is_ok());

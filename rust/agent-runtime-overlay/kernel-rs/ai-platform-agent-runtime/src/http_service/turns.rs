@@ -17,7 +17,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::openai_models::ReasoningEffort;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use uuid::Uuid;
@@ -36,23 +36,23 @@ use crate::readonly_capabilities::RuntimeCapabilityScope;
 use crate::readonly_capabilities::render_turn_input;
 use crate::readonly_capabilities::validate_platform_config;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct StartTurnRequest {
-    run_id: Uuid,
-    snapshot_id: Uuid,
-    lease_id: Uuid,
-    lease_signature: String,
-    message: String,
+    pub(super) run_id: Uuid,
+    pub(super) snapshot_id: Uuid,
+    pub(super) lease_id: Uuid,
+    pub(super) lease_signature: String,
+    pub(super) message: String,
     #[serde(default)]
-    images: Vec<String>,
-    model: String,
-    effort: Option<String>,
-    capability_revision: i64,
+    pub(super) images: Vec<String>,
+    pub(super) model: String,
+    pub(super) effort: Option<String>,
+    pub(super) capability_revision: i64,
     #[serde(default)]
-    readonly: Option<serde_json::Value>,
+    pub(super) readonly: Option<serde_json::Value>,
     #[serde(default)]
-    platform_config: Option<serde_json::Value>,
+    pub(super) platform_config: Option<serde_json::Value>,
 }
 
 pub(super) async fn start_turn(
@@ -60,6 +60,16 @@ pub(super) async fn start_turn(
     Path(thread_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<StartTurnRequest>,
+) -> Result<Json<TurnStartResponse>, RuntimeError> {
+    start_turn_mode(State(state), Path(thread_id), headers, Json(body), false).await
+}
+
+pub(super) async fn start_turn_mode(
+    State(state): State<RuntimeHttpState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<StartTurnRequest>,
+    recovery: bool,
 ) -> Result<Json<TurnStartResponse>, RuntimeError> {
     let thread_id = authorize_thread_scope(&state, &headers, &thread_id).await?;
     state
@@ -165,6 +175,24 @@ pub(super) async fn start_turn(
     if !authorized {
         return Err(RuntimeError::not_found("runtime_turn_lease_not_found"));
     }
+    if !recovery && state.store.execution_claim(body.run_id).is_none() {
+        state
+            .store
+            .claim_execution(
+                body.run_id,
+                Some(
+                    serde_json::to_value(&body)
+                        .map_err(|_| RuntimeError::bad_request("invalid_turn_context"))?,
+                ),
+            )
+            .await
+            .map_err(RuntimeError::from_store)?;
+    }
+    let execution_claim = state
+        .store
+        .assert_execution(body.run_id)
+        .await
+        .map_err(RuntimeError::from_store)?;
     if let Some(payload) = body.readonly.clone() {
         let mut bindings = state
             .readonly_by_turn
@@ -194,6 +222,14 @@ pub(super) async fn start_turn(
 
     let mut metadata = std::collections::HashMap::new();
     metadata.insert(
+        "ai_platform_execution_owner".to_string(),
+        execution_claim.owner_id.to_string(),
+    );
+    metadata.insert(
+        "ai_platform_execution_fence".to_string(),
+        execution_claim.fence.to_string(),
+    );
+    metadata.insert(
         "ai_platform_lease_id".to_string(),
         body.lease_id.to_string(),
     );
@@ -206,14 +242,17 @@ pub(super) async fn start_turn(
         runtime_scope_sha256(&tenant_id, &user_id, &session_id),
     );
     trace_context.extend_model_metadata(&mut metadata, &body.run_id.to_string());
-    let mut input = vec![UserInput::Text {
-        text: body.message,
-        text_elements: Vec::new(),
-    }];
-    input.extend(body.images.into_iter().map(|image_url| UserInput::Image {
-        image: ImageReference::Inline { url: image_url },
-        detail: None,
-    }));
+    let mut input = Vec::new();
+    if !recovery {
+        input.push(UserInput::Text {
+            text: body.message,
+            text_elements: Vec::new(),
+        });
+        input.extend(body.images.into_iter().map(|image_url| UserInput::Image {
+            image: ImageReference::Inline { url: image_url },
+            detail: None,
+        }));
+    }
     let additional_context = readonly_input.flatten().map(|value| {
         HashMap::from([(
             "ai_platform_readonly".to_string(),
@@ -243,7 +282,15 @@ pub(super) async fn start_turn(
                 request_id: RequestId::String(format!("turn-start-{}", body.run_id)),
                 params,
             },
-            codex_app_server::host_runtime::AppServerTurnStartOptions::new(body.run_id.to_string()),
+            if recovery {
+                codex_app_server::host_runtime::AppServerTurnStartOptions::recovery(
+                    body.run_id.to_string(),
+                )
+            } else {
+                codex_app_server::host_runtime::AppServerTurnStartOptions::new(
+                    body.run_id.to_string(),
+                )
+            },
         )
         .await
         .map_err(|_| RuntimeError::unavailable("agent_kernel_unavailable"))?
@@ -277,7 +324,9 @@ fn validate_start_turn_request(body: &StartTurnRequest) -> Result<(), RuntimeErr
 }
 
 fn valid_inline_image(image: &str) -> bool {
-    let Some((header, encoded)) = image.split_once(',') else { return false };
+    let Some((header, encoded)) = image.split_once(',') else {
+        return false;
+    };
     let magic = match header {
         "data:image/png;base64" => "iVBORw0KGgo",
         "data:image/jpeg;base64" => "/9j/",
@@ -289,9 +338,9 @@ fn valid_inline_image(image: &str) -> bool {
         && encoded.len() <= 3 * 1024 * 1024
         && encoded.len() % 4 == 0
         && encoded.starts_with(magic)
-        && encoded.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
-        })
+        && encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
 }
 
 fn parse_reasoning_effort(value: &str) -> Result<ReasoningEffort, RuntimeError> {
@@ -531,6 +580,7 @@ mod turn_request_tests {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
