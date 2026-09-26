@@ -173,7 +173,6 @@ export function isFileTypeSupported(file: File): boolean {
   const supportedExtensions = [
     ".pdf",
     ".docx",
-    ".doc",
     ".md",
     ".txt",
     ".csv",
@@ -183,7 +182,6 @@ export function isFileTypeSupported(file: File): boolean {
     ".jpeg",
     ".gif",
     ".webp",
-    ".bmp",
   ];
 
   const ext = "." + file.name.split(".").pop()?.toLowerCase();

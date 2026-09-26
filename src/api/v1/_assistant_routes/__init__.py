@@ -8,6 +8,6 @@ modules must not import each other as libraries — shared helpers live in
 
 from __future__ import annotations
 
-from . import artifacts, catalog, chat, metrics, runs, sessions
+from . import artifacts, catalog, chat, memory, metrics, runs, sessions, tools
 
-__all__ = ["artifacts", "catalog", "chat", "metrics", "runs", "sessions"]
+__all__ = ["artifacts", "catalog", "chat", "memory", "metrics", "runs", "sessions", "tools"]

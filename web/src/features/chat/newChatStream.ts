@@ -75,6 +75,15 @@ export function acceptPendingRunSession(args: {
   return args.requestedSessionId;
 }
 
+export function confirmsAssistantRunAdmission(args: {
+  requestedSessionId: string;
+  eventSessionId?: string;
+  isResume: boolean;
+}): boolean {
+  return !args.isResume &&
+    (!args.eventSessionId || args.eventSessionId === args.requestedSessionId);
+}
+
 export function startChatWithoutAwaitingSessionCreate<TStream>(args: {
   sessionId: string;
   isNew: boolean;

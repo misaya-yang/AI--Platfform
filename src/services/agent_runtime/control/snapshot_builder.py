@@ -12,6 +12,7 @@ calling conventions.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from hashlib import sha256
@@ -25,6 +26,7 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+_ARTIFACT_REF = re.compile(r"art_[0-9a-f]{16}\Z")
 
 
 def runtime_model_config(
@@ -412,17 +414,17 @@ def attachment_tool_descriptor(
     schema = {
         "type": "object",
         "properties": {
-            "ref": {"type": "string", "enum": references},
-            "offset": {"type": "integer", "minimum": 0, "maximum": 2_000_000},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 8_000},
+            "attachment_id": {"type": "string", "enum": references},
+            "operation": {"type": "string", "enum": ["metadata", "content"]},
+            "max_chars": {"type": "integer", "minimum": 1, "maximum": 500_000},
         },
-        "required": ["ref"],
+        "required": ["attachment_id", "operation", "max_chars"],
         "additionalProperties": False,
     }
     schema_hash = "sha256:" + sha256(canonical_runtime_json(schema).encode()).hexdigest()
     return {
         "name": "read_attachment",
-        "description": "Read a bounded slice from an explicitly attached artifact reference.",
+        "description": "Read metadata or bounded content from an explicitly attached artifact ID.",
         "schema": schema,
         "tenant_id": tenant_id,
         "capability_revision": capability_revision,
@@ -454,31 +456,15 @@ def attach_read_attachment_descriptors(
         and item["payload"].get("content_ref")
     ]
     references = sorted(set(refs))
-    descriptors = (
-        [
-            descriptor_factory(
-                tenant_id=tenant_id,
-                capability_revision=capability_revision,
-                references=references,
-            )
-        ]
-        if references
-        else []
-    )
-    readonly["attachment_tools"] = descriptors
-    if descriptors:
-        entries = list(readonly.get("capability_allowlist") or [])
-        for descriptor in descriptors:
-            entries.append(
-                {
-                    "type": "platform",
-                    "name": descriptor["name"],
-                    "id": descriptor["id"],
-                    "version": descriptor["version"],
-                    "schema_hash": descriptor["schema_hash"],
-                }
-            )
-        readonly["capability_allowlist"] = entries
+    # The Worker owns one fixed read_attachment schema/hash. A second dynamic
+    # descriptor with a per-turn enum collides with that catalog entry and
+    # cannot pass the Worker's descriptor equality check. Bound IDs remain in
+    # immutable readonly.items; Runtime checks each tool argument against it.
+    if any(not _ARTIFACT_REF.fullmatch(reference) for reference in references):
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_ATTACHMENT_INVALID", status_code=422
+        )
+    readonly["attachment_tools"] = []
 
 
 def readonly_capability_payload(

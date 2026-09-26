@@ -35,7 +35,7 @@ async def fetch_approval_run_owner(
     try:
         return await database.fetchrow(
             """
-            SELECT r.engine, r.session_id
+            SELECT r.engine, r.session_id, r.harness_thread_id
               FROM assistant_tool_approvals AS a
               JOIN assistant_runs AS r ON r.run_id = a.run_id
              WHERE a.approval_id = $1::uuid

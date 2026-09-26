@@ -117,7 +117,7 @@ def visible_assistant_models(user: UserContext, rows: Any) -> list[dict[str, Any
         rows = list(rows or [])
     visible: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict) or not bool(row.get("is_enabled", True)):
+        if not isinstance(row, dict) or row.get("is_enabled") is not True:
             continue
         row_tenant_id = row.get("tenant_id")
         if row_tenant_id is not None and str(row_tenant_id) != (user.tenant_id or "default"):

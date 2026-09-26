@@ -111,14 +111,31 @@ def _responses_input_to_messages(
             role = "user" if item_type == "agent_message" else item.get("role")
             if role not in {"user", "assistant", "developer", "system"}:
                 continue
+            raw_content = item.get("content")
             text = (
-                _helpers._content_text(item.get("content"))
+                _helpers._content_text(raw_content)
                 if _helpers is not None
-                else _content_text(item.get("content"))
+                else _content_text(raw_content)
             )
-            if text:
+            images = [
+                part.get("image_url")
+                for part in raw_content
+                if isinstance(part, Mapping) and part.get("type") == "input_image"
+            ] if isinstance(raw_content, list) else []
+            if images and (
+                role != "user"
+                or any(not isinstance(url, str) or not url.startswith(("data:image/", "https://")) for url in images)
+            ):
+                raise AgentModelPlaneError("RUNTIME_IMAGE_INPUT_INVALID")
+            if text or images:
+                content: str | list[dict[str, Any]] = text
+                if images:
+                    content = [
+                        *([{"type": "text", "text": text}] if text else []),
+                        *[{"type": "image_url", "image_url": {"url": url}} for url in images],
+                    ]
                 messages.append(
-                    {"role": "system" if role == "developer" else role, "content": text}
+                    {"role": "system" if role == "developer" else role, "content": content}
                 )
             continue
         # Reasoning items are provider-owned opaque state. They are never

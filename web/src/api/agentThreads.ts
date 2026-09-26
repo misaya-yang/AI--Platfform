@@ -11,6 +11,7 @@ import {
   projectAgentV2Events,
   reduceRuntimeV2RunSnapshot,
   shouldReconnectRuntimeV2Stream,
+  ASSISTANT_VIEW_DETACH_REASON,
   withAfterSequence,
   type AgentV2Event,
   type RuntimeV2RunSnapshot,
@@ -72,6 +73,28 @@ export async function decideAgentRuntimeApproval(
   const { data } = await api.post(
     `/api/v2/agent/threads/${encodeURIComponent(threadId)}/approvals/${encodeURIComponent(approvalId)}/decision`,
     { approved, ...(reason ? { reason } : {}) },
+  );
+  return data;
+}
+
+export interface AgentApprovalPreview {
+  can_approve: boolean;
+  reason?: string;
+  tool_name?: string;
+  effect?: string;
+  target?: string;
+  parameters?: Array<{ name: string; value: string }>;
+  authorization_scope: string;
+  expires_in_seconds?: number;
+  arguments_hash?: string;
+}
+
+export async function getAgentRuntimeApproval(
+  threadId: string,
+  approvalId: string,
+): Promise<{ approval: { status: string; tool_name?: string }; preview: AgentApprovalPreview }> {
+  const { data } = await api.get(
+    `/api/v2/agent/threads/${encodeURIComponent(threadId)}/approvals/${encodeURIComponent(approvalId)}`,
   );
   return data;
 }
@@ -174,7 +197,11 @@ export async function* streamAgentRuntimeV2(
     // A dropped transport reconnects above. An explicit caller abort is a real
     // cancellation even while approval is pending; otherwise the durable run
     // would survive while the restored UI exposed a no-op Stop button.
-    if (!terminal && turn.id && (signal?.aborted || !awaitingApproval)) {
+    if (
+      !terminal && turn.id &&
+      signal?.reason !== ASSISTANT_VIEW_DETACH_REASON &&
+      (signal?.aborted || !awaitingApproval)
+    ) {
       await interruptAgentTurn(thread.thread_id, turn.id, "client_disconnect").catch(() => undefined);
     }
   }

@@ -387,3 +387,7 @@ export function shouldReconnectRuntimeV2Stream(error: unknown): boolean {
   const code = Number.parseInt(status, 10);
   return code === 408 || code === 425 || code === 429 || code >= 500;
 }
+
+// Closing an assistant view is a transport-only operation. The durable turn
+// continues; only an explicit Stop may interrupt it.
+export const ASSISTANT_VIEW_DETACH_REASON = "assistant_view_detach";

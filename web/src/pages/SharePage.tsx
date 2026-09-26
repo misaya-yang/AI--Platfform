@@ -81,7 +81,9 @@ export function SharePage() {
         if (!resp.ok) {
           throw new Error(
             resp.status === 404
-              ? "Conversation not found or expired"
+              ? "This share link was revoked or was not found"
+              : resp.status === 410
+                ? "This share link expired or needs the owner to review its source rights"
               : "Failed to load shared conversation",
           );
         }
@@ -123,7 +125,7 @@ export function SharePage() {
             {error || "Conversation not found"}
           </h1>
           <p className="text-[13px] text-[hsl(var(--assistant-text-secondary))]">
-            This shared conversation may have expired or been removed.
+            Ask the owner for a new link if you still need access.
           </p>
         </div>
       </div>

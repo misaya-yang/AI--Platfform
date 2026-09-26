@@ -100,6 +100,8 @@ async def list_session_artifacts(
         # Generate presigned download URLs
         artifact_list = []
         for art in artifacts:
+            if art.source == "user" or getattr(art, "variant", "raw") != "raw":
+                continue
             raw_download_url = await artifact_storage.get_presigned_download_url(art)
             download_url = _browser_artifact_download_url(
                 raw_download_url,
@@ -114,6 +116,9 @@ async def list_session_artifacts(
                     title=art.title,
                     filename=art.filename,
                     size_bytes=art.size_bytes,
+                    ready=art.size_bytes > 0,
+                    variant=getattr(art, "variant", "raw"),
+                    parent_artifact_id=getattr(art, "parent_artifact_id", None),
                     mime_type=art.mime_type,
                     source=art.source,
                     message_id=art.message_id,

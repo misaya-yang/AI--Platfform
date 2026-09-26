@@ -73,6 +73,7 @@ export function QuickActionsMenu({
               : "hover:bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]"
           )}
           disabled={disabled}
+          aria-label={t("assistant.addFilesAndSources", "Add files and sources")}
         >
           <motion.div
             animate={{ rotate: open ? 45 : 0 }}
@@ -231,6 +232,7 @@ export function QuickActionsMenu({
                     <button
                       key={dataset.dataset_id}
                       onClick={() => onToggleDataset(dataset.dataset_id)}
+                      aria-pressed={isSelected}
                       className={cn(
                         "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left",
                         isSelected

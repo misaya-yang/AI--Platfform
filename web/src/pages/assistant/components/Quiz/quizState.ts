@@ -41,6 +41,7 @@ export interface PersistedQuizStateV2 {
   currentIndex: number;
   result?: QuizAttemptResult;
   submittedAt?: number;
+  attemptId?: string;
 }
 
 const STORAGE_PREFIX = "assistant:quiz:v1:";

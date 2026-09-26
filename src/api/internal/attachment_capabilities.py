@@ -15,6 +15,7 @@ import os
 import re
 import zipfile
 from typing import Any, Literal
+from xml.etree import ElementTree
 
 from ai_gateway_contracts.capability_proof import CapabilityProofError, verify_capability_proof
 from ai_gateway_core.storage import get_artifact_storage
@@ -133,12 +134,38 @@ def _safe_zip_members(raw: bytes) -> dict[str, bytes]:
 def _xml_text(raw: bytes) -> str:
     if len(raw) > _MAX_ZIP_MEMBER_BYTES:
         raise ValueError("XML member too large")
+    # OOXML text extraction needs no DTD/entity support. Reject both before
+    # the stdlib streaming parser, then bound depth, node count and text size.
+    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise ValueError("XML declarations are unsupported")
     try:
-        from defusedxml import ElementTree as SafeElementTree  # type: ignore[import-not-found]
-    except Exception as exc:
-        raise ValueError("safe XML parser unavailable") from exc
-    root = SafeElementTree.fromstring(raw)
-    return " ".join(text.strip() for text in root.itertext() if text and text.strip())
+        raw.decode("utf-8", errors="strict")
+        parser = ElementTree.XMLPullParser(events=("start", "end"))
+        depth = nodes = characters = 0
+        parts: list[str] = []
+        for offset in range(0, len(raw), 8192):
+            parser.feed(raw[offset:offset + 8192])
+            for event, element in parser.read_events():
+                if event == "start":
+                    depth += 1
+                    nodes += 1
+                    if depth > 64 or nodes > 100_000:
+                        raise ValueError("XML structure limit")
+                else:
+                    text = (element.text or "").strip()
+                    if text:
+                        characters += len(text)
+                        if characters > _MAX_CONTENT_CHARS:
+                            raise ValueError("XML text limit")
+                        parts.append(text)
+                    element.clear()
+                    depth -= 1
+        parser.close()
+        if depth != 0:
+            raise ValueError("XML structure invalid")
+    except (UnicodeDecodeError, ElementTree.ParseError) as exc:
+        raise ValueError("XML cannot be safely parsed") from exc
+    return " ".join(parts)
 
 
 def _image_metadata(raw: bytes, mime_type: str) -> dict[str, Any]:

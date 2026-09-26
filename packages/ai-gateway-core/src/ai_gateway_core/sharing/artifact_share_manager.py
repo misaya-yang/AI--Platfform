@@ -289,6 +289,27 @@ class ArtifactShareManager:
             "expires_at": expires_at,
         }
 
+    async def get_attempt_result(self, share_code: str, attempt_token: str) -> dict[str, Any] | None:
+        """Recover only the result bound to this active share and opaque token."""
+        share = await self.get_share_by_code(share_code)
+        if not share:
+            raise ShareUnavailableError("Share not found or expired")
+        if share["kind"] != "quiz" or not attempt_token:
+            raise AttemptInputError("Attempt token is required")
+        row = await self.db.fetchrow(
+            "SELECT a.id, a.result_payload FROM assistant.quiz_attempts AS a "
+            "JOIN assistant.artifact_share_attempt_tokens AS token "
+            "ON token.token_hash = a.attempt_token_hash "
+            "WHERE a.share_id = $1 AND token.token_hash = $2",
+            uuid.UUID(str(share["share_id"])), _token_hash(attempt_token),
+        )
+        if not row:
+            return None
+        payload = row["result_payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return {"attempt_id": str(row["id"]), **payload} if isinstance(payload, dict) else None
+
     async def submit_attempt(
         self,
         share_code: str,
@@ -302,14 +323,35 @@ class ArtifactShareManager:
         share = await self.get_share_by_code(share_code)
         if not share:
             raise ShareUnavailableError("Share not found or expired")
+        if share["kind"] == "quiz":
+            if not attempt_token or not attempt_token.strip():
+                raise AttemptInputError("An attempt token is required")
+            prior = await self.db.fetchrow(
+                "SELECT a.id, a.answers, a.display_name, a.result_payload "
+                "FROM assistant.quiz_attempts AS a "
+                "JOIN assistant.artifact_share_attempt_tokens AS token "
+                "ON token.token_hash = a.attempt_token_hash "
+                "WHERE a.share_id = $1 AND token.token_hash = $2",
+                uuid.UUID(str(share["share_id"])), _token_hash(attempt_token),
+            )
+            if prior:
+                old_answers = prior["answers"]
+                if isinstance(old_answers, str):
+                    old_answers = json.loads(old_answers)
+                if old_answers != answers or prior["display_name"] != display_name:
+                    raise AttemptConflictError("Attempt token belongs to another answer")
+                saved = prior["result_payload"]
+                if isinstance(saved, str):
+                    saved = json.loads(saved)
+                if not isinstance(saved, dict):
+                    raise AttemptConflictError("Attempt result is unavailable")
+                return {"attempt_id": str(prior["id"]), **saved, "cached": True}
         if share["max_attempts"] is not None and share["attempt_count"] >= share["max_attempts"]:
             raise AttemptLimitReachedError("Maximum attempts reached")
         if share["require_name"] and not display_name:
             raise AttemptInputError("This share requires a name before submitting")
         if share.get("time_limit_minutes") and not attempt_token:
             raise AttemptInputError("An attempt token is required for timed shares")
-        if attempt_token is not None and not attempt_token.strip():
-            raise AttemptInputError("Attempt token is invalid")
 
         result: dict[str, Any] = {}
         if share["kind"] == "quiz":
@@ -446,9 +488,9 @@ class ArtifactShareManager:
         try:
             row = await self.db.fetchrow(
                 """
-                SELECT attempt_id, started_at
-                FROM assistant.record_artifact_share_quiz_attempt(
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                SELECT attempt_id, result_payload
+                FROM assistant.record_artifact_share_quiz_attempt_v2(
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
                 )
                 """,
                 share["share_code"],
@@ -461,6 +503,7 @@ class ArtifactShareManager:
                 graded["correct_count"],
                 graded["total_count"],
                 client_ip,
+                json.dumps(graded, default=str),
             )
         except Exception as exc:
             record_internal_exception(
@@ -471,7 +514,12 @@ class ArtifactShareManager:
             _raise_typed_database_error(exc)
         if not row:
             raise ShareUnavailableError("Share not found or expired")
-        return {"attempt_id": str(row["attempt_id"]), **graded}
+        saved = row["result_payload"]
+        if isinstance(saved, str):
+            saved = json.loads(saved)
+        if not isinstance(saved, dict):
+            raise AttemptConflictError("Attempt result is unavailable")
+        return {"attempt_id": str(row["attempt_id"]), **saved}
 
     async def revoke_share(
         self,

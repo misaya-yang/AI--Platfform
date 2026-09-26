@@ -746,6 +746,7 @@ class ImageGenerationResponse(BaseModel):
     provider: str | None = Field(
         default=None, description="Provider used for generation (dashscope/google)"
     )
+    effective_model_id: str | None = Field(default=None, description="Configured image model used by the provider")
     duration_ms: float | None = Field(default=None, description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
     error_code: str | None = None
@@ -859,6 +860,7 @@ class AsyncImageTaskStatusResponse(BaseModel):
     prompt: str = Field(..., description="Original prompt")
     model_id: str = Field(..., description="Model used")
     provider: str | None = Field(default=None, description="Provider used")
+    effective_model_id: str | None = Field(default=None, description="Configured image model used by the provider")
     images: list[AsyncImageArtifact] = Field(
         default_factory=list, description="Generated images (when completed)"
     )

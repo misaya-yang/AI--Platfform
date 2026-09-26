@@ -97,6 +97,8 @@ def test_python_artifact_request_is_exact_and_accepts_null_mime() -> None:
         PythonArtifactRequest.model_validate({k: v for k, v in payload.items() if k != "mime_type"})
     with pytest.raises(ValidationError):
         PythonArtifactRequest.model_validate({**payload, "storage_key": "must-not-cross-boundary"})
+    with pytest.raises(ValidationError):
+        PythonArtifactRequest.model_validate(_artifact_payload(b""))
 
 
 def test_python_artifact_id_binds_the_complete_execution_identity() -> None:

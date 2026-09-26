@@ -116,7 +116,7 @@ Runtime/Worker builder cache or candidate images; never use broad prune commands
 
 ## 7. Providers and readiness
 
-- The default live chat provider is **DashScope/Qwen**, default model `qwen3.7-plus`.
+- The default live chat provider is **DashScope/Qwen**, default model `qwen3.8-flash`.
 - OpenAI is not the primary provider. An absent or invalid `OPENAI_API_KEY` is **not** a
   deployment blocker. The environment is blocked only when no usable
   `DASHSCOPE_CHAT_API_KEY` / `DASHSCOPE_API_KEY` is available, or the configured default Qwen

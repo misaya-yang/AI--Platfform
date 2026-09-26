@@ -134,6 +134,14 @@ async def fetch_capability_catalog(
         if capability_allowlist is not None else deferred,
         "responses_tool_names": None,
     }
+    # Keep the catalog maximum pinned at Thread creation, but expose the
+    # read_attachment tool only on turns that explicitly select an artifact.
+    has_attachment = any(
+        isinstance(item, dict) and item.get("kind") == "attachment"
+        for item in readonly.get("items", [])
+    )
+    if not has_attachment:
+        tools = [item for item in tools if item.get("name") != "read_attachment"]
     requested_tool_names = readonly.get("responses_tool_names")
     if requested_tool_names is not None:
         catalog_by_name: dict[str, list[tuple[str, dict[str, Any]]]] = {}

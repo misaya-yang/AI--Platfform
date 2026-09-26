@@ -134,6 +134,15 @@ def _rows() -> list[dict]:
             "is_enabled": False,
         },
         {
+            "model_id": "unverified-state",
+            "display_name": "Unverified state",
+            "provider_id": "qwen",
+            "access_level": "public",
+            "context_window": 128000,
+            "max_output_tokens": 8192,
+            "capability_revision": 1,
+        },
+        {
             "model_id": "corrupt-access",
             "display_name": "Corrupt",
             "provider_id": "qwen",
@@ -373,6 +382,8 @@ def test_policies_are_gateway_owned_and_tenant_scoped() -> None:
 
     assert response.status_code == 200
     assert response.json()["policies"]["blocked_tools"] == ["web_fetch"]
+    assert response.json()["policies"]["default_execution_profile"] == "safe"
+    assert response.json()["policies"]["supported_execution_profiles"] == ["safe"]
     assert response.json()["policies"]["high_risk_tools"] == [
         "system_run_lite",
         "browser_action_lite",

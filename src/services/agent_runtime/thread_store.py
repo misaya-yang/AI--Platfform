@@ -33,6 +33,67 @@ def _visible_message_text(text: str) -> str:
     return _READONLY_CONTEXT_DUMP.sub("", text).strip()
 
 
+def _safe_history_runtime_event(event: Any) -> Any:
+    """Expose terminal facts without forwarding Runtime error text to history clients."""
+
+    if not isinstance(event, dict) or event.get("event_type") not in {
+        "run_finished", "run_error", "cancelled", "side_effect_unknown"
+    }:
+        return event
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    safe_data: dict[str, Any] = {}
+    status = data.get("status")
+    if isinstance(status, str) and status in {"succeeded", "failed", "cancelled", "blocked"}:
+        safe_data["status"] = status
+    if (
+        status == "cancelled"
+        and data.get("error_code") == "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_ORPHANED"
+    ):
+        safe_data["terminal_reason"] = "runtime_restart_interrupted"
+    envelope = data.get("terminal_envelope")
+    if isinstance(envelope, dict) and envelope.get("exit_reason") == "side_effect_unknown":
+        safe_data["terminal_envelope"] = {"exit_reason": "side_effect_unknown"}
+    return {
+        "event_type": event["event_type"],
+        "data": safe_data,
+        "timestamp": event.get("timestamp"),
+    }
+
+
+def _project_knowledge_contexts(events: list[Any], allowed_datasets: dict[str, str]) -> list[dict[str, Any]]:
+    """Rebuild bounded source cards only for datasets still visible to this reader."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("event_type") != "context_retrieved":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("chunks"), list):
+            continue
+        for raw in data["chunks"][:50]:
+            if not isinstance(raw, dict):
+                continue
+            dataset_id = raw.get("dataset_id")
+            if not isinstance(dataset_id, str) or dataset_id not in allowed_datasets:
+                continue
+            content = raw.get("content")
+            if not isinstance(content, str):
+                continue
+            score = raw.get("score")
+            grouped.setdefault(dataset_id, []).append({
+                "content": content[:2000],
+                "score": float(score) if isinstance(score, (int, float)) else 0.0,
+                "metadata": {
+                    "document_id": raw.get("document_id") if isinstance(raw.get("document_id"), str) else None,
+                    "segment_id": raw.get("segment_id") if isinstance(raw.get("segment_id"), str) else None,
+                },
+            })
+    return [
+        {"dataset_id": dataset_id, "dataset_name": allowed_datasets[dataset_id],
+         "chunks": chunks[:20], "query": "", "took_ms": 0}
+        for dataset_id, chunks in grouped.items()
+    ]
+
+
 class ThreadStoreDatabase(Protocol):
     async def fetchrow(self, query: str, *args: Any): ...
 
@@ -196,6 +257,7 @@ class AgentThreadStore:
         user_id: str,
         runtime_thread_id: str,
         limit: int,
+        allowed_datasets: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         rows = await self.database.fetch(
             """
@@ -307,7 +369,12 @@ class AgentThreadStore:
                                       'compat/v1/subagent_finished',
                                       'compat/v1/plan_update',
                                       'compat/v1/context_compaction',
-                                      'compat/v1/memory_loaded'
+                                      'compat/v1/context_retrieved',
+                                      'compat/v1/memory_loaded',
+                                      'compat/v1/side_effect_unknown',
+                                      'compat/v1/run_finished',
+                                      'compat/v1/run_error',
+                                      'compat/v1/cancelled'
                                   )
                            ) AS runtime_events
                       FROM assistant_runtime_items AS item
@@ -372,7 +439,10 @@ class AgentThreadStore:
                                       'compat/v1/subagent_finished',
                                       'compat/v1/plan_update',
                                       'compat/v1/context_compaction',
+                                      'compat/v1/context_retrieved',
                                       'compat/v1/memory_loaded',
+                                      'compat/v1/side_effect_unknown',
+                                      'compat/v1/run_finished',
                                       'compat/v1/run_error',
                                       'compat/v1/cancelled'
                                   )
@@ -388,6 +458,8 @@ class AgentThreadStore:
                        AND delta.tenant_id = $2 AND delta.user_id = $3
                        AND delta.event_type IN (
                            'compat/v1/text_delta',
+                           'compat/v1/side_effect_unknown',
+                           'compat/v1/run_finished',
                            'compat/v1/run_error',
                            'compat/v1/cancelled'
                        )
@@ -423,7 +495,9 @@ class AgentThreadStore:
                          FROM jsonb_array_elements(
                              COALESCE(runtime_events, '[]'::jsonb)
                          ) AS terminal_event
-                        WHERE terminal_event ->> 'event_type' IN ('run_error', 'cancelled')
+                        WHERE terminal_event ->> 'event_type' IN (
+                            'side_effect_unknown', 'run_finished', 'run_error', 'cancelled'
+                        )
                    )
                )
              ORDER BY created_at DESC, sequence DESC NULLS LAST LIMIT $4
@@ -446,10 +520,30 @@ class AgentThreadStore:
                     runtime_events_value = json.loads(runtime_events_value)
                 except json.JSONDecodeError:
                     runtime_events_value = None
+            source_access_revoked = (
+                role == "assistant"
+                and isinstance(runtime_events_value, list)
+                and any(
+                    isinstance(event, dict)
+                    and event.get("event_type") == "context_retrieved"
+                    and isinstance(event.get("data"), dict)
+                    and isinstance(event["data"].get("chunks"), list)
+                    and any(
+                        isinstance(chunk, dict)
+                        and isinstance(chunk.get("dataset_id"), str)
+                        and chunk["dataset_id"] not in (allowed_datasets or {})
+                        for chunk in event["data"]["chunks"]
+                    )
+                    for event in runtime_events_value
+                )
+            )
+            if source_access_revoked:
+                text = ""
             has_terminal_runtime_event = isinstance(runtime_events_value, list) and any(
                 isinstance(event, dict)
                 and (
                     event.get("event_type") in {"run_error", "cancelled"}
+                    or event.get("event_type") in {"side_effect_unknown", "run_finished"}
                     or (
                         isinstance(event.get("data"), dict)
                         and event["data"].get("status") == "cancelled"
@@ -457,25 +551,44 @@ class AgentThreadStore:
                 )
                 for event in runtime_events_value
             )
-            if not text and not (role == "assistant" and has_terminal_runtime_event):
+            if not text and not (role == "assistant" and (has_terminal_runtime_event or source_access_revoked)):
                 continue
             created_at = row.get("created_at")
             metadata = {"runtime_run_id": row.get("run_id")}
+            if source_access_revoked:
+                metadata["source_access_revoked"] = True
             if row.get("sequence") is not None:
                 metadata["runtime_sequence"] = int(row["sequence"])
             thinking_content = row.get("thinking_content")
-            if role == "assistant" and isinstance(thinking_content, str) and thinking_content:
+            if role == "assistant" and not source_access_revoked and isinstance(thinking_content, str) and thinking_content:
                 metadata["thinking_content"] = thinking_content
             for key in ("tool_calls", "tool_results", "runtime_events"):
                 value = row.get(key)
                 if isinstance(value, str):
                     value = json.loads(value)
-                if role == "assistant" and isinstance(value, list) and value:
-                    metadata[key] = value
+                if role == "assistant" and isinstance(value, list) and value and (not source_access_revoked or key == "runtime_events"):
+                    if key == "runtime_events":
+                        contexts = _project_knowledge_contexts(value, allowed_datasets or {}) if not source_access_revoked else []
+                        if contexts:
+                            metadata["contexts"] = contexts
+                        value = [
+                            _safe_history_runtime_event(event)
+                            for event in value
+                            if isinstance(event, dict)
+                            and event.get("event_type") != "context_retrieved"
+                            and (
+                                not source_access_revoked
+                                or event.get("event_type") in {"run_finished", "run_error", "cancelled", "side_effect_unknown"}
+                            )
+                        ]
+                    if value:
+                        metadata[key] = value
             runtime_events = metadata.get("runtime_events")
             if role == "assistant" and isinstance(runtime_events, list):
                 steps: list[dict[str, Any]] = []
                 summary_status = "succeeded"
+                outcome_uncertain = False
+                terminal_reason: str | None = None
                 for runtime_event in runtime_events:
                     if not isinstance(runtime_event, dict):
                         continue
@@ -518,15 +631,25 @@ class AgentThreadStore:
                                 "status": "completed",
                             }
                         )
+                    elif event_type == "side_effect_unknown":
+                        summary_status = "failed"
+                        outcome_uncertain = True
                     elif event_type in {"run_error", "cancelled"}:
                         summary_status = "failed"
                         if event_type == "cancelled" or data.get("status") == "cancelled":
                             summary_status = "cancelled"
-                if steps or summary_status != "succeeded":
+                            if data.get("terminal_reason") == "runtime_restart_interrupted":
+                                terminal_reason = "runtime_restart_interrupted"
+                        envelope = data.get("terminal_envelope")
+                        if isinstance(envelope, dict) and envelope.get("exit_reason") == "side_effect_unknown":
+                            outcome_uncertain = True
+                if steps or summary_status != "succeeded" or not text:
                     metadata["process_summary"] = {
                         "collapsed": True,
                         "run_id": row.get("run_id"),
                         "status": summary_status,
+                        "outcome_uncertain": outcome_uncertain,
+                        "terminal_reason": terminal_reason,
                         "steps": steps,
                         "tools": [],
                     }

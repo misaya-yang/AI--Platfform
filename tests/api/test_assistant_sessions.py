@@ -329,6 +329,45 @@ async def test_list_session_artifacts_returns_empty_when_schema_missing(
 
 
 @pytest.mark.asyncio
+async def test_session_artifact_list_excludes_input_and_image_variants_and_marks_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.get.return_value = Session(
+        session_id="session-1", user_id=user.user_id, tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+    )
+
+    def artifact(artifact_id: str, *, source: str = "image_generation", variant: str = "raw", size: int = 10):
+        return SimpleNamespace(
+            artifact_id=artifact_id, session_id="session-1", type="image", format="png",
+            title=artifact_id, filename=f"{artifact_id}.png", size_bytes=size,
+            mime_type="image/png", source=source, message_id=None, metadata={},
+            created_at=None, variant=variant, parent_artifact_id=None,
+        )
+
+    class Storage:
+        async def get_session_artifacts(self, *_args):
+            return [
+                artifact("raw"), artifact("thumbnail", variant="thumbnail"),
+                artifact("upload", source="user"), artifact("empty", size=0),
+            ]
+
+        async def get_presigned_download_url(self, _artifact):
+            return "file:///private/file.png"
+
+    monkeypatch.setattr(artifact_routes, "get_artifact_storage", lambda: Storage())
+    response = await artifact_routes.list_session_artifacts(
+        "session-1", _build_request(session_manager), user,
+    )
+    assert response.total == 2
+    assert [item.artifact_id for item in response.artifacts] == ["raw", "empty"]
+    assert response.artifacts[0].ready is True
+    assert response.artifacts[1].ready is False
+
+
+@pytest.mark.asyncio
 async def test_list_session_artifacts_sanitizes_unexpected_storage_errors(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -548,7 +587,8 @@ async def test_download_artifact_streams_local_content_instead_of_file_redirect(
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_interrupts_owning_agent_runtime_turn() -> None:
+@pytest.mark.parametrize("run_status", ["running", "pending", "queued", "awaiting_approval"])
+async def test_cancel_task_interrupts_owning_agent_runtime_turn(run_status: str) -> None:
     task_id = "task-private-identifier"
     user_id = "user-private-identifier"
     reason = "client requested cancellation"
@@ -564,7 +604,7 @@ async def test_cancel_task_interrupts_owning_agent_runtime_turn() -> None:
         "session_id": "session-private-identifier",
         "harness_thread_id": "thread-private-identifier",
         "harness_turn_id": task_id,
-        "status": "running",
+        "status": run_status,
     }
     control = AsyncMock()
     request.app.state.database = database

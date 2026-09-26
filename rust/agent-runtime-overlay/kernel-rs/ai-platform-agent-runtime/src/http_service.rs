@@ -290,7 +290,10 @@ impl RuntimeHttpService {
                 "/internal/v1/approvals/{approval_id}/decision",
                 post(decide_approval),
             )
-            .route("/internal/v1/threads/{thread_id}/turns", post(start_turn))
+            .route(
+                "/internal/v1/threads/{thread_id}/turns",
+                post(start_turn).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
             .route(
                 "/internal/v1/threads/{thread_id}/turns/{turn_id}/interrupt",
                 post(interrupt_turn),

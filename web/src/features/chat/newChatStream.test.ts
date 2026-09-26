@@ -3,12 +3,20 @@ import { test } from "node:test";
 
 import {
   acceptPendingRunSession,
+  confirmsAssistantRunAdmission,
   beginNewChatSession,
   persistNewChatSession,
   resetStreamStartMetrics,
   startChatWithoutAwaitingSessionCreate,
   streamStartMetrics,
 } from "./newChatStream.ts";
+
+test("existing and new sessions acknowledge only their admitted run", () => {
+  assert.equal(confirmsAssistantRunAdmission({ requestedSessionId: "existing", eventSessionId: "existing", isResume: false }), true);
+  assert.equal(confirmsAssistantRunAdmission({ requestedSessionId: "new", eventSessionId: "new", isResume: false }), true);
+  assert.equal(confirmsAssistantRunAdmission({ requestedSessionId: "existing", eventSessionId: "other", isResume: false }), false);
+  assert.equal(confirmsAssistantRunAdmission({ requestedSessionId: "existing", eventSessionId: "existing", isResume: true }), false);
+});
 import {
   createActivityFlushQueue,
   resetActivityFlushMetrics,

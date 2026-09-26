@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use codex_app_server_protocol::AdditionalContextEntry;
 use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -43,6 +44,8 @@ pub(super) struct StartTurnRequest {
     lease_id: Uuid,
     lease_signature: String,
     message: String,
+    #[serde(default)]
+    images: Vec<String>,
     model: String,
     effort: Option<String>,
     capability_revision: i64,
@@ -203,10 +206,14 @@ pub(super) async fn start_turn(
         runtime_scope_sha256(&tenant_id, &user_id, &session_id),
     );
     trace_context.extend_model_metadata(&mut metadata, &body.run_id.to_string());
-    let input = vec![UserInput::Text {
+    let mut input = vec![UserInput::Text {
         text: body.message,
         text_elements: Vec::new(),
     }];
+    input.extend(body.images.into_iter().map(|image_url| UserInput::Image {
+        image: ImageReference::Inline { url: image_url },
+        detail: None,
+    }));
     let additional_context = readonly_input.flatten().map(|value| {
         HashMap::from([(
             "ai_platform_readonly".to_string(),
@@ -255,6 +262,9 @@ fn validate_start_turn_request(body: &StartTurnRequest) -> Result<(), RuntimeErr
         || body.model.is_empty()
         || body.model.len() > 255
         || body.capability_revision < 1
+        || body.images.len() > 5
+        || body.images.iter().map(String::len).sum::<usize>() > 15 * 1024 * 1024
+        || body.images.iter().any(|image| !valid_inline_image(image))
         || body.lease_signature.len() != 67
         || !body.lease_signature.starts_with("v1:")
         || !body.lease_signature[3..]
@@ -264,6 +274,24 @@ fn validate_start_turn_request(body: &StartTurnRequest) -> Result<(), RuntimeErr
         return Err(RuntimeError::bad_request("invalid_turn_start_request"));
     }
     Ok(())
+}
+
+fn valid_inline_image(image: &str) -> bool {
+    let Some((header, encoded)) = image.split_once(',') else { return false };
+    let magic = match header {
+        "data:image/png;base64" => "iVBORw0KGgo",
+        "data:image/jpeg;base64" => "/9j/",
+        "data:image/gif;base64" => "R0lGOD",
+        "data:image/webp;base64" => "UklGR",
+        _ => return false,
+    };
+    encoded.len() >= magic.len()
+        && encoded.len() <= 3 * 1024 * 1024
+        && encoded.len() % 4 == 0
+        && encoded.starts_with(magic)
+        && encoded.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+        })
 }
 
 fn parse_reasoning_effort(value: &str) -> Result<ReasoningEffort, RuntimeError> {
@@ -323,6 +351,7 @@ mod turn_request_tests {
             lease_id: Uuid::nil(),
             lease_signature: signature,
             message: "hello".to_string(),
+            images: Vec::new(),
             model: "qwen3.7-plus".to_string(),
             effort: Some("minimal".to_string()),
             capability_revision: 1,
@@ -342,6 +371,12 @@ mod turn_request_tests {
             runtime_scope_sha256("tenant", "user", "session"),
             runtime_scope_sha256("tenant", "users", "ession")
         );
+
+        let mut with_image = request(format!("v1:{}", "a".repeat(64)));
+        with_image.images = vec!["data:image/png;base64,iVBORw0KGgo=".to_string()];
+        assert!(validate_start_turn_request(&with_image).is_ok());
+        with_image.images = vec!["data:text/plain;base64,aGVsbG8=".to_string()];
+        assert!(validate_start_turn_request(&with_image).is_err());
 
         let uppercase = request(format!("v1:{}", "A".repeat(64)));
         assert!(validate_start_turn_request(&uppercase).is_err());

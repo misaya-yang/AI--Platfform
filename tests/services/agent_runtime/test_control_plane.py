@@ -449,10 +449,10 @@ def test_dynamic_tools_exposes_deferred_only_for_exact_snapshot_allowlist() -> N
     assert AgentRuntimeControlPlane._dynamic_tools(readonly) == []
 
 
-def test_attachment_refs_become_one_bound_read_attachment_descriptor() -> None:
+def test_attachment_refs_do_not_duplicate_worker_catalog_descriptor() -> None:
     readonly = AgentRuntimeControlPlane._readonly_capability_payload(
         {
-            "attachments": {"refs": ["blob-a", "blob-b"]},
+            "attachments": {"refs": ["art_1111111111111111", "art_2222222222222222"]},
         },
         tenant_id="tenant-a",
         capability_revision=7,
@@ -462,20 +462,18 @@ def test_attachment_refs_become_one_bound_read_attachment_descriptor() -> None:
         tenant_id="tenant-a",
         capability_revision=7,
     )
-    descriptor = readonly["attachment_tools"][0]
-    assert descriptor["name"] == "read_attachment"
-    assert descriptor["read_only"] is True
-    assert descriptor["schema"]["properties"]["ref"]["enum"] == ["blob-a", "blob-b"]
-    assert [item["name"] for item in AgentRuntimeControlPlane._dynamic_tools(readonly)] == [
-        "read_attachment"
+    assert readonly["attachment_tools"] == []
+    assert [item["payload"]["content_ref"] for item in readonly["items"]] == [
+        "art_1111111111111111", "art_2222222222222222",
     ]
+    assert AgentRuntimeControlPlane._dynamic_tools(readonly) == []
 
 
 def test_attachment_descriptor_is_turn_scoped_not_thread_fingerprint_state() -> None:
     descriptor = AgentRuntimeControlPlane._attachment_tool_descriptor(
         tenant_id="tenant-a",
         capability_revision=7,
-        references=["blob-a"],
+        references=["art_1111111111111111"],
     )
     assert AgentRuntimeControlPlane._dynamic_tool_fingerprint({}) == (
         AgentRuntimeControlPlane._dynamic_tool_fingerprint({"attachment_tools": [descriptor]})
@@ -622,7 +620,7 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     try:
         readonly_capabilities = {
             "knowledge": {"dataset_ids": ["dataset-a"]},
-            "attachments": {"refs": ["attachment-a"]},
+            "attachments": {"refs": ["art_1111111111111111"]},
             "web_search": {"enabled": True, "max_results": 3},
         }
         launch = await resolve_agent_launch(

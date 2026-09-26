@@ -14,10 +14,18 @@ export async function getQuiz(quizId: string): Promise<QuizData> {
 export async function submitQuiz(
   quizId: string,
   answers: Record<string, string>,
+  attemptId: string,
 ): Promise<QuizAttemptResult> {
   const { data } = await api.post<QuizAttemptResult>(
     `/api/v1/assistant/quiz/${quizId}/submit`,
-    { answers },
+    { answers, attempt_id: attemptId },
+  );
+  return data;
+}
+
+export async function getQuizAttemptResult(quizId: string, attemptId: string): Promise<QuizAttemptResult> {
+  const { data } = await api.get<QuizAttemptResult>(
+    `/api/v1/assistant/quiz/${quizId}/attempts/${attemptId}`,
   );
   return data;
 }

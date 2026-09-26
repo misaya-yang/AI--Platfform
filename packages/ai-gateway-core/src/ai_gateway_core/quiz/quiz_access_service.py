@@ -17,9 +17,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
 
+from .public_projection import safe_quiz_options
 from .quiz_grader import QuizGrader
 
 logger = logging.getLogger(__name__)
+
+
+class QuizAttemptConflictError(ValueError):
+    """The stable attempt id was already used or cannot be safely replayed."""
 
 
 def _quiz_uuid(quiz_id: str | uuid.UUID) -> uuid.UUID:
@@ -66,11 +71,7 @@ class QuizAccessService:
                 "question_num": qr["question_num"],
                 "question_type": qr["question_type"],
                 "question_text": qr["question_text"],
-                "options": (
-                    raw_options
-                    if isinstance(raw_options, list)
-                    else json.loads(raw_options or "[]")
-                ),
+                "options": safe_quiz_options(raw_options),
             }
             if include_answers:
                 raw_answer = qr["correct_answer"]
@@ -229,9 +230,42 @@ class QuizAccessService:
         tenant_id: str,
         user_id: str,
         answers: dict[str, str],
+        attempt_id: str | uuid.UUID | None = None,
     ) -> dict:
         """Grade a submission and persist the attempt."""
         qid = _quiz_uuid(quiz_id)
+        aid = _quiz_uuid(attempt_id) if attempt_id is not None else uuid.uuid4()
+
+        async def replay() -> dict | None:
+            prior = await self.db.fetchrow(
+                "SELECT a.quiz_id, a.user_id, a.answers, a.result_payload "
+                "FROM assistant.quiz_attempts AS a "
+                "JOIN assistant.quizzes AS q ON q.id = a.quiz_id "
+                "WHERE a.id = $1 AND q.tenant_id = $2",
+                aid,
+                tenant_id,
+            )
+            if not prior:
+                return None
+            old_answers = prior["answers"]
+            if isinstance(old_answers, str):
+                old_answers = json.loads(old_answers)
+            if (
+                str(prior["quiz_id"]) != str(qid)
+                or prior["user_id"] != user_id
+                or old_answers != answers
+            ):
+                raise QuizAttemptConflictError("Attempt id belongs to a different submission")
+            saved = prior["result_payload"]
+            if isinstance(saved, str):
+                saved = json.loads(saved)
+            if not isinstance(saved, dict):
+                raise QuizAttemptConflictError("Attempt result is unavailable")
+            return {**saved, "attempt_id": str(aid), "cached": True}
+
+        existing = await replay()
+        if existing is not None:
+            return existing
         quiz = await self.get_quiz(qid, tenant_id, include_answers=True)
         if not quiz:
             raise ValueError(f"Quiz {qid} not found")
@@ -245,16 +279,18 @@ class QuizAccessService:
         else:
             result = self.grader.grade(quiz["questions"], answers)
 
-        attempt_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
-        await self.db.execute(
+        payload = {"attempt_id": str(aid), **result}
+        inserted = await self.db.fetchrow(
             """
             INSERT INTO assistant.quiz_attempts (id, quiz_id, user_id, answers,
                                        total_score, correct_count, total_count,
-                                       started_at, completed_at, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                       started_at, completed_at, status, result_payload)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11::jsonb)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
             """,
-            attempt_id,
+            aid,
             qid,
             user_id,
             json.dumps(answers),
@@ -264,15 +300,39 @@ class QuizAccessService:
             now,
             now,
             "completed",
+            json.dumps(payload, default=str),
         )
+        if not inserted:
+            raced = await replay()
+            if raced is not None:
+                return raced
+            raise QuizAttemptConflictError("Attempt result is unavailable")
         logger.info(
             "Quiz attempt %s: %s/%s (%.0f%%)",
-            attempt_id,
+            aid,
             result["correct_count"],
             result["total_count"],
             result["total_score"] * 100,
         )
-        return {"attempt_id": str(attempt_id), **result}
+        return payload
+
+    async def get_attempt_result(
+        self,
+        quiz_id: str | uuid.UUID,
+        tenant_id: str,
+        user_id: str,
+        attempt_id: str | uuid.UUID,
+    ) -> dict | None:
+        row = await self.db.fetchrow(
+            "SELECT a.result_payload FROM assistant.quiz_attempts AS a "
+            "JOIN assistant.quizzes AS q ON q.id = a.quiz_id "
+            "WHERE a.id = $1 AND a.quiz_id = $2 AND a.user_id = $3 AND q.tenant_id = $4",
+            _quiz_uuid(attempt_id), _quiz_uuid(quiz_id), user_id, tenant_id,
+        )
+        if not row or row["result_payload"] is None:
+            return None
+        payload = row["result_payload"]
+        return json.loads(payload) if isinstance(payload, str) else payload
 
     async def delete_quiz(
         self,

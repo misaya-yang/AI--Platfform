@@ -55,6 +55,7 @@ export interface SessionRetrievedContext {
 }
 
 export interface SessionMessageMetadata {
+  source_access_revoked?: boolean;
   tool_calls?: SessionMessageToolCall[];
   stats?: {
     input_tokens?: number;
@@ -80,6 +81,8 @@ export interface SessionMessageMetadata {
   }>;
   // Image-generation artifacts referenced by the assistant message
   artifact_ids?: string[];
+  source_kind?: "image_generation";
+  process_summary?: Record<string, unknown>;
 }
 
 export interface SessionMessage {

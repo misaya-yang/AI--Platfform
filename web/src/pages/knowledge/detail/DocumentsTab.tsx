@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useMemo, useState, type RefObject } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -48,6 +49,7 @@ import {
   useSegments,
 } from "@/hooks/useKnowledge";
 import {
+  getDocument,
   deleteDocument,
   deleteSegment,
   reembedDocument,
@@ -188,6 +190,10 @@ export function DocumentsTab({
   onOpenUrlDialog,
 }: DocumentsTabProps) {
   const { t } = useTranslation();
+  const [searchParams] = useSearchParams();
+  const sourceDocumentId = searchParams.get("document_id");
+  const [linkedDocument, setLinkedDocument] = useState<Document | null>(null);
+  const [sourceUnavailable, setSourceUnavailable] = useState(false);
   const qc = useQueryClient();
   useDocumentProgressStream(
     datasetId,
@@ -196,9 +202,37 @@ export function DocumentsTab({
 
   const [selectedDocId, setSelectedDocId] = useState<string | undefined>(undefined);
   const selectedDoc = useMemo(
-    () => docs.find((d) => d.document_id === selectedDocId),
-    [docs, selectedDocId]
+    () => docs.find((d) => d.document_id === selectedDocId)
+      ?? (linkedDocument?.document_id === selectedDocId ? linkedDocument : undefined),
+    [docs, linkedDocument, selectedDocId]
   );
+
+  useEffect(() => {
+    if (!datasetId || !sourceDocumentId) return;
+    let active = true;
+    const local = docs.find((document) => document.document_id === sourceDocumentId);
+    if (local) {
+      setLinkedDocument(null);
+      setSourceUnavailable(false);
+      setSelectedDocId(sourceDocumentId);
+      return;
+    }
+    void getDocument(datasetId, sourceDocumentId).then(
+      (document) => {
+        if (!active) return;
+        setLinkedDocument(document);
+        setSelectedDocId(document.document_id);
+        setSourceUnavailable(false);
+      },
+      () => {
+        if (!active) return;
+        setLinkedDocument(null);
+        setSelectedDocId(undefined);
+        setSourceUnavailable(true);
+      },
+    );
+    return () => { active = false; };
+  }, [datasetId, sourceDocumentId, docs]);
 
   const [segmentSearch, setSegmentSearch] = useState("");
   // Server-side segment search is debounced so keystrokes don't fan out
@@ -910,6 +944,11 @@ export function DocumentsTab({
 
   return (
     <div className="space-y-4">
+      {sourceUnavailable && (
+        <p role="alert" className="rounded-lg border border-amber-300/50 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+          {t("knowledge.detail.sourceUnavailable", "This source document is unavailable or you no longer have access.")}
+        </p>
+      )}
       {/* 内容类型子Tab - 圆角药丸风格 */}
       <div className="ui-tabs-rail w-full rounded-full bg-muted/50 p-1 sm:w-auto">
         {[

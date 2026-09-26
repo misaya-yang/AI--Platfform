@@ -148,8 +148,8 @@ class PythonArtifactRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=_MAX_FILENAME_BYTES)
     mime_type: str | None = Field(..., max_length=128)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=0, le=MAX_OUTPUT_BYTES)
-    content_base64: str = Field(min_length=0, max_length=_PYTHON_ARTIFACT_MAX_B64)
+    size_bytes: int = Field(ge=1, le=MAX_OUTPUT_BYTES)
+    content_base64: str = Field(min_length=1, max_length=_PYTHON_ARTIFACT_MAX_B64)
 
     @field_validator("filename", "tool_call_id")
     @classmethod

@@ -18,7 +18,7 @@ from ai_gateway_core.storage import get_artifact_storage
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from ...services.images.service import ImageGenerationService
+from ...services.images.service import ImageGenerationService, public_image_error
 from ..deps import enforce_rate_limit, get_user_context
 from ..schemas.assistant import (
     AsyncImageGenerationRequest,
@@ -86,7 +86,8 @@ async def submit_image_generation(
 async def get_image_task_status(
     task_id: str, request: Request, user: UserContext = Depends(get_user_context)
 ):
-    row = await _service(request, user).task(task_id)
+    service = _service(request, user)
+    row = await service.task(task_id)
     result = row.get("result") or {}
     return {
         "task_id": task_id,
@@ -95,9 +96,11 @@ async def get_image_task_status(
         "prompt": row.get("prompt", ""),
         "model_id": row.get("model_id", ""),
         "provider": row.get("provider"),
+        # Historical rows without a receipt cannot inherit today's image model.
+        "effective_model_id": result.get("effective_model_id"),
         "images": result.get("images", []),
         "duration_ms": result.get("duration_ms"),
-        "error": row.get("error"),
+        "error": public_image_error(row.get("status"), row.get("error_code")),
         "error_code": row.get("error_code"),
         "created_at": row["created_at"].isoformat()
         if hasattr(row.get("created_at"), "isoformat")

@@ -439,9 +439,13 @@ async def load_gateway_assistant_policies(
             raise AssistantCapabilityCatalogError("tenant policy limits are malformed")
         gateway_policy = load_assistant_gateway_policy()
         return {
-            "default_execution_profile": _env_text(
-                "ASSISTANT_DEFAULT_EXECUTION_PROFILE", "safe", {"safe", "balanced", "full"}
-            ),
+            # The Runtime currently implements only the safe profile. An old
+            # deployment setting must not be advertised as effective policy.
+            "default_execution_profile": "safe",
+            "supported_execution_profiles": ["safe"],
+            "configured_execution_profile_supported": os.getenv(
+                "ASSISTANT_DEFAULT_EXECUTION_PROFILE", "safe"
+            ).strip().lower() == "safe",
             "default_memory_mode": _env_text(
                 "ASSISTANT_DEFAULT_MEMORY_MODE", "auto", {"auto", "on", "off"}
             ),

@@ -69,6 +69,7 @@ export interface ProcessSummaryState {
   runId?: string;
   runtimeThreadId?: string;
   status: "running" | "succeeded" | "failed" | "cancelled" | "blocked";
+  terminalReason?: "runtime_restart_interrupted";
   startedAt?: number;
   totalDurationMs?: number;
   currentStep?: string;
@@ -262,6 +263,9 @@ export interface ChatMessage {
     createdAt: string;
   }>;
   status?: ChatTurnState;
+  outcomeUncertain?: boolean;
+  diagnosticId?: string;
+  sourceAccessRevoked?: boolean;
   meta?: Record<string, unknown>;
 
   // Streaming state

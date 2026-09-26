@@ -25,12 +25,18 @@ from ...services.agent_runtime.thread_store import (
     AgentThreadStore,
     RuntimeThread,
 )
+from ...services.assistant_entry.approval_preview import owner_approval_preview
 from ...services.assistant_entry.launch_resolution import (
     AgentLaunchResolutionError,
     resolve_agent_launch,
 )
+from ...services.assistant_entry.memory_controls import effective_assistant_memory_mode
 from ...services.assistant_entry.model_access import assistant_model_service
 from ..deps import get_user_context
+from ..v1._assistant_routes.attachment_refs import (
+    bind_assistant_attachment_refs,
+    selected_image_inputs,
+)
 
 router = APIRouter(prefix="/agent", tags=["Agent Runtime V2"])
 logger = logging.getLogger(__name__)
@@ -342,7 +348,14 @@ async def create_turn(
     if not model_id:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     try:
+        memory_mode = await effective_assistant_memory_mode(
+            request, user.tenant_id, user.user_id, body.memory_mode,
+        )
         style_guidance = str(body.system_prompt or "").strip() or None
+        bound_refs = await bind_assistant_attachment_refs(
+            request, user, session_id=thread.session_id, model_id=model_id, refs=body.file_paths,
+        )
+        image_inputs = await selected_image_inputs(user, session_id=thread.session_id, refs=bound_refs) if bound_refs else []
         readonly = {
             "knowledge": {
                 "dataset_ids": body.kb_dataset_ids,
@@ -350,7 +363,7 @@ async def create_turn(
                 "top_k": body.kb_top_k,
                 "score_threshold": body.kb_score_threshold,
             },
-            "attachments": {"refs": body.file_paths},
+            "attachments": {"refs": bound_refs},
             "web_search": {
                 "enabled": body.web_search_enabled,
                 "max_results": body.web_search_max_results,
@@ -374,21 +387,29 @@ async def create_turn(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
             style_guidance=style_guidance,
-            memory_mode=body.memory_mode,
+            memory_mode=memory_mode,
             memory_profile="basic",
         )
         turn = await control.start_turn(
             tenant_id=user.tenant_id, user_id=user.user_id, session_id=thread.session_id,
-            message=body.message, model_id=model_id,
+            message=body.message, image_inputs=image_inputs, model_id=model_id,
             reasoning_option=body.reasoning_option,
             legacy_thinking_level=body.thinking_level,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
-            memory_mode=body.memory_mode,
+            memory_mode=memory_mode,
             style_guidance=style_guidance,
             resolved_agent_launch=launch,
         )
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            logger.warning(
+                "Agent Runtime turn request rejected code=%s status=%s",
+                detail.get("code", "HTTP_ERROR"),
+                exc.status_code,
+            )
+            raise
         if isinstance(exc, AgentLaunchResolutionError):
             raise HTTPException(
                 status_code=exc.status_code,
@@ -475,7 +496,17 @@ async def get_thread_approval(
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     if approval is None:
         raise HTTPException(status_code=404, detail={"code": "APPROVAL_NOT_FOUND"})
-    return {"schema_version": "agent-approval/v2", "approval": approval}
+    database = getattr(request.app.state, "database", None)
+    preview = await owner_approval_preview(
+        database,
+        approval_id=approval_id,
+        runtime_thread_id=thread.runtime_thread_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=thread.session_id,
+        runtime_summary=approval,
+    ) if database is not None else {"can_approve": False, "reason": "Action details unavailable"}
+    return {"schema_version": "agent-approval/v2", "approval": approval, "preview": preview}
 
 
 @router.post("/threads/{thread_id}/approvals/{approval_id}/decision")
@@ -493,6 +524,27 @@ async def decide_thread_approval(
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
+        if body.approved:
+            approval = await control.get_approval(
+                approval_id=approval_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=thread.session_id,
+            )
+            if approval is None:
+                raise HTTPException(status_code=404, detail={"code": "APPROVAL_NOT_FOUND"})
+            database = getattr(request.app.state, "database", None)
+            preview = await owner_approval_preview(
+                database,
+                approval_id=approval_id,
+                runtime_thread_id=thread.runtime_thread_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=thread.session_id,
+                runtime_summary=approval,
+            ) if database is not None else {"can_approve": False}
+            if not preview["can_approve"]:
+                raise HTTPException(status_code=409, detail={"code": "APPROVAL_ACTION_UNVERIFIED"})
         result = await control.decide_approval(
             approval_id=approval_id,
             approved=body.approved,

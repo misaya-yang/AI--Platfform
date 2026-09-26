@@ -20,6 +20,9 @@ class ArtifactInfo(BaseModel):
     title: str
     filename: str
     size_bytes: int
+    ready: bool = True
+    variant: str = "raw"
+    parent_artifact_id: str | None = None
     mime_type: str | None = None
     source: str = "ai"  # ai | user | code_execution
     message_id: str | None = None

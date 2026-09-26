@@ -22,7 +22,7 @@ export function hydrateMessageArtifacts(
     );
     for (const id of ids) {
       const artifact = artifactMap.get(id);
-      if (!artifact) continue;
+      if (!artifact || artifact.ready === false || artifact.size_bytes <= 0) continue;
       generated.set(id, {
         id: artifact.artifact_id,
         type: (artifact.type || "file") as GeneratedArtifact["type"],
@@ -52,7 +52,7 @@ export function buildLatestRunOutputFilesFromArtifacts(
     if (message.role !== "assistant" || !message._artifactIds?.length) continue;
     const files = message._artifactIds.flatMap((id) => {
       const artifact = artifactMap.get(id);
-      return artifact
+      return artifact && artifact.ready !== false && artifact.size_bytes > 0
         ? [{
             filename: artifact.filename || artifact.title || "artifact",
             content_base64: "",

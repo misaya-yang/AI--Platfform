@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from ai_gateway_core.quiz.public_projection import safe_quiz_options
 from ai_gateway_core.sharing import ArtifactShareManager
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -71,7 +72,7 @@ async def create_artifact_share(
 
     # Verify quiz exists and belongs to the caller.
     quiz_row = await db.fetchrow(
-        "SELECT id, tenant_id, title, description, question_count, difficulty "
+        "SELECT id, tenant_id, title, description, question_count, difficulty, dataset_ids "
         "FROM quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
         body.quiz_id,
         user.tenant_id,
@@ -79,6 +80,11 @@ async def create_artifact_share(
     )
     if not quiz_row:
         raise HTTPException(404, "Quiz not found or not authorized")
+    dataset_ids = quiz_row["dataset_ids"]
+    if isinstance(dataset_ids, str):
+        dataset_ids = json.loads(dataset_ids)
+    if dataset_ids:
+        raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
 
     # Freeze a snapshot: public questions + grading answer keys.
     q_rows = await db.fetch(
@@ -101,7 +107,7 @@ async def create_artifact_share(
             "question_num": qr["question_num"],
             "question_type": qr["question_type"],
             "question_text": qr["question_text"],
-            "options": options,
+            "options": safe_quiz_options(options),
         })
         answer_keys.append({
             "id": str(qr["id"]),

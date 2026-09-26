@@ -1,7 +1,15 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Share2, Copy, Check, X, ExternalLink } from "lucide-react";
-import { createConversationShare, type ShareInfo } from "@/api/assistant";
+import {
+  createConversationShare,
+  listConversationShares,
+  previewConversationShare,
+  revokeConversationShare,
+  type ConversationSharePreview,
+  type ExistingConversationShare,
+  type ShareInfo,
+} from "@/api/assistant";
 import { toast } from "@/hooks/use-toast";
 
 interface ShareDialogProps {
@@ -18,14 +26,51 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
   const [copied, setCopied] = useState(false);
   const [includeArtifacts, setIncludeArtifacts] = useState(true);
+  const [expiresDays, setExpiresDays] = useState<number | undefined>(7);
+  const [preview, setPreview] = useState<ConversationSharePreview | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [existingShares, setExistingShares] = useState<ExistingConversationShare[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    setPreview(null);
+    setPreviewError("");
+    setLoadingPreview(true);
+    void previewConversationShare(sessionId, {
+      include_artifacts: includeArtifacts,
+      expires_days: expiresDays,
+    }).then((value) => {
+      if (!cancelled) setPreview(value);
+    }).catch((error: { response?: { data?: { detail?: string } } }) => {
+      if (!cancelled) setPreviewError(
+        typeof error.response?.data?.detail === "string"
+          ? error.response.data.detail
+          : t("assistant.sharePreviewUnavailable", "Unable to verify what this link would expose."),
+      );
+    }).finally(() => {
+      if (!cancelled) setLoadingPreview(false);
+    });
+    return () => { cancelled = true; };
+  }, [sessionId, includeArtifacts, expiresDays, isOpen, t]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void listConversationShares(sessionId).then(setExistingShares).catch(() => setExistingShares([]));
+  }, [isOpen, sessionId]);
 
   const handleCreate = useCallback(async () => {
+    if (!preview) return;
     setIsCreating(true);
     try {
       const info = await createConversationShare(sessionId, {
         include_artifacts: includeArtifacts,
+        expires_days: expiresDays,
+        preview_hash: preview.preview_hash,
       });
       setShareInfo(info);
+      setExistingShares(await listConversationShares(sessionId));
       toast.success(t("assistant.shareCreated", "Share link created!"));
     } catch (err) {
       toast.error(t("assistant.shareFailed", "Failed to create share link"));
@@ -33,7 +78,20 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
     } finally {
       setIsCreating(false);
     }
-  }, [sessionId, includeArtifacts, t]);
+  }, [sessionId, includeArtifacts, expiresDays, preview, t]);
+
+  const handleRevoke = useCallback(async (shareCode: string) => {
+    try {
+      await revokeConversationShare(shareCode);
+      setExistingShares((current) => current.map((share) =>
+        share.share_code === shareCode ? { ...share, is_active: false } : share,
+      ));
+      if (shareInfo?.share_code === shareCode) setShareInfo(null);
+      toast.success(t("assistant.shareRevoked", "Link revoked"));
+    } catch {
+      toast.error(t("assistant.shareRevokeFailed", "Could not revoke this link"));
+    }
+  }, [shareInfo?.share_code, t]);
 
   const handleCopy = useCallback(async () => {
     if (!shareInfo) return;
@@ -67,7 +125,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={handleClose}>
       <div
-        className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
+        className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md max-h-[90dvh] mx-4 overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -90,21 +148,37 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
             <>
               {/* Preview */}
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50 space-y-2">
+                <p className="text-xs font-medium">{t("assistant.shareVisitorPreview", "Visitor preview · anyone with this link")}</p>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">{t("assistant.messages", "Messages")}</span>
-                  <span className="font-medium">{messageCount}</span>
+                  <span className="font-medium">{preview?.message_count ?? messageCount}</span>
                 </div>
-                {artifactCount > 0 && (
+                {(preview?.artifact_count || artifactCount) > 0 && (
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">{t("assistant.artifacts", "Artifacts")}</span>
-                    <span className="font-medium">{artifactCount}</span>
+                    <span className="font-medium">{preview?.artifact_count ?? artifactCount}</span>
+                  </div>
+                )}
+                {loadingPreview && <p role="status" className="text-xs">{t("assistant.shareChecking", "Checking share contents…")}</p>}
+                {previewError && <p role="alert" className="text-xs text-red-600">{previewError}</p>}
+                {preview && (
+                  <div className="max-h-40 space-y-2 overflow-y-auto border-t border-slate-200 pt-2 dark:border-slate-600">
+                    {preview.messages.map((message, index) => (
+                      <p key={index} className="text-xs break-words">
+                        <strong>{message.role === "user" ? t("assistant.you", "You") : t("assistant.assistant", "Assistant")}:</strong>{" "}
+                        <span className="whitespace-pre-wrap">{message.content}</span>
+                        {message.quiz_data ? ` · ${t("assistant.sharedQuiz", "Interactive quiz")}` : ""}
+                      </p>
+                    ))}
+                    {preview.artifacts.map((artifact) => (
+                      <p key={artifact.artifact_id} className="text-xs break-words">{t("assistant.sharedFile", "File")}: {artifact.filename || artifact.title}</p>
+                    ))}
                   </div>
                 )}
               </div>
 
               {/* Include artifacts toggle */}
-              {artifactCount > 0 && (
-                <label className="flex items-center gap-3 cursor-pointer">
+              <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={includeArtifacts}
@@ -115,8 +189,20 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                     {t("assistant.includeArtifacts", "Include generated files & images")}
                     <span className="text-muted-foreground ml-1">({artifactCount})</span>
                   </span>
-                </label>
-              )}
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-sm">
+                <span>{t("assistant.shareExpiry", "Link expires")}</span>
+                <select
+                  value={expiresDays ?? "never"}
+                  onChange={(event) => setExpiresDays(event.target.value === "never" ? undefined : Number(event.target.value))}
+                  className="rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600"
+                >
+                  <option value="7">{t("assistant.shareSevenDays", "7 days")}</option>
+                  <option value="30">{t("assistant.shareThirtyDays", "30 days")}</option>
+                  <option value="never">{t("assistant.shareNever", "No expiry")}</option>
+                </select>
+              </label>
 
               <p className="text-xs text-muted-foreground">
                 {t("assistant.shareNote", "Anyone with the link can view this conversation. You can revoke the link at any time.")}
@@ -125,7 +211,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
               <button
                 type="button"
                 onClick={handleCreate}
-                disabled={isCreating}
+                disabled={isCreating || loadingPreview || !preview}
                 className="w-full py-2.5 px-4 rounded-xl bg-primary text-white font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
               >
                 {isCreating ? (
@@ -176,6 +262,21 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                 </a>
               </div>
             </>
+          )}
+
+          {existingShares.some((share) => share.is_active) && (
+            <div className="border-t border-slate-200 pt-3 dark:border-slate-700">
+              <p className="mb-2 text-xs font-medium">{t("assistant.activeShareLinks", "Active links for this conversation")}</p>
+              {existingShares.filter((share) => share.is_active).map((share) => (
+                <div key={share.share_code} className="flex items-center justify-between gap-2 py-1 text-xs">
+                  <a href={`/share/${share.share_code}`} target="_blank" rel="noreferrer" className="truncate underline">{share.share_code}</a>
+                  <button type="button" onClick={() => void handleRevoke(share.share_code)} className="shrink-0 text-red-600">
+                    {t("assistant.revokeShare", "Revoke")}
+                  </button>
+                </div>
+              ))}
+              <p className="mt-2 text-xs text-muted-foreground">{t("assistant.shareRevocationLimit", "Revocation stops future access. It cannot remove copies already downloaded.")}</p>
+            </div>
           )}
         </div>
       </div>

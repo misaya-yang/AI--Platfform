@@ -147,7 +147,7 @@ interface ConversationSidebarProps {
   isLoading?: boolean;
   onNewChat: () => void;
   onSelectSession: (sessionId: string) => void;
-  onDeleteSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => Promise<boolean>;
   onSessionsChange?: (sessions: SessionSummary[]) => void;
 }
 
@@ -424,6 +424,9 @@ export function ConversationSidebar({
   // Folder dialog state
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderDialogTarget, setFolderDialogTarget] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   function openFolderDialog(sessionId: string): void {
     setFolderDialogTarget(sessionId);
@@ -453,8 +456,36 @@ export function ConversationSidebar({
     } catch (e) { console.error("Move failed:", e); }
   }, [sessions, onSessionsChange]);
 
+  const requestDelete = (sessionId: string) => {
+    const session = sessions.find((item) => item.session_id === sessionId);
+    if (!session) return;
+    setDeleteError("");
+    setDeleteTarget(session);
+  };
+
+  const closeDelete = () => {
+    if (deleting) return;
+    setDeleteTarget(null);
+    setDeleteError("");
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      if (await onDeleteSession(deleteTarget.session_id)) {
+        setDeleteTarget(null);
+      } else {
+        setDeleteError(t("assistant.deleteSessionFailed", "Could not delete this conversation. Try again."));
+      }
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const commonProps = {
-    activeSessionId, onSelectSession, onDeleteSession,
+    activeSessionId, onSelectSession, onDeleteSession: requestDelete,
     onRename: handleRename, onMoveToFolder: handleMoveToFolder,
     onOpenFolderDialog: openFolderDialog, fallbackLabel: fallback,
   };
@@ -558,6 +589,29 @@ export function ConversationSidebar({
         }}
         existingFolders={allFolderNames}
       />
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) closeDelete(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("assistant.deleteSessionTitle", "Delete this conversation?")}</DialogTitle>
+            <DialogDescription>
+              {t(
+                "assistant.deleteSessionImpact",
+                "This conversation will leave your history and cannot be reopened here. Existing share links remain active until you revoke them separately; downloaded copies are unaffected.",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <p className="break-words text-sm font-medium">{deleteTarget && getSessionTitle(deleteTarget, fallback)}</p>
+          {deleteError && <p role="alert" className="text-sm text-red-600">{deleteError}</p>}
+          <DialogFooter>
+            <button type="button" disabled={deleting} onClick={closeDelete} className="rounded-md border px-4 py-2 text-sm">
+              {t("common.cancel", "Cancel")}
+            </button>
+            <button type="button" disabled={deleting} onClick={() => void confirmDelete()} className="rounded-md bg-destructive px-4 py-2 text-sm text-destructive-foreground disabled:opacity-50">
+              {t("assistant.delete", "Delete")}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

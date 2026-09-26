@@ -27,6 +27,7 @@ import {
   Download,
   ExternalLink,
   Network,
+  Copy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ContextDisplay } from "./ContextDisplay";
@@ -36,6 +37,9 @@ import { QuizCard } from "./Quiz";
 import { ActivityPill } from "./ActivityPill";
 import { useRightPanel } from "./rightPanelContext";
 import { messageContainmentStyle } from "@/features/chat/messageRenderPerformance";
+import { assistantOutcome } from "../assistantOutcome";
+import { downloadAssistantArtifact, openAssistantArtifact } from "@/lib/authenticatedDownload";
+import { toast } from "@/hooks/use-toast";
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -44,7 +48,7 @@ interface ChatMessageProps {
     toolId: string,
     approvalId: string,
     approved: boolean,
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
@@ -85,24 +89,23 @@ function InlineArtifactCard({
         {hasUrl && (
           <>
             {previewable && (
-              <a
-                href={artifact.url}
-                target="_blank"
-                rel="noreferrer"
+              <button
+                type="button"
+                onClick={() => void openAssistantArtifact(artifact.url).catch(() => toast.error("Preview unavailable"))}
                 className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
               >
                 <ExternalLink className="h-3 w-3" />
                 {t("common.openInNewTab", "新标签页打开")}
-              </a>
+              </button>
             )}
-            <a
-              href={artifact.url}
-              download={artifact.filename || title}
+            <button
+              type="button"
+              onClick={() => void downloadAssistantArtifact(artifact.url, artifact.filename || title).catch(() => toast.error("Download unavailable"))}
               className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
             >
               <Download className="h-3 w-3" />
               {t("artifact.download", "下载")}
-            </a>
+            </button>
           </>
         )}
       </div>
@@ -357,16 +360,19 @@ export const ChatMessage = memo(function ChatMessage({
 }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
+  const runActive = Boolean(message.isStreaming || message.isGeneratingImage || message.processSummary?.status === "running");
   const { openActivity, openSubagents } = useRightPanel();
+  const outcome = isUser ? undefined : assistantOutcome(message);
+  const [diagnosticCopied, setDiagnosticCopied] = useState(false);
 
   // Live-elapsed ticker for the pill subtitle while streaming. Kept local
   // to the pill so the panel doesn't re-render every 500ms.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!message.isStreaming) return;
+    if (!runActive) return;
     const id = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(id);
-  }, [message.isStreaming]);
+  }, [runActive]);
 
   const timelineStepCount = isUser
     ? 0
@@ -384,7 +390,7 @@ export const ChatMessage = memo(function ChatMessage({
   // already final. Gating that output on `!isStreaming` alone hid artifacts
   // and citations for the whole time the operator was deciding.
   const awaitingApproval = message.processSummary?.status === "blocked";
-  const outputSettled = !message.isStreaming || awaitingApproval;
+  const outputSettled = !runActive || awaitingApproval;
 
   // Always surface the activity entry point on assistant turns. Earlier we
   // gated on `timelineSteps.length > 0 || isStreaming`, but messages reloaded
@@ -398,7 +404,7 @@ export const ChatMessage = memo(function ChatMessage({
   // has landed yet — i.e. we literally have no signal to show.
   const showTypingDots =
     !isUser &&
-    !!message.isStreaming &&
+    runActive &&
     !message.content &&
     timelineStepCount === 0;
 
@@ -407,7 +413,7 @@ export const ChatMessage = memo(function ChatMessage({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
-      style={messageContainmentStyle(Boolean(message.isStreaming))}
+      style={messageContainmentStyle(runActive)}
       className={cn("group w-full", isUser ? "flex justify-end" : "")}
     >
       {isUser ? (
@@ -438,22 +444,22 @@ export const ChatMessage = memo(function ChatMessage({
               ? new Date(message.createdAt).getTime()
               : undefined;
             const liveElapsed =
-              message.isStreaming && createdMs ? Math.max(0, now - createdMs) : 0;
-            const effectiveMs = message.isStreaming
+              runActive && createdMs ? Math.max(0, now - createdMs) : 0;
+            const effectiveMs = runActive
               ? Math.max(totalDurationMs, liveElapsed)
               : totalDurationMs;
             const durationLabel = formatDurationLabel(effectiveMs);
             const thinkingLabel = t("playground.activity.thinking", {
               defaultValue: "Thinking",
             });
-            const label = message.isStreaming
+            const label = runActive
               ? liveThinkingLabel(message.streamingThinkingContent, thinkingLabel)
               : t("playground.activity.title", { defaultValue: "Activity" });
             return (
               <ActivityPill
                 steps={timelineStepCount}
                 durationLabel={durationLabel}
-                running={!!message.isStreaming}
+                running={runActive}
                 onOpen={() => openActivity(message.id)}
                 variant="pill"
                 label={label}
@@ -469,6 +475,7 @@ export const ChatMessage = memo(function ChatMessage({
                   <ToolApprovalCard
                     key={tool.id}
                     tool={tool}
+                    runtimeThreadId={message.processSummary?.runtimeThreadId}
                     onApprove={() =>
                       onToolApproval(message.id, tool.id, tool.approvalId as string, true)
                     }
@@ -529,25 +536,63 @@ export const ChatMessage = memo(function ChatMessage({
           {/* Message content */}
           {message.isGeneratingImage ? (
             <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
-          ) : message.content ? (
+          ) : message.content.trim() ? (
             <div className="text-[hsl(var(--assistant-text-primary))] text-[15px] leading-[1.75]">
               <Suspense fallback={<div className="whitespace-pre-wrap">{message.content}</div>}>
                 <StreamOutput
                   text={message.content}
-                  isStreaming={!!message.isStreaming}
+                  isStreaming={runActive}
                 />
               </Suspense>
             </div>
-          ) : !showTypingDots && !message.isStreaming && (
-            <span className="text-[hsl(var(--assistant-text-secondary))] italic text-sm">
-              {message.status === "cancelled"
-                ? t("assistant.cancelled", "(Cancelled)")
-                : t("assistant.emptyResponse", "(No response)")}
-            </span>
+          ) : null}
+
+          {outcome && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={cn(
+                "rounded-lg border px-3 py-2 text-sm",
+                outcome.kind === "failed" || outcome.kind === "unknown" || outcome.kind === "restart_interrupted" || outcome.kind === "source_revoked"
+                  ? "border-amber-300/60 bg-amber-50/70 text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100"
+                  : "border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-surface-soft))]/50 text-[hsl(var(--assistant-text-secondary))]",
+              )}
+            >
+              <p className="font-medium">
+                {t(`assistant.outcome.${outcome.kind}.title`)}
+              </p>
+              {(outcome.kind === "failed" || outcome.kind === "cancelled" || outcome.kind === "restart_interrupted" || outcome.kind === "source_revoked" ||
+                outcome.kind === "unknown" || outcome.kind === "empty") && (
+                <p className="mt-1 text-xs leading-relaxed">
+                  {t(`assistant.outcome.${outcome.kind}.next`)}
+                </p>
+              )}
+              {outcome.diagnosticId && (outcome.kind === "failed" || outcome.kind === "unknown" || outcome.kind === "restart_interrupted") && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  <span>{t("assistant.outcome.diagnosticId")}: <code>{outcome.diagnosticId}</code></span>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded border border-current/30 px-1.5 py-0.5 hover:bg-black/5 dark:hover:bg-white/10"
+                    aria-label={t("assistant.outcome.copyDiagnosticId")}
+                    onClick={() => {
+                      void navigator.clipboard.writeText(outcome.diagnosticId!).then(
+                        () => setDiagnosticCopied(true),
+                        () => setDiagnosticCopied(false),
+                      );
+                    }}
+                  >
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                    {diagnosticCopied
+                      ? t("assistant.outcome.copied")
+                      : t("assistant.outcome.copyDiagnosticId")}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Agent phase display */}
-          {message.isStreaming && message.agentPhase && (
+          {runActive && message.agentPhase && (
             <AgentPhaseDisplay phase={message.agentPhase} />
           )}
 
@@ -597,7 +642,7 @@ export const ChatMessage = memo(function ChatMessage({
           )}
 
           {/* Stats */}
-          {!message.isStreaming && <StatsBadge message={message} />}
+          {!runActive && <StatsBadge message={message} />}
         </div>
       )}
     </motion.div>

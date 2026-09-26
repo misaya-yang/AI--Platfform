@@ -41,6 +41,8 @@ import {
 // =============================================================================
 
 import { copyToClipboard } from "@/lib/clipboard";
+import { downloadAssistantArtifact, openAssistantArtifact } from "@/lib/authenticatedDownload";
+import { toast } from "@/hooks/use-toast";
 
 export interface DocumentPreviewProps {
   title: string;
@@ -130,12 +132,10 @@ function DocumentHeader({
             variant="outline"
             size="sm"
             className="h-8 px-3 gap-1.5"
-            asChild
+            onClick={() => void downloadAssistantArtifact(downloadUrl, title).catch(() => toast.error("Download unavailable"))}
           >
-            <a href={downloadUrl} download>
-              <Download className="h-3.5 w-3.5" />
-              <span className="text-xs">{t("common.download")}</span>
-            </a>
+            <Download className="h-3.5 w-3.5" />
+            <span className="text-xs">{t("common.download")}</span>
           </Button>
         )}
 
@@ -147,11 +147,9 @@ function DocumentHeader({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             {downloadUrl && (
-              <DropdownMenuItem asChild>
-                <a href={downloadUrl} download className="flex items-center gap-2">
-                  <Download className="h-4 w-4" />
-                  {t("assistant.downloadDocument")}
-                </a>
+              <DropdownMenuItem onSelect={() => void downloadAssistantArtifact(downloadUrl, title).catch(() => toast.error("Download unavailable"))}>
+                <Download className="h-4 w-4" />
+                {t("assistant.downloadDocument")}
               </DropdownMenuItem>
             )}
             {hasContent && (
@@ -161,16 +159,9 @@ function DocumentHeader({
               </DropdownMenuItem>
             )}
             {downloadUrl && (
-              <DropdownMenuItem asChild>
-                <a
-                  href={downloadUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  {t("common.openInNewTab")}
-                </a>
+              <DropdownMenuItem onSelect={() => void openAssistantArtifact(downloadUrl).catch(() => toast.error("Preview unavailable"))}>
+                <ExternalLink className="h-4 w-4" />
+                {t("common.openInNewTab")}
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>

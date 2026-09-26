@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import string
@@ -9,16 +10,17 @@ import uuid
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.quiz import QuizGrader
+from ai_gateway_core.quiz.public_projection import safe_quiz_options
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
+from ...services.agent_runtime.thread_store import AgentThreadStore
 from ..deps import enforce_rate_limit, get_user_context
 from ._artifact_headers import attachment_content_disposition
 
@@ -31,6 +33,7 @@ router = APIRouter(prefix="/assistant", tags=["conversation-shares"])
 class CreateShareRequest(BaseModel):
     expires_days: int | None = Field(None, ge=1, le=365)
     include_artifacts: bool = True
+    preview_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ShareResponse(BaseModel):
@@ -67,6 +70,7 @@ async def _collect_quiz_payloads(
     messages: list[dict[str, Any]],
     *,
     tenant_id: str,
+    user_id: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Freeze quiz content referenced by ``metadata.quiz_id`` on assistant messages.
 
@@ -101,22 +105,28 @@ async def _collect_quiz_payloads(
         try:
             quiz_uuid = uuid.UUID(quiz_id)
         except (ValueError, TypeError):
-            continue
+            raise HTTPException(409, "A referenced quiz cannot be verified for sharing") from None
         quiz_row = await db.fetchrow(
-            "SELECT id, title, description, topic, difficulty, question_count "
-            "FROM quizzes WHERE id = $1 AND tenant_id = $2",
+            "SELECT id, title, description, topic, difficulty, question_count, dataset_ids "
+            "FROM quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
             quiz_uuid,
             tenant_id,
+            user_id,
         )
         if not quiz_row:
-            continue
+            raise HTTPException(409, "A referenced quiz cannot be verified for sharing")
+        dataset_ids = quiz_row["dataset_ids"]
+        if isinstance(dataset_ids, str):
+            dataset_ids = json.loads(dataset_ids)
+        if dataset_ids:
+            raise HTTPException(409, "Quiz content derived from private knowledge cannot be shared anonymously")
         q_rows = await db.fetch(
             "SELECT id, question_num, question_type, question_text, options, correct_answer, explanation "
             "FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
             quiz_uuid,
         )
         if not q_rows:
-            continue
+            raise HTTPException(409, "A referenced quiz has no verifiable questions")
 
         public_questions: list[dict[str, Any]] = []
         grading_questions: list[dict[str, Any]] = []
@@ -140,7 +150,7 @@ async def _collect_quiz_payloads(
                     "question_num": qr["question_num"],
                     "question_type": qr["question_type"],
                     "question_text": qr["question_text"],
-                    "options": options or [],
+                    "options": safe_quiz_options(options),
                 }
             )
             grading_questions.append(
@@ -181,7 +191,196 @@ def _strip_snapshot_for_public(snapshot: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _json_value(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _snapshot_hash(snapshot: dict[str, Any], *, include_artifacts: bool, expires_days: int | None) -> str:
+    payload = {
+        "snapshot": snapshot,
+        "include_artifacts": include_artifacts,
+        "expires_days": expires_days,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_safe_share_snapshot(snapshot: Any) -> dict[str, Any]:
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("share_snapshot_version") != 2
+        or snapshot.get("source_policy") != "verified_no_private_knowledge"
+    ):
+        raise HTTPException(410, "This older share needs a new source-rights review")
+    return snapshot
+
+
+async def _build_share_snapshot(
+    request: Request,
+    *,
+    session_id: str,
+    user: UserContext,
+    include_artifacts: bool,
+) -> tuple[dict[str, Any], str]:
+    """Build the exact visitor snapshot from owner-scoped, source-checked facts."""
+    db = _get_db(request)
+    session = await db.fetchrow(
+        "SELECT session_id, history, metadata, user_id, tenant_id "
+        "FROM assistant.sessions WHERE session_id = $1 AND user_id = $2 AND tenant_id = $3",
+        session_id,
+        user.user_id,
+        user.tenant_id or "",
+    )
+    if not session:
+        raise HTTPException(404, "Session not found")
+    legacy_raw = _json_value(session["history"]) or []
+    legacy = legacy_raw.get("messages", []) if isinstance(legacy_raw, dict) else legacy_raw
+    if not isinstance(legacy, list) or len(legacy) > 1000:
+        raise HTTPException(409, "Conversation history cannot be verified for sharing")
+    # Legacy image turns have an explicit no-knowledge origin; older generic
+    # assistant turns do not carry sufficient per-turn provenance.
+    for message in legacy:
+        if not isinstance(message, dict):
+            raise HTTPException(409, "Conversation history cannot be verified for sharing")
+        if message.get("role") == "assistant":
+            meta = message.get("metadata")
+            if not isinstance(meta, dict) or meta.get("source_kind") != "image_generation":
+                raise HTTPException(409, "Older assistant messages have unverified source rights")
+
+    store = getattr(request.app.state, "agent_thread_store", None) or AgentThreadStore(db)
+    thread = await store.get_for_session(
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+    )
+    runtime_messages: list[dict[str, Any]] = []
+    if thread is not None:
+        runtime_messages, total = await store.history_messages(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            runtime_thread_id=thread.runtime_thread_id,
+            limit=1000,
+        )
+        if total > len(runtime_messages):
+            raise HTTPException(409, "Conversation is too long to preview completely")
+        rows = await db.fetch(
+            "SELECT run_id, snapshot FROM assistant_runtime_snapshots "
+            "WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
+            session_id,
+            user.tenant_id,
+            user.user_id,
+        )
+        checked_runs: set[str] = set()
+        for row in rows:
+            payload = _json_value(row["snapshot"])
+            readonly = payload.get("readonly_capabilities") if isinstance(payload, dict) else None
+            items = readonly.get("items") if isinstance(readonly, dict) else None
+            if not isinstance(items, list):
+                raise HTTPException(409, "Conversation source rights cannot be verified")
+            if any(isinstance(item, dict) and item.get("kind") == "knowledge" for item in items):
+                raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
+            checked_runs.add(str(row["run_id"]))
+        for message in runtime_messages:
+            run_id = (message.get("metadata") or {}).get("runtime_run_id")
+            if not run_id or str(run_id) not in checked_runs:
+                raise HTTPException(409, "Conversation source rights cannot be verified")
+
+    history = legacy + runtime_messages
+    if not history:
+        raise HTTPException(400, "Session has no messages")
+
+    artifacts_data: list[dict[str, Any]] = []
+    if include_artifacts:
+        rows = await db.fetch(
+            "SELECT artifact_id, type, format, title, filename, size_bytes, mime_type, source "
+            "FROM assistant.artifacts WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3 "
+            "AND source <> 'user' AND size_bytes > 0 AND variant = 'raw' "
+            "ORDER BY created_at, artifact_id",
+            session_id,
+            user.tenant_id,
+            user.user_id,
+        )
+        artifacts_data = [dict(row) for row in rows]
+    artifact_ids = {str(row["artifact_id"]) for row in artifacts_data}
+    public_messages: list[dict[str, Any]] = []
+    for message in history:
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        public: dict[str, Any] = {"role": message["role"], "content": content}
+        timestamp = message.get("timestamp")
+        if isinstance(timestamp, str):
+            public["timestamp"] = timestamp
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict) and message["role"] == "assistant":
+            safe_meta: dict[str, Any] = {}
+            quiz_id = metadata.get("quiz_id")
+            if isinstance(quiz_id, str):
+                safe_meta["quiz_id"] = quiz_id
+            linked = metadata.get("artifact_ids")
+            if isinstance(linked, list):
+                safe_meta["artifact_ids"] = [
+                    item for item in linked if isinstance(item, str) and item in artifact_ids
+                ]
+            if safe_meta:
+                public["metadata"] = safe_meta
+        public_messages.append(public)
+
+    public_quizzes, answer_keys = await _collect_quiz_payloads(
+        db, public_messages, tenant_id=user.tenant_id or "", user_id=user.user_id,
+    )
+    for message in public_messages:
+        quiz_id = (message.get("metadata") or {}).get("quiz_id")
+        if quiz_id in public_quizzes:
+            message["quiz_data"] = public_quizzes[quiz_id]
+    raw_meta = _json_value(session["metadata"]) or {}
+    title = raw_meta.get("title", "") if isinstance(raw_meta, dict) else ""
+    snapshot: dict[str, Any] = {
+        "share_snapshot_version": 2,
+        "source_policy": "verified_no_private_knowledge",
+        "messages": public_messages,
+        "artifacts": artifacts_data,
+    }
+    if answer_keys:
+        snapshot["quiz_answer_keys"] = answer_keys
+    return snapshot, title
+
+
 # ── Create Share ─────────────────────────────────────────────────────
+
+
+@router.get("/sessions/{session_id}/share-preview")
+async def preview_share(
+    session_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    include_artifacts: bool = True,
+    expires_days: int | None = Query(default=None, ge=1, le=365),
+):
+    """Show the owner exactly what a visitor will receive before sharing."""
+    snapshot, title = await _build_share_snapshot(
+        request,
+        session_id=session_id,
+        user=user,
+        include_artifacts=include_artifacts,
+    )
+    return {
+        "title": title,
+        "messages": _strip_snapshot_for_public(snapshot)["messages"],
+        "artifacts": snapshot["artifacts"],
+        "message_count": len(snapshot["messages"]),
+        "artifact_count": len(snapshot["artifacts"]),
+        "audience": "anyone_with_link",
+        "expires_days": expires_days,
+        "preview_hash": _snapshot_hash(
+            snapshot,
+            include_artifacts=include_artifacts,
+            expires_days=expires_days,
+        ),
+    }
 
 
 @router.post("/sessions/{session_id}/share")
@@ -193,75 +392,22 @@ async def create_share(
 ):
     """Create a public share link for a conversation with artifacts."""
     db = _get_db(request)
-
-    session = await db.fetchrow(
-        "SELECT session_id, history, metadata, user_id, tenant_id "
-        "FROM assistant.sessions WHERE session_id = $1 AND user_id = $2 AND tenant_id = $3",
-        session_id,
-        user.user_id,
-        user.tenant_id or "",
+    snapshot, title = await _build_share_snapshot(
+        request,
+        session_id=session_id,
+        user=user,
+        include_artifacts=body.include_artifacts,
     )
-    if not session:
-        raise HTTPException(404, "Session not found")
-
-    history = (
-        session["history"]
-        if isinstance(session["history"], (list, dict))
-        else json.loads(session["history"])
+    expected_hash = _snapshot_hash(
+        snapshot,
+        include_artifacts=body.include_artifacts,
+        expires_days=body.expires_days,
     )
-    if not history:
-        raise HTTPException(400, "Session has no messages")
-
-    artifacts_data = []
-    if body.include_artifacts:
-        rows = await db.fetch(
-            "SELECT artifact_id, type, format, title, filename, size_bytes, "
-            "mime_type, source FROM assistant.artifacts WHERE session_id = $1",
-            session_id,
-        )
-        artifacts_data = [dict(r) for r in rows]
-
-    raw_meta = session["metadata"]
-    if isinstance(raw_meta, dict):
-        meta = raw_meta
-    elif isinstance(raw_meta, str):
-        meta = json.loads(raw_meta)
-    else:
-        meta = {}
-    title = meta.get("title", "")
-    model_id = None
-    for msg in reversed(history):
-        if isinstance(msg, dict) and msg.get("metadata", {}).get("model_id"):
-            model_id = msg["metadata"]["model_id"]
-            break
-
-    # Freeze quiz content so the share page can render quizzes even if the
-    # underlying quiz rows are later edited or deleted. Public quiz payload is
-    # attached to the owning assistant message; grading answer keys are kept
-    # separately on the snapshot root and stripped before public GET.
-    public_quizzes, answer_keys = await _collect_quiz_payloads(
-        db,
-        history,
-        tenant_id=user.tenant_id or "",
-    )
-    if public_quizzes:
-        for msg in history:
-            if not isinstance(msg, dict):
-                continue
-            meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else None
-            qid = meta.get("quiz_id") if meta else None
-            if qid and qid in public_quizzes:
-                msg["quiz_data"] = public_quizzes[qid]
-
-    snapshot: dict[str, Any] = {
-        "messages": history,
-        "artifacts": artifacts_data,
-        "model_id": model_id,
-        "shared_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if answer_keys:
-        # Grading-only; never returned by the public GET.
-        snapshot["quiz_answer_keys"] = answer_keys
+    if body.preview_hash != expected_hash:
+        raise HTTPException(409, "Share preview changed. Review it again before creating a link")
+    snapshot["shared_at"] = datetime.now(timezone.utc).isoformat()
+    history = snapshot["messages"]
+    artifacts_data = snapshot["artifacts"]
 
     share_code = _generate_share_code()
     for _ in range(5):
@@ -334,7 +480,7 @@ async def get_share(share_code: str, request: Request):
             share_code,
         )
 
-    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
     snapshot = _strip_snapshot_for_public(snapshot)
 
     return {
@@ -402,7 +548,7 @@ async def submit_shared_quiz(
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
     answer_keys = snapshot.get("quiz_answer_keys") if isinstance(snapshot, dict) else None
     if not isinstance(answer_keys, dict) or quiz_id not in answer_keys:
         raise HTTPException(404, "Quiz not found in this share")
@@ -479,7 +625,8 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
     """Public endpoint — download an artifact from a shared conversation."""
     db = _get_db(request)
     row = await db.fetchrow(
-        "SELECT snapshot, expires_at, is_active FROM conversation_shares WHERE share_code = $1",
+        "SELECT snapshot, expires_at, is_active, session_id, tenant_id, user_id "
+        "FROM conversation_shares WHERE share_code = $1",
         share_code,
     )
     if not row or not row["is_active"]:
@@ -487,7 +634,7 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
     artifact_ids = [a["artifact_id"] for a in snapshot.get("artifacts", [])]
     if artifact_id not in artifact_ids:
         raise HTTPException(404, "Artifact not in this share")
@@ -498,12 +645,17 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
 
     try:
         artifact = await artifact_storage.get_artifact(artifact_id)
-        if not artifact:
+        if (
+            not artifact
+            or artifact.session_id != row["session_id"]
+            or artifact.tenant_id != row["tenant_id"]
+            or artifact.user_id != row["user_id"]
+            or artifact.source == "user"
+            or artifact.size_bytes <= 0
+        ):
             raise HTTPException(404, "Artifact not found in storage")
-        url = await artifact_storage.get_presigned_download_url(artifact)
-        if url and urlsplit(url).scheme.lower() in {"http", "https"}:
-            return RedirectResponse(url=url, status_code=302)
-
+        # Keep public reads behind the share check on every request. A
+        # presigned storage URL would outlive share revocation or expiry.
         content = await artifact_storage.download_artifact(artifact_id)
         if content is None:
             raise HTTPException(404, "Artifact content not found")
@@ -530,19 +682,25 @@ async def list_shares(
     request: Request,
     user: UserContext = Depends(get_user_context),
     limit: int = Query(default=50, ge=1, le=200),
+    session_id: str | None = None,
 ):
     """List shares created by the current user."""
     db = _get_db(request)
-    rows = await db.fetch(
-        """SELECT share_code, title, message_count, artifact_count, view_count,
-                  is_active, created_at, expires_at
-           FROM conversation_shares
-           WHERE tenant_id = $1 AND user_id = $2
-           ORDER BY created_at DESC LIMIT $3""",
-        user.tenant_id or "",
-        user.user_id,
-        limit,
-    )
+    if session_id:
+        rows = await db.fetch(
+            "SELECT share_code, session_id, title, message_count, artifact_count, view_count, "
+            "is_active, created_at, expires_at FROM conversation_shares "
+            "WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3 "
+            "ORDER BY created_at DESC LIMIT $4",
+            user.tenant_id or "", user.user_id, session_id, limit,
+        )
+    else:
+        rows = await db.fetch(
+            "SELECT share_code, session_id, title, message_count, artifact_count, view_count, "
+            "is_active, created_at, expires_at FROM conversation_shares "
+            "WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT $3",
+            user.tenant_id or "", user.user_id, limit,
+        )
     return {"shares": [dict(r) for r in rows]}
 
 

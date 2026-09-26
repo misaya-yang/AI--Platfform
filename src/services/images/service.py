@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import logging
 import time
 import uuid
 from types import SimpleNamespace
@@ -30,15 +31,28 @@ from ai_gateway_core.image.image_state import (
     update_turn_status,
     upsert_image_session,
 )
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.media.image_generation import validate_image_bytes
 from ai_gateway_core.security import SafeFetchError, safe_fetch_with_response
 from ai_gateway_core.storage import get_artifact_storage
 from fastapi import HTTPException, Request
 
+logger = logging.getLogger(__name__)
+
 
 def _pool(request: Request):
     database = getattr(request.app.state, "database", None)
     return getattr(database, "_pool", None)
+
+
+def public_image_error(status: str | None, error_code: str | None) -> str | None:
+    """Project old and new task rows without exposing stored provider errors."""
+
+    if status == "unknown" or error_code == "outcome_unknown":
+        return "image generation outcome unknown"
+    if status == "failed":
+        return "image generation failed"
+    return None
 
 
 def _owner(user: Any, body: Any) -> str:
@@ -237,6 +251,11 @@ class ImageGenerationService:
         self.provider = getattr(request.app.state, "image_generation_service", None)
         self.storage = get_artifact_storage()
 
+    def effective_model_id(self) -> str | None:
+        """Return the configured image model, not the chat model in the request."""
+        configured = getattr(getattr(self.provider, "config", None), "model", None)
+        return configured.strip() if isinstance(configured, str) and configured.strip() else None
+
     async def generate(
         self,
         body: Any,
@@ -291,7 +310,7 @@ class ImageGenerationService:
                 owner_scope=owner,
                 status="running",
                 prompt=body.prompt,
-                model_id=body.model_id,
+                model_id=self.effective_model_id() or body.model_id,
                 request_payload=payload,
                 progress=1,
                 turn_id=turn_id,
@@ -392,7 +411,7 @@ class ImageGenerationService:
             owner_scope=owner,
             task_id=task_id,
             prompt=body.prompt,
-            model_id=body.model_id,
+            model_id=self.effective_model_id() or body.model_id,
             style=str(body.style),
             add_watermark=body.add_watermark,
             parent_artifact_id=resolved_parent,
@@ -403,6 +422,7 @@ class ImageGenerationService:
             client_request_id=body.client_request_id,
             request_hash=request_hash,
         )
+        provider_succeeded = False
         try:
             generate_kwargs = {
                 "prompt": body.prompt,
@@ -421,6 +441,7 @@ class ImageGenerationService:
                 raise RuntimeError("image generation outcome unknown")
             if not getattr(result, "success", False) or not getattr(result, "images", None):
                 raise RuntimeError(getattr(result, "error", None) or "image generation failed")
+            provider_succeeded = True
             artifacts = []
             display_artifacts = []
             thumbnail_artifacts = []
@@ -447,7 +468,7 @@ class ImageGenerationService:
                         turn_id=turn_id,
                         owner_scope=owner,
                         provider=getattr(result, "provider", None),
-                        model_id=body.model_id,
+                        model_id=self.effective_model_id(),
                         prompt=body.prompt,
                         artifact_id=_deterministic_artifact_id(
                             self.user.tenant_id,
@@ -479,7 +500,7 @@ class ImageGenerationService:
                             turn_id=turn_id,
                             owner_scope=owner,
                             provider=getattr(result, "provider", None),
-                            model_id=body.model_id,
+                            model_id=self.effective_model_id(),
                             prompt=body.prompt,
                             artifact_id=_deterministic_artifact_id(
                                 self.user.tenant_id,
@@ -510,7 +531,7 @@ class ImageGenerationService:
                             turn_id=turn_id,
                             owner_scope=owner,
                             provider=getattr(result, "provider", None),
-                            model_id=body.model_id,
+                            model_id=self.effective_model_id(),
                             prompt=body.prompt,
                             artifact_id=_deterministic_artifact_id(
                                 self.user.tenant_id,
@@ -553,6 +574,7 @@ class ImageGenerationService:
                 "success": True,
                 "images": urls,
                 "provider": getattr(result, "provider", None),
+                "effective_model_id": self.effective_model_id(),
                 "duration_ms": (time.monotonic() - started) * 1000,
                 "session_id": session_id,
                 "turn_id": turn_id,
@@ -576,15 +598,25 @@ class ImageGenerationService:
                     output_artifact_id=raw,
                 )
             return response
-        except HTTPException:
-            raise
         except Exception as exc:
-            error_code = "outcome_unknown" if "outcome unknown" in str(exc) else "provider_failed"
+            if isinstance(exc, HTTPException) and not provider_succeeded:
+                raise
+            record_internal_exception(logger, "assistant.image_generation.failure", exc)
+            error_code = (
+                "outcome_unknown"
+                if provider_succeeded or "outcome unknown" in str(exc)
+                else "provider_failed"
+            )
+            safe_error = (
+                "image generation outcome unknown"
+                if error_code == "outcome_unknown"
+                else "image generation failed"
+            )
             await update_turn_status(
                 self.pool,
                 turn_id=turn_id,
                 status="unknown" if error_code == "outcome_unknown" else "failed",
-                error=str(exc),
+                error=safe_error,
                 error_code=error_code,
             )
             if task_id:
@@ -593,13 +625,14 @@ class ImageGenerationService:
                     task_id=task_id,
                     status="unknown" if error_code == "outcome_unknown" else "failed",
                     progress=100,
-                    error=str(exc),
+                    error=safe_error,
                     error_code=error_code,
                 )
             raise HTTPException(
                 502,
                 detail={
                     "error_code": error_code,
+                    "task_id": task_id,
                     "message": "image generation outcome unknown"
                     if error_code == "outcome_unknown"
                     else "image generation failed",
@@ -855,9 +888,19 @@ class ImageGenerationService:
         turns, next_cursor = await list_turns(
             self.pool, session_id=session_id, owner_scope=owner, limit=limit, cursor=cursor
         )
+        public_turns = []
         for turn in turns:
-            turn["created_at"] = turn["created_at"].isoformat() if turn.get("created_at") else ""
-            turn["completed_at"] = (
+            visible = {
+                key: turn.get(key)
+                for key in (
+                    "turn_id", "session_id", "task_id", "prompt", "model_id", "style",
+                    "add_watermark", "parent_artifact_id", "output_artifact_id",
+                    "output_artifact_ids", "status", "error_code", "client_request_id",
+                )
+            }
+            visible["error"] = public_image_error(turn.get("status"), turn.get("error_code"))
+            visible["created_at"] = turn["created_at"].isoformat() if turn.get("created_at") else ""
+            visible["completed_at"] = (
                 turn["completed_at"].isoformat() if turn.get("completed_at") else None
             )
             if include_urls and turn.get("output_artifact_id") and self.storage:
@@ -868,13 +911,14 @@ class ImageGenerationService:
                     tenant_id=self.user.tenant_id,
                     user_id=self.user.user_id,
                 )
-                turn["output_url"] = url
+                visible["output_url"] = url
+            public_turns.append(visible)
         return {
             "session_id": session_id,
             "latest_artifact_id": row.get("latest_artifact_id"),
             "locked_style": row.get("locked_style"),
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
-            "turns": turns,
+            "turns": public_turns,
             "next_cursor": next_cursor,
         }

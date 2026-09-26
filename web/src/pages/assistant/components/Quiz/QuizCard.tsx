@@ -34,8 +34,9 @@ import {
   RefreshCw,
   Send,
 } from "lucide-react";
-import { submitQuiz, submitSharedQuiz } from "@/api/quiz";
+import { getQuizAttemptResult, submitQuiz, submitSharedQuiz } from "@/api/quiz";
 import { useAuthStore } from "@/store/useAuthStore";
+import { generateUUID } from "@/lib/utils";
 import type { QuizData, QuizAttemptResult } from "../../types";
 import { QuizIdle } from "./QuizIdle";
 import { QuizQuestion } from "./QuizQuestion";
@@ -109,6 +110,7 @@ export function QuizCard({
     selectedAnswers: Record<string, string>;
     result: QuizAttemptResult | undefined;
     viewMode: ViewMode;
+    attemptId?: string;
   };
 
   const hydratedQuizIdRef = useRef<string | null>(null);
@@ -122,6 +124,7 @@ export function QuizCard({
         selectedAnswers: persisted?.selectedAnswers ?? {},
         result: restoredResult,
         viewMode: "result",
+        attemptId: persisted?.attemptId,
       };
     }
     if (!persisted) {
@@ -130,6 +133,7 @@ export function QuizCard({
         selectedAnswers: {},
         result: undefined,
         viewMode: "idle",
+        attemptId: undefined,
       };
     }
     let phase: PersistedPhase = persisted.phase ?? "quiz";
@@ -141,6 +145,7 @@ export function QuizCard({
       selectedAnswers: persisted.selectedAnswers ?? {},
       result: undefined,
       viewMode: phase as ViewMode,
+      attemptId: persisted.attemptId,
     };
   };
 
@@ -155,6 +160,22 @@ export function QuizCard({
     initial.result,
   );
   const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode);
+  const attemptIdRef = useRef<string | null>(initial.attemptId ?? null);
+  const submitInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (scope !== "main" || result || !attemptIdRef.current) return;
+    let disposed = false;
+    void getQuizAttemptResult(quizData.quiz_id, attemptIdRef.current).then((saved) => {
+      if (disposed) return;
+      setResult(saved);
+      setViewMode("result");
+    }).catch(() => {
+      // A not-yet-accepted submission remains manually retryable with the
+      // same stable attempt id and selected answers.
+    });
+    return () => { disposed = true; };
+  }, [quizData.quiz_id, result, scope]);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   /** Snapshot of which question ids were empty at submission time. */
@@ -174,6 +195,7 @@ export function QuizCard({
     setSelectedAnswers(h.selectedAnswers);
     setResult(h.result);
     setViewMode(h.viewMode);
+    attemptIdRef.current = h.attemptId ?? null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quizData.quiz_id]);
 
@@ -217,6 +239,7 @@ export function QuizCard({
       currentIndex,
       result,
       submittedAt: result ? Date.now() : undefined,
+      attemptId: attemptIdRef.current ?? undefined,
     });
     if (phase === "quiz" || phase === "quiz-all-answered") {
       triggerSaveFlash();
@@ -294,6 +317,8 @@ export function QuizCard({
   );
 
   const doSubmit = useCallback(async () => {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
     setSubmitError(undefined);
     setViewMode("submitting");
     const unanswered = questions
@@ -303,6 +328,15 @@ export function QuizCard({
       })
       .map((q) => q.id);
     setUnansweredAtSubmit(unanswered);
+    const attemptId = attemptIdRef.current ?? generateUUID();
+    attemptIdRef.current = attemptId;
+    writePersisted(scopeId, quizData.quiz_id, {
+      v: 2,
+      phase: "quiz-all-answered",
+      selectedAnswers,
+      currentIndex,
+      attemptId,
+    });
     try {
       const res =
         scope === "share"
@@ -311,7 +345,7 @@ export function QuizCard({
               quizData.quiz_id,
               selectedAnswers,
             )
-          : await submitQuiz(quizData.quiz_id, selectedAnswers);
+          : await submitQuiz(quizData.quiz_id, selectedAnswers, attemptId);
       setResult(res);
       setViewMode("result");
       onResult?.(res);
@@ -323,8 +357,10 @@ export function QuizCard({
           : t("assistant.quiz.submitErrorGeneric", "提交时发生未知错误，请重试");
       setSubmitError(msg);
       setViewMode("submit-error");
+    } finally {
+      submitInFlightRef.current = false;
     }
-  }, [scope, shareCode, quizData.quiz_id, selectedAnswers, questions, onResult, t]);
+  }, [scope, scopeId, shareCode, quizData.quiz_id, selectedAnswers, questions, currentIndex, onResult, t]);
 
   const handleSubmit = useCallback(() => {
     if (!allAnswered) return;
@@ -363,6 +399,7 @@ export function QuizCard({
 
   const handleRetake = useCallback(() => {
     clearPersisted(scopeId, quizData.quiz_id);
+    attemptIdRef.current = null;
     setSelectedAnswers({});
     setCurrentIndex(0);
     setResult(undefined);

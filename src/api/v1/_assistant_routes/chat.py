@@ -26,6 +26,7 @@ from ....services.assistant_entry.launch_resolution import (
     AgentLaunchResolutionError,
     resolve_agent_launch,
 )
+from ....services.assistant_entry.memory_controls import effective_assistant_memory_mode
 from ....services.assistant_entry.model_access import (
     assistant_model_service,
     check_model_permission,
@@ -54,7 +55,8 @@ def _require_agent_runtime_request(body: AssistantChatRequest) -> None:
     """
 
     unsupported = bool(
-        body.enable_task_planning
+        body.execution_profile != "safe"
+        or body.enable_task_planning
         or body.confirm_plan
         or body.resume_run_id
         or body.resume_approval_id
@@ -69,7 +71,9 @@ def _require_agent_runtime_request(body: AssistantChatRequest) -> None:
         )
 
 
-def _agent_runtime_readonly_capabilities(body: AssistantChatRequest) -> dict[str, Any]:
+def _agent_runtime_readonly_capabilities(
+    body: AssistantChatRequest, *, attachment_refs: list[str] | None = None
+) -> dict[str, Any]:
     """Build explicit read-only references for the Agent Runtime boundary."""
 
     return {
@@ -79,7 +83,7 @@ def _agent_runtime_readonly_capabilities(body: AssistantChatRequest) -> dict[str
             "top_k": body.kb_top_k,
             "score_threshold": body.kb_score_threshold,
         },
-        "attachments": {"refs": list(body.file_paths)},
+        "attachments": {"refs": list(attachment_refs if attachment_refs is not None else body.file_paths)},
         "web_search": {
             "enabled": body.web_search_enabled,
             "max_results": body.web_search_max_results,
@@ -98,8 +102,17 @@ async def _start_agent_runtime_turn(
     _require_agent_runtime_request(body)
     control = agent_runtime_control(request)
     try:
+        memory_mode = await effective_assistant_memory_mode(
+            request, user.tenant_id, user.user_id, body.memory_mode,
+        )
         style_guidance = str(body.system_prompt or "").strip() or None
-        readonly = _agent_runtime_readonly_capabilities(body)
+        from .attachment_refs import bind_assistant_attachment_refs, selected_image_inputs
+
+        bound_refs = await bind_assistant_attachment_refs(
+            request, user, session_id=session_id, model_id=model_id, refs=body.file_paths,
+        )
+        image_inputs = await selected_image_inputs(user, session_id=session_id, refs=bound_refs) if bound_refs else []
+        readonly = _agent_runtime_readonly_capabilities(body, attachment_refs=bound_refs)
         launch = await resolve_agent_launch(
             entrypoint="assistant",
             tenant_id=user.tenant_id,
@@ -116,7 +129,7 @@ async def _start_agent_runtime_turn(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
             style_guidance=style_guidance,
-            memory_mode=body.memory_mode,
+            memory_mode=memory_mode,
             memory_profile=body.memory_profile,
             enable_dynamic_tools=True,
         )
@@ -125,12 +138,13 @@ async def _start_agent_runtime_turn(
             user_id=user.user_id,
             session_id=session_id,
             message=body.message,
+            image_inputs=image_inputs,
             model_id=model_id,
             reasoning_option=body.reasoning_option,
             legacy_thinking_level=body.thinking_level,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
-            memory_mode=body.memory_mode,
+            memory_mode=memory_mode,
             memory_profile=body.memory_profile,
             readonly_capabilities=readonly,
             resolved_agent_launch=launch,

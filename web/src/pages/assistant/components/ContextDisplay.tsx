@@ -28,6 +28,7 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
     <div className="mb-4">
       <button
         onClick={() => setIsOpen(!isOpen)}
+        aria-expanded={isOpen}
         className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors group"
       >
         <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-[hsl(var(--assistant-accent-soft))] group-hover:bg-[hsl(var(--assistant-accent-soft))]/80 transition-colors">
@@ -101,15 +102,17 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                               </Badge>
                             )}
                           </div>
-                          {chunk.source_url && (
+                          {(typeof chunk.metadata?.document_id === "string" || chunk.source_url) && (
                             <a
-                              href={chunk.source_url}
+                              href={typeof chunk.metadata?.document_id === "string"
+                                ? `/knowledge/${encodeURIComponent(ctx.dataset_id)}?tab=documents&document_id=${encodeURIComponent(chunk.metadata.document_id)}`
+                                : chunk.source_url}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline"
                             >
                               <ExternalLink className="h-3 w-3" />
-                              <span>Source</span>
+                              <span>{t("assistant.openSource", "Open source")}</span>
                             </a>
                           )}
                         </div>

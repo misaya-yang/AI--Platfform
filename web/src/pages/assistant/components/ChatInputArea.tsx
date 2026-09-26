@@ -27,19 +27,25 @@ interface ChatInputAreaProps {
   setInput: (val: string) => void;
   files: UploadedFile[];
   isUploading: boolean;
+  selectionNotice: string;
   isStreaming: boolean;
   isComposerBlocked: boolean;
   isGeneratingImage: boolean;
   isImageMode: boolean;
   hasAvailableModel: boolean;
+  supportsVision: boolean;
   handleFileSelect: (files: FileList | null) => void;
   removeFile: (index: number) => void;
+  retryFile: (index: number) => void;
+  toggleFileSelection: (index: number) => void;
   onSend: () => void;
   onStop: () => void;
+  onCancelImageMode: () => void;
   handlePaste: (e: React.ClipboardEvent) => void;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   config: AssistantConfig | null;
   datasets: DatasetInfo[];
+  datasetsLoadError: boolean;
   selectedDatasets: string[];
   onToggleDataset: (id: string) => void;
   webSearchEnabled: boolean;
@@ -60,19 +66,25 @@ export function ChatInputArea({
   setInput,
   files,
   isUploading,
+  selectionNotice,
   isStreaming,
   isComposerBlocked,
   isGeneratingImage,
   isImageMode,
   hasAvailableModel,
+  supportsVision,
   handleFileSelect,
   removeFile,
+  retryFile,
+  toggleFileSelection,
   onSend,
   onStop,
+  onCancelImageMode,
   handlePaste,
   fileInputRef,
   config,
   datasets,
+  datasetsLoadError,
   selectedDatasets,
   onToggleDataset,
   webSearchEnabled,
@@ -90,13 +102,21 @@ export function ChatInputArea({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const shouldReduceMotion = useReducedMotion();
 
-  const hasUploadedFiles = files.some((f) => f.status === "success" && f.response);
+  const hasUploadedFiles = files.some((f) => f.status === "success" && f.selected && f.response);
+  const selectedFiles = files.filter((f) => f.status === "success" && f.selected && f.response);
+  const unsupportedSelectedImage = !supportsVision && selectedFiles.some((f) => isImageFile(f.file));
+  const unavailableDatasets = selectedDatasets.filter((id) => !datasets.some((dataset) => dataset.dataset_id === id));
+  const scopeUnavailable = (selectedDatasets.length > 0 && (datasetsLoadError || unavailableDatasets.length > 0)) ||
+    (webSearchEnabled && !config?.web_search_enabled);
   const canSend =
     !isComposerBlocked &&
     !isUploading &&
     !isGeneratingImage &&
     hasAvailableModel &&
-    Boolean(input.trim() || hasUploadedFiles);
+    !scopeUnavailable &&
+    (isImageMode
+      ? Boolean(input.trim())
+      : !unsupportedSelectedImage && Boolean(input.trim() || hasUploadedFiles));
   const selectedReasoningLabel =
     thinkingLevel === "auto"
       ? t("assistant.thinkingAuto", "Think auto")
@@ -119,9 +139,11 @@ export function ChatInputArea({
       if (e.nativeEvent.isComposing || e.keyCode === 229) {
         return;
       }
-      if (e.key === "Escape" && isStreaming) {
+      if (e.key === "Escape" && (isStreaming || isImageMode)) {
         e.preventDefault();
-        onStop();
+        e.stopPropagation();
+        if (isStreaming) onStop();
+        else onCancelImageMode();
         return;
       }
       const isSubmitShortcut =
@@ -132,7 +154,7 @@ export function ChatInputArea({
         onSend();
       }
     },
-    [canSend, isStreaming, onSend, onStop]
+    [canSend, isStreaming, isImageMode, onSend, onStop, onCancelImageMode]
   );
 
   // Reset height when input clears
@@ -153,10 +175,20 @@ export function ChatInputArea({
             exit={shouldReduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
             className="overflow-hidden border-b border-[hsl(var(--assistant-border-soft))]"
           >
+            {selectionNotice === "limit" && (
+              <p role="alert" className="px-4 pt-2 text-xs text-amber-600 dark:text-amber-400">
+                {t("assistant.fileLimit", "At most five attachments can be added to one message.")}
+              </p>
+            )}
+            {unsupportedSelectedImage && (
+              <p role="alert" className="px-4 pt-2 text-xs text-amber-600 dark:text-amber-400">
+                {t("assistant.imageModelRequired", "The selected model cannot read images. Choose a vision model or exclude the image before sending.")}
+              </p>
+            )}
             <div className="px-4 py-3 flex flex-wrap gap-2">
               {files.map((f, index) => (
                 <motion.div
-                  key={`${f.file.name}-${index}`}
+                  key={f.id}
                   initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.96 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96 }}
@@ -192,6 +224,38 @@ export function ChatInputArea({
                       ? `${f.progress}%`
                       : formatFileSize(f.file.size)}
                   </span>
+                  {f.status === "success" && (
+                    <button
+                      type="button"
+                      onClick={() => toggleFileSelection(index)}
+                      aria-pressed={f.selected}
+                      className="relative z-10 rounded border border-current/30 px-1.5 py-0.5 text-[10px]"
+                    >
+                      {f.selected
+                        ? t("assistant.fileIncluded", "Included in next message")
+                        : t("assistant.fileExclude", "Not included")}
+                    </button>
+                  )}
+                  {f.status === "error" && (
+                    <>
+                      <span role="alert" className="relative z-10 max-w-[160px] text-[10px]">
+                        {f.errorCode === "unsupported"
+                          ? t("assistant.fileUnsupported", "Unsupported file type")
+                          : f.errorCode === "too_large"
+                            ? t("assistant.fileTooLarge", "File exceeds the upload limit")
+                            : t("assistant.fileUploadFailed", "Upload failed")}
+                      </span>
+                      {f.errorCode === "upload_failed" && (
+                        <button
+                          type="button"
+                          onClick={() => retryFile(index)}
+                          className="relative z-10 rounded border border-current/30 px-1.5 py-0.5 text-[10px]"
+                        >
+                          {t("assistant.fileRetry", "Retry")}
+                        </button>
+                      )}
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => removeFile(index)}
@@ -361,6 +425,18 @@ export function ChatInputArea({
               {t("assistant.disclaimer", "AI responses may be inaccurate")}
             </span>
           </div>
+          <div className="mt-1 flex flex-wrap gap-1.5 px-1 text-[11px] text-[hsl(var(--assistant-text-tertiary))]" aria-label={t("assistant.roundScope", "This round's sources")}>
+            <span>{t("assistant.roundScope", "This round's sources")}:</span>
+            {selectedDatasets.length === 0 && selectedFiles.length === 0 && !webSearchEnabled && <span>{t("assistant.roundScopeNone", "No knowledge base or attachments selected")}</span>}
+            {selectedDatasets.map((id) => (
+              <span key={id} className="rounded border px-1.5">
+                {t("assistant.companyKB")}: {datasets.find((dataset) => dataset.dataset_id === id)?.name || `${id} · ${t("assistant.scopeUnavailable", "unavailable")}`}
+              </span>
+            ))}
+            {selectedFiles.map((file) => <span key={file.id} className="max-w-[150px] truncate rounded border px-1.5">{file.file.name}</span>)}
+            {webSearchEnabled && <span className="rounded border px-1.5">{t("assistant.webSearchMenu", "Web search")}</span>}
+          </div>
+          {scopeUnavailable && <p role="alert" className="px-1 pt-1 text-xs text-amber-600">{t("assistant.datasetScopeUnavailable", "Selected knowledge sources are unavailable. Review this round's sources before sending.")}</p>}
         </div>
       </div>
     </div>

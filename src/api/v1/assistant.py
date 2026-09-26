@@ -78,6 +78,7 @@ from ._assistant_routes.chat import _start_agent_runtime_turn as _start_agent_ru
 from ._assistant_routes.chat import chat as chat
 from ._assistant_routes.chat import chat_stream as chat_stream
 from ._assistant_routes.chat import router as _chat_router
+from ._assistant_routes.memory import router as _memory_router
 from ._assistant_routes.metrics import get_session_metrics as get_session_metrics
 from ._assistant_routes.metrics import get_tenant_metrics as get_tenant_metrics
 from ._assistant_routes.metrics import router as _metrics_router
@@ -113,6 +114,7 @@ from ._assistant_routes.sessions import get_session as get_session
 from ._assistant_routes.sessions import get_session_history as get_session_history
 from ._assistant_routes.sessions import list_sessions as list_sessions
 from ._assistant_routes.sessions import router as _sessions_router
+from ._assistant_routes.tools import router as _tools_router
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 
@@ -124,6 +126,8 @@ for _sub_router in (
     _catalog_router,
     _runs_router,
     _chat_router,
+    _memory_router,
+    _tools_router,
     _sessions_router,
     _artifacts_router,
     _metrics_router,

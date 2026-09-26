@@ -14,11 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from ai_gateway_core.quiz.public_projection import safe_quiz_options
 
 from src.api.v1 import conversation_shares as cs
 
@@ -75,6 +74,8 @@ def _make_request(
 def _build_snapshot(quiz_id: str, question_id: str) -> dict:
     """Snapshot containing one quiz with a single mc_single question (answer A)."""
     return {
+        "share_snapshot_version": 2,
+        "source_policy": "verified_no_private_knowledge",
         "messages": [
             {
                 "role": "assistant",
@@ -293,3 +294,19 @@ def test_public_get_strips_answer_keys():
     q = assistant_msg["quiz_data"]["questions"][0]
     assert "correct_answer" not in q
     assert "explanation" not in q
+
+
+def test_pre_submission_options_drop_legacy_answer_fields() -> None:
+    raw = [{
+        "label": "A", "text": "Yes", "correct_answer": True,
+        "explanation": "secret", "source_chunks": ["private"],
+    }]
+    assert safe_quiz_options(raw) == [{"label": "A", "text": "Yes"}]
+
+
+def test_old_share_requires_new_source_review() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        cs._require_safe_share_snapshot({"messages": [{"role": "assistant", "content": "legacy"}]})
+    assert exc.value.status_code == 410

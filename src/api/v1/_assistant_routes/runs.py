@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ....core.auth.user_resolver import UserContext
 from ....services.agent_runtime import AgentRuntimeControlError
+from ....services.assistant_entry.approval_preview import owner_approval_preview
 from ....services.assistant_entry.run_queries import (
     agent_runtime_control,
     fetch_agent_runtime_run,
@@ -72,6 +73,18 @@ async def approve_tool_call(
             if approval is None:
                 raise HTTPException(status_code=404, detail="Approval not found")
             payload = body.model_dump()
+            if payload["approved"]:
+                preview = await owner_approval_preview(
+                    database,
+                    approval_id=approval_id,
+                    runtime_thread_id=str(run.get("harness_thread_id") or ""),
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session_id,
+                    runtime_summary=approval,
+                )
+                if not preview["can_approve"]:
+                    raise HTTPException(status_code=409, detail={"code": "APPROVAL_ACTION_UNVERIFIED"})
             try:
                 await control.decide_approval(
                     approval_id=approval_id,
@@ -117,6 +130,16 @@ async def get_run_status(
         )
         if row is not None:
             payload = dict(row)
+            # Runtime error text is an internal diagnostic channel. The one
+            # restart outcome with a product-specific explanation is exposed
+            # as a bounded reason, without forwarding arbitrary error text.
+            payload["terminal_reason"] = (
+                "runtime_restart_interrupted"
+                if payload.get("status") == "cancelled"
+                and payload.get("error") == "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_ORPHANED"
+                else None
+            )
+            payload["error"] = None
             usage = payload.get("usage")
             if isinstance(usage, str):
                 with contextlib.suppress(json.JSONDecodeError):
@@ -162,7 +185,7 @@ async def cancel_task(
         raise HTTPException(status_code=404, detail="Task not found")
     status = str(row.get("status") or "")
     session_id = str(row.get("session_id") or "")
-    if status not in {"running", "pending"}:
+    if status not in {"running", "pending", "queued", "awaiting_approval"}:
         return TaskCancelResponse(
             task_id=task_id,
             session_id=session_id,

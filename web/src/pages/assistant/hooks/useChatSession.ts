@@ -40,6 +40,7 @@ import {
 } from "@/features/chat/stream";
 import {
   acceptPendingRunSession,
+  confirmsAssistantRunAdmission,
   beginNewChatSession,
   persistNewChatSession,
   startChatWithoutAwaitingSessionCreate,
@@ -50,7 +51,10 @@ import {
   ACTIVE_RUN_METADATA_KEY,
   shouldBlockDuringRunRestore,
 } from "@/features/chat/sessionRestoreWindow";
-import { isExpectedApprovalRejection } from "@/features/chat/runtimeV2State";
+import {
+  ASSISTANT_VIEW_DETACH_REASON,
+  isExpectedApprovalRejection,
+} from "@/features/chat/runtimeV2State";
 import { mergeKnowledgeContexts } from "@/features/chat/knowledgeContexts";
 import {
   createStreamTerminalLatch,
@@ -210,7 +214,12 @@ async function restoreLatestRun(
   messages: ChatMessageType[],
   metadata: Record<string, unknown> | null | undefined,
   sessionId: string,
-): Promise<{ messages: ChatMessageType[]; error?: string; blocksComposer?: boolean }> {
+): Promise<{
+  messages: ChatMessageType[];
+  error?: string;
+  blocksComposer?: boolean;
+  activeRun?: { sessionId: string; runId: string };
+}> {
   const marker = asRecord(metadata?.[ASSISTANT_ACTIVE_RUN_METADATA_KEY]);
   const runId = nonEmptyString(marker?.run_id);
   if (!marker || !runId) return { messages };
@@ -326,9 +335,15 @@ async function restoreLatestRun(
         ...current,
         isStreaming: false,
         status: restoredMessageStatus(processStatus),
+        outcomeUncertain:
+          current.outcomeUncertain === true ||
+          status === "unknown" ||
+          phase === "side_effect_unknown",
         processSummary: {
           ...base,
           status: processStatus,
+          terminalReason: run.terminal_reason === "runtime_restart_interrupted"
+            ? "runtime_restart_interrupted" : base.terminalReason,
           collapsed: succeeded || active ? base.collapsed : false,
           isErrorExpanded: processStatus === "failed" ? true : undefined,
           tools: [],
@@ -340,25 +355,18 @@ async function restoreLatestRun(
       status === "running" ||
       status === "queued" ||
       status === "awaiting_approval";
-    return { messages: next, blocksComposer };
-  } catch {
-    console.warn("Assistant run status reconciliation failed");
-    const current = next[targetIndex];
-    next[targetIndex] = {
-      ...current,
-      isStreaming: false,
-      status: "failed",
-      processSummary: {
-        ...current.processSummary!,
-        status: "failed",
-        collapsed: false,
-        isErrorExpanded: true,
-        tools: [],
-      },
-    };
     return {
       messages: next,
-      error: "Run status unavailable. Reopen this conversation to retry.",
+      blocksComposer,
+      activeRun: blocksComposer ? { sessionId, runId } : undefined,
+    };
+  } catch {
+    console.warn("Assistant run status reconciliation failed");
+    return {
+      messages: next,
+      blocksComposer: true,
+      activeRun: { sessionId, runId },
+      error: "Run status is unavailable. This conversation is paused until its result can be checked.",
     };
   }
 }
@@ -389,6 +397,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 
   // Restore assistant metadata
   if (msg.role === "assistant" && msg.metadata) {
+    baseMessage.sourceAccessRevoked = msg.metadata.source_access_revoked === true;
     // Initialize search status array
     const searchStatusItems: any[] = [];
 
@@ -549,10 +558,16 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
         collapsed: summary.collapsed === true,
         runId: typeof summary.run_id === "string" ? summary.run_id : undefined,
         status,
+        terminalReason: summary.terminal_reason === "runtime_restart_interrupted"
+          ? "runtime_restart_interrupted" : undefined,
         steps: Array.isArray(summary.steps) ? summary.steps as ProcessStepItem[] : [],
         tools: Array.isArray(summary.tools) ? summary.tools as ToolTimelineItem[] : [],
       };
       baseMessage.status = restoredMessageStatus(status);
+      baseMessage.diagnosticId = typeof summary.diagnostic_id === "string"
+        ? summary.diagnostic_id : undefined;
+      baseMessage.outcomeUncertain =
+        summary.outcome_uncertain === true || summary.status === "unknown";
     }
 
   }
@@ -570,6 +585,8 @@ function toArtifact(artifact: ArtifactInfo): Artifact {
     filename: artifact.filename,
     mimeType: artifact.mime_type,
     sizeBytes: artifact.size_bytes,
+    ready: artifact.ready ?? artifact.size_bytes > 0,
+    messageId: artifact.message_id,
     source: artifact.source as Artifact["source"],
   };
 }
@@ -767,6 +784,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   
   // State
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [observedRun, setObservedRun] = useState<{ sessionId: string; runId: string } | null>(null);
+  const [modelRecreateNeeded, setModelRecreateNeeded] = useState(false);
+  const [restoredStopPending, setRestoredStopPending] = useState(false);
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const messagesRef = useRef<ChatMessageType[]>([]);
   const activeSessionIdRef = useRef<string | null | undefined>(null);
@@ -879,7 +899,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     return () => {
       streamEpochRef.current += 1;
       clearCancelFallback();
-      abortControllerRef.current?.abort();
+      abortControllerRef.current?.abort(ASSISTANT_VIEW_DETACH_REASON);
     };
   }, [clearCancelFallback]);
 
@@ -960,6 +980,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 sessionArtifacts,
               );
               setServerRunBlocking(Boolean(reconciliation.blocksComposer));
+              setObservedRun(reconciliation.activeRun ?? null);
               setMessages(chatMessages);
               setCodeExecution({
                 isExecuting: false,
@@ -1011,20 +1032,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   // Session Actions
   const abandonActiveStream = useCallback(() => {
     streamEpochRef.current += 1;
-    cancelRequestedRef.current = true;
     const controller = abortControllerRef.current;
-    const taskId = activeTaskIdRef.current;
-    if (controller && taskId) {
-      requestTaskCancellation(taskId, controller);
-    }
     clearCancelFallback();
     abortControllerRef.current = null;
     activeTaskIdRef.current = null;
     cancelApiTaskIdRef.current = null;
     sendInFlightRef.current = false;
     setIsStreaming(false);
-    controller?.abort();
-  }, [clearCancelFallback, requestTaskCancellation]);
+    controller?.abort(ASSISTANT_VIEW_DETACH_REASON);
+  }, [clearCancelFallback]);
 
   const handleNewChat = useCallback(() => {
     // Invalidate every in-flight history restore before clearing UI state.
@@ -1034,6 +1050,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     setMessages([]);
     pendingSessionIdRef.current = undefined;
     setServerRunBlocking(false);
+    setObservedRun(null);
+    setModelRecreateNeeded(false);
+    setRestoredStopPending(false);
     setActiveSessionId(undefined);  // 清除 AI助手 的活动会话
     setHistoryRestoreState("idle");
     setHistoryRestoreError(null);
@@ -1060,8 +1079,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (activeSessionId === sessionId) {
         handleNewChat();
       }
+      return true;
     } catch (error) {
       console.error("Failed to delete session:", error);
+      return false;
     }
   }, [activeSessionId, handleNewChat]);
 
@@ -1075,6 +1096,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     }
 
     abandonActiveStream();
+    setObservedRun(null);
+    setModelRecreateNeeded(false);
+    setRestoredStopPending(false);
     const restoreEpoch = ++restoreEpochRef.current;
     try {
       setHistoryRestoreState("loading");
@@ -1126,6 +1150,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         sessionArtifacts,
       );
       setServerRunBlocking(Boolean(reconciliation.blocksComposer));
+      setObservedRun(reconciliation.activeRun ?? null);
       setMessages(chatMessages);
       setCodeExecution({
         isExecuting: false,
@@ -1173,10 +1198,88 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     setActiveSessionId,
   ]);
 
+  // A restored run is already admitted by the Runtime. Observe its persisted
+  // history and status; never send the prompt or create a second turn here.
+  useEffect(() => {
+    if (!observedRun) return;
+    const { sessionId, runId } = observedRun;
+    const restoreEpoch = restoreEpochRef.current;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const [details, history, artifacts] = await Promise.all([
+          getSession(sessionId),
+          getAssistantSessionHistory(sessionId, 200),
+          getSessionArtifacts(sessionId).catch(() => []),
+        ]);
+        if (disposed || restoreEpoch !== restoreEpochRef.current || activeSessionIdRef.current !== sessionId) return;
+        let restored = history.messages.map((message, index) =>
+          restoreMessageMetadata(message, index, sessionId),
+        );
+        let reconciliation = await restoreLatestRun(restored, details.metadata, sessionId);
+        let settledArtifacts = artifacts;
+        if (!reconciliation.blocksComposer) {
+          // Status may commit after the first history/artifact reads. Read both
+          // again after observing the terminal fact before ending observation.
+          const [terminalHistory, terminalArtifacts] = await Promise.all([
+            getAssistantSessionHistory(sessionId, 200),
+            getSessionArtifacts(sessionId).catch(() => artifacts),
+          ]);
+          restored = terminalHistory.messages.map((message, index) =>
+            restoreMessageMetadata(message, index, sessionId),
+          );
+          settledArtifacts = terminalArtifacts;
+          reconciliation = await restoreLatestRun(restored, details.metadata, sessionId);
+        }
+        if (disposed || restoreEpoch !== restoreEpochRef.current || activeSessionIdRef.current !== sessionId) return;
+        // Ignore a stale marker from an earlier run in the same conversation.
+        if (reconciliation.activeRun && reconciliation.activeRun.runId !== runId) {
+          setObservedRun(reconciliation.activeRun);
+          return;
+        }
+        const loadedArtifacts = settledArtifacts.map(toArtifact);
+        const next = hydrateMessageArtifacts(reconciliation.messages, settledArtifacts);
+        setMessages(next);
+        void hydrateQuizData(next, setMessages);
+        setArtifacts(loadedArtifacts);
+        setServerRunBlocking(Boolean(reconciliation.blocksComposer));
+        setHistoryRestoreError(reconciliation.error || null);
+        if (!reconciliation.blocksComposer) {
+          setObservedRun(null);
+          setRestoredStopPending(false);
+          return;
+        }
+      } catch {
+        if (!disposed) setHistoryRestoreError("Connection interrupted. Rechecking this run.");
+      }
+      if (!disposed) timer = window.setTimeout(() => void poll(), 2000);
+    };
+    timer = window.setTimeout(() => void poll(), 1500);
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [observedRun]);
+
   // Streaming Logic
   const stopStreaming = useCallback(() => {
     const controller = abortControllerRef.current;
-    if (!controller) return;
+    if (!controller) {
+      if (!observedRun || restoredStopPending) return;
+      setRestoredStopPending(true);
+      void cancelTask(observedRun.runId, "user_requested_stop")
+        .then((result) => {
+          if (result.cancelled) return;
+          setHistoryRestoreError("Stop was not accepted. Rechecking the run before another action.");
+          setRestoredStopPending(false);
+        })
+        .catch(() => {
+          setHistoryRestoreError("Could not request Stop. Reopen this conversation and try again.");
+          setRestoredStopPending(false);
+        });
+      return;
+    }
     // Preserve the user's terminal intent and ask the owner-checked backend
     // task to cancel before closing SSE. The grace window lets the runtime
     // deliver paired tool_result/tool_call_end plus the cancelled terminal.
@@ -1186,7 +1289,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     if (taskId) {
       requestTaskCancellation(taskId, controller);
     }
-  }, [requestTaskCancellation, scheduleCancelFallback]);
+  }, [observedRun, requestTaskCancellation, restoredStopPending, scheduleCancelFallback]);
 
   const sendMessage = useCallback(async (params: {
     messageContent: string;
@@ -1199,6 +1302,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     resumeRunId?: string;
     resumeApprovalId?: string;
     targetAssistantMessageId?: string;
+    onRunStarted?: (sessionId: string) => void;
+    onSessionBound?: (sessionId: string) => void;
   }) => {
     const {
       messageContent,
@@ -1233,6 +1338,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     if (sendInFlightRef.current || abortControllerRef.current) {
       return;
     }
+    if (config.execution_profile && config.execution_profile !== "safe") {
+      setHistoryRestoreError("This saved execution profile is no longer available. Select the safe profile before sending.");
+      return;
+    }
     if (!isResume && !messageContent.trim() && attachments.length === 0) {
       return;
     }
@@ -1242,6 +1351,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     restoreEpochRef.current += 1;
     setHistoryRestoreState("idle");
     setHistoryRestoreError(null);
+    setModelRecreateNeeded(false);
     const interactionStartedAtMs = performance.now();
     const streamEpoch = streamEpochRef.current + 1;
     streamEpochRef.current = streamEpoch;
@@ -1327,6 +1437,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     if (!isCurrentStream()) return;
 
     let persistedRunId = resumeRunId;
+    let runStartNotified = false;
     const persistAssistantRunId = async (value: unknown) => {
       const runId = nonEmptyString(value);
       if (!sessionId || !runId || runId === persistedRunId) return;
@@ -1395,20 +1506,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
     let durationMs: number | undefined;
-    const interruptionNotice = t(
-      "assistant.streamInterrupted",
-      "The response stream was interrupted. The generated content above was preserved; please retry."
-    );
     const failVisibleStream = (message: string, timestampMs: number) => {
       streamTurnState = failStreamTurn(streamTurnState, message, timestampMs);
-      if (!streamTurnState.content.includes(interruptionNotice)) {
-        streamTurnState = {
-          ...streamTurnState,
-          content: streamTurnState.content.trimEnd()
-            ? `${streamTurnState.content.trimEnd()}\n\n> ⚠️ ${interruptionNotice}`
-            : `⚠️ ${interruptionNotice}`,
-        };
-      }
     };
     const markFirstResponse = (timestampMs: number) => {
       if (firstTokenMs === undefined) {
@@ -1499,6 +1598,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         error?: string;
         runId?: string;
         showInterruptionNotice?: boolean;
+        terminalReason?: "runtime_restart_interrupted";
       } = {},
     ): boolean => {
       if (!terminalLatch.accept(outcome)) return false;
@@ -1536,8 +1636,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           ? {
               ...previous,
               runId: options.runId || previous.runId,
+              terminalReason: options.terminalReason || previous.terminalReason,
             }
-          : initProcessSummary(options.runId, timestampMs);
+          : { ...initProcessSummary(options.runId, timestampMs), terminalReason: options.terminalReason };
         return {
           ...message,
           processSummary: finalizeProcessSummary(
@@ -1629,6 +1730,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 config,
               }).then((created) => {
                 if (pendingSessionIdRef.current === id) {
+                  params.onSessionBound?.(created.session_id);
                   setActiveSessionId(created.session_id);
                   pendingSessionIdRef.current = undefined;
                 }
@@ -1652,7 +1754,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         reasoning_option: config.reasoning_option || config.thinking_level || "auto",
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
-        execution_profile: config.execution_profile || "safe",
+        execution_profile: "safe",
         memory_mode: config.memory_mode || "auto",
         os_agent_enabled: localNodeEnabled,
         local_node_device_id: localNodeEnabled ? localNodeBinding?.deviceId : undefined,
@@ -2070,6 +2172,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.SIDE_EFFECT_UNKNOWN:
             const sideEffectData = (event.data || {}) as Record<string, unknown>;
+            updateAssistantMessage((message) => ({ ...message, outcomeUncertain: true }));
             settleRunTerminal("failed", now, {
               error: "side_effect_unknown",
               runId:
@@ -2204,6 +2307,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               setActiveSessionId(acceptedSessionId);
               pendingSessionIdRef.current = undefined;
             }
+            if (
+              !runStartNotified && isCurrentStream() &&
+              confirmsAssistantRunAdmission({
+                requestedSessionId: sessionId,
+                eventSessionId: runStartedData?.session_id,
+                isResume,
+              })
+            ) {
+              runStartNotified = true;
+              params.onRunStarted?.(sessionId);
+            }
             if (runStartedData?.task_id) {
               activeTaskIdRef.current = runStartedData.task_id;
               if (cancelRequestedRef.current) {
@@ -2254,11 +2368,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               message?: string;
               run_id?: string;
               status?: string;
+              error_code?: string;
               terminal_envelope?: { status?: string; exit_reason?: string };
             };
             const runWasCancelled =
               runErrorData.status === "cancelled" ||
               runErrorData.terminal_envelope?.status === "cancelled";
+            if (runErrorData.terminal_envelope?.exit_reason === "side_effect_unknown") {
+              updateAssistantMessage((message) => ({ ...message, outcomeUncertain: true }));
+            }
             settleRunTerminal(runWasCancelled ? "cancelled" : "failed", now, {
               error:
                 runErrorData.error ||
@@ -2273,6 +2391,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 )
                   ? false
                   : undefined,
+              terminalReason: runWasCancelled &&
+                runErrorData.error_code === "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_ORPHANED"
+                  ? "runtime_restart_interrupted" : undefined,
             });
             await persistAssistantRunId(runErrorData.run_id);
             if (!isCurrentStream()) return;
@@ -3400,6 +3521,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           ? t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")
           : undefined;
         if (startFailureMessage) {
+          setModelRecreateNeeded(true);
           streamTurnState = { ...streamTurnState, content: startFailureMessage };
         }
         const accepted = settleRunTerminal("failed", finishedAtMs, {
@@ -3745,9 +3867,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     sessions,
     setSessions,
     activeSessionId,
+    setActiveSessionId,
+    activeSessionConfig: lastStreamConfigRef.current?.config,
     messages,
     setMessages,
     isStreaming,
+    hasActiveRun: isStreaming || Boolean(observedRun),
+    modelRecreateNeeded,
     isComposerBlocked: isStreaming || serverRunBlocking,
     sessionsLoading,
     historyRestoreState,

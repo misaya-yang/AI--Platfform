@@ -78,7 +78,12 @@ pub struct AttachmentReadArguments {
     /// `metadata` returns metadata only; `content` returns bounded text plus
     /// metadata. The Gateway chooses the parser from trusted MIME/filename.
     pub operation: String,
+    #[serde(default = "default_max_chars")]
     pub max_chars: usize,
+}
+
+fn default_max_chars() -> usize {
+    100_000
 }
 
 impl AttachmentReadArguments {
@@ -149,6 +154,18 @@ impl AttachmentCapabilityBroker {
         execution_id: String,
         arguments: AttachmentReadArguments,
     ) -> Result<AttachmentReadResult, AttachmentCapabilityError> {
+        let raw_arguments =
+            serde_json::to_value(arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
+        self.read_scoped_value(lease, execution_id, raw_arguments)
+            .await
+    }
+
+    pub async fn read_scoped_value(
+        &self,
+        lease: RuntimeCapabilityLeaseV1,
+        execution_id: String,
+        raw_arguments: Value,
+    ) -> Result<AttachmentReadResult, AttachmentCapabilityError> {
         if lease.capability_id != "read_attachment"
             || lease.effect != ai_platform_capability_contract::CapabilityEffect::Read
             || execution_id.is_empty()
@@ -157,14 +174,7 @@ impl AttachmentCapabilityBroker {
         {
             return Err(AttachmentCapabilityError::Arguments);
         }
-        arguments.validate()?;
-        let body =
-            serde_json::to_value(&arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
-        let expected_hash =
-            canonical_json_hash(&body).map_err(|_| AttachmentCapabilityError::Arguments)?;
-        if lease.arguments_hash != expected_hash {
-            return Err(AttachmentCapabilityError::ArgumentsHashMismatch);
-        }
+        let (arguments, body) = normalize_bound_arguments(raw_arguments, &lease.arguments_hash)?;
         let proof = self.proof(&lease, &execution_id, &body)?;
         let request = self
             .client
@@ -256,6 +266,24 @@ impl AttachmentCapabilityBroker {
     }
 }
 
+fn normalize_bound_arguments(
+    raw_arguments: Value,
+    lease_arguments_hash: &str,
+) -> Result<(AttachmentReadArguments, Value), AttachmentCapabilityError> {
+    // The Runtime lease hashes the model's original JSON. Deserializing first
+    // inserts max_chars=100000 when omitted and must not change that binding.
+    let actual_hash =
+        canonical_json_hash(&raw_arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
+    if actual_hash != lease_arguments_hash {
+        return Err(AttachmentCapabilityError::ArgumentsHashMismatch);
+    }
+    let arguments: AttachmentReadArguments =
+        serde_json::from_value(raw_arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
+    arguments.validate()?;
+    let body = serde_json::to_value(&arguments).map_err(|_| AttachmentCapabilityError::Arguments)?;
+    Ok((arguments, body))
+}
+
 fn validate_result(
     result: &AttachmentReadResult,
     arguments: &AttachmentReadArguments,
@@ -325,6 +353,22 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+    #[test]
+    fn omitted_max_chars_uses_bounded_default() {
+        let raw = serde_json::json!({
+            "attachment_id": "art_1111111111111111", "operation": "content"
+        });
+        let hash = canonical_json_hash(&raw).unwrap();
+        let (args, body) =
+            normalize_bound_arguments(raw, &hash).expect("raw lease remains valid");
+        assert_eq!(args.max_chars, 100_000);
+        assert_eq!(body["max_chars"], 100_000);
+        assert!(args.validate().is_ok());
+        assert_eq!(
+            normalize_bound_arguments(body, &hash).unwrap_err(),
+            AttachmentCapabilityError::ArgumentsHashMismatch
         );
     }
     #[test]

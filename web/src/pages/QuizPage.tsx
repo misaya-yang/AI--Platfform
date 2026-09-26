@@ -5,8 +5,9 @@
  * Fetches quiz from public API, allows name input, full quiz + score.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { BookOpen, ChevronLeft, ChevronRight, Loader2, Send, User } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -22,12 +23,14 @@ interface PublicQuizData {
   question_count: number;
   difficulty?: string;
   require_name: boolean;
+  time_limit_minutes?: number | null;
   questions: QuizQuestionData[];
 }
 
 type PageState = "loading" | "intro" | "quiz" | "result" | "error";
 
 export function QuizPage() {
+  const { t } = useTranslation();
   const { shareCode } = useParams<{ shareCode: string }>();
   const [quiz, setQuiz] = useState<PublicQuizData | null>(null);
   const [pageState, setPageState] = useState<PageState>("loading");
@@ -38,32 +41,30 @@ export function QuizPage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [result, setResult] = useState<QuizAttemptResult | null>(null);
+  const [attemptToken, setAttemptToken] = useState("");
+  const [attemptExpiresAt, setAttemptExpiresAt] = useState("");
+  const submitInFlightRef = useRef(false);
   const shouldReduceMotion = useReducedMotion();
 
   // Fetch quiz on mount
   useEffect(() => {
     if (!shareCode) {
-      setError("Quiz link is invalid.");
+      setError(t("assistant.quiz.publicInvalidLink"));
       setPageState("error");
       return;
     }
 
     const controller = new AbortController();
-    let savedResult: QuizAttemptResult | null = null;
+    let savedToken = "";
     try {
-      const submitted = localStorage.getItem(`quiz_submitted_${shareCode}`);
-      if (submitted) {
-        const parsed = JSON.parse(submitted) as Partial<QuizAttemptResult>;
-        if (
-          typeof parsed.total_score === "number" &&
-          typeof parsed.correct_count === "number" &&
-          typeof parsed.total_count === "number" &&
-          Array.isArray(parsed.per_question)
-        ) {
-          savedResult = parsed as QuizAttemptResult;
-          setResult(savedResult);
-          setPageState("result");
-        }
+      const saved = sessionStorage.getItem(`quiz_session_${shareCode}`);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { token?: string; expiresAt?: string; answers?: Record<string, string>; displayName?: string };
+        savedToken = parsed.token || "";
+        setAttemptToken(savedToken);
+        setAttemptExpiresAt(parsed.expiresAt || "");
+        setSelectedAnswers(parsed.answers || {});
+        setDisplayName(parsed.displayName || "");
       }
     } catch {
       // Ignore unavailable or malformed browser storage and load the quiz normally.
@@ -71,40 +72,73 @@ export function QuizPage() {
 
     async function loadQuiz() {
       try {
+        let acceptedResult: QuizAttemptResult | null = null;
+        if (savedToken) {
+          const prior = await fetch(`/api/v1/quiz/public/${shareCode}/attempts/result`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ attempt_token: savedToken }),
+            signal: controller.signal,
+          });
+          if (prior.ok) {
+            acceptedResult = await prior.json() as QuizAttemptResult;
+            setResult(acceptedResult);
+          }
+        }
         const resp = await fetch(`/api/v1/quiz/shared/${shareCode}`, {
           signal: controller.signal,
         });
         if (!resp.ok) {
+          if (acceptedResult && resp.status === 404) {
+            setPageState("result");
+            return;
+          }
           throw new Error(
             resp.status === 404
-              ? "Quiz not found, expired, or max attempts reached."
-              : "Failed to load quiz.",
+              ? t("assistant.quiz.publicNotFound")
+              : t("assistant.quiz.publicLoadFailed"),
           );
         }
         const data = (await resp.json()) as PublicQuizData;
         setQuiz(data);
         setError("");
-        setPageState(savedResult ? "result" : "intro");
+        setPageState(acceptedResult ? "result" : savedToken ? "quiz" : "intro");
       } catch (loadError) {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
-        if (savedResult) {
-          setError("Quiz details could not be loaded. Showing your saved result.");
-          setPageState("result");
-          return;
-        }
-        setError(loadError instanceof Error ? loadError.message : "Failed to load quiz.");
+        setError(loadError instanceof Error ? loadError.message : t("assistant.quiz.publicLoadFailed"));
         setPageState("error");
       }
     }
 
     void loadQuiz();
     return () => controller.abort();
-  }, [shareCode]);
+  }, [shareCode, t]);
 
-  const handleStart = useCallback(() => {
+  const handleStart = useCallback(async () => {
     if (quiz?.require_name && !displayName.trim()) return;
-    setPageState("quiz");
-  }, [quiz, displayName]);
+    if (attemptToken && (!attemptExpiresAt || Date.parse(attemptExpiresAt) > Date.now())) {
+      setPageState("quiz");
+      return;
+    }
+    try {
+      const response = await fetch(`/api/v1/quiz/public/${shareCode}/attempts/start`, { method: "POST" });
+      if (!response.ok) throw new Error(t("assistant.quiz.publicStartFailed"));
+      const started = await response.json() as { attempt_token: string; expires_at: string };
+      setAttemptToken(started.attempt_token);
+      setAttemptExpiresAt(started.expires_at);
+      try {
+        sessionStorage.setItem(`quiz_session_${shareCode}`, JSON.stringify({
+          token: started.attempt_token, expiresAt: started.expires_at,
+          answers: selectedAnswers, displayName,
+        }));
+      } catch {
+        // The active tab still holds this token when session storage is disabled.
+      }
+      setPageState("quiz");
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : t("assistant.quiz.publicStartFailed"));
+    }
+  }, [quiz, displayName, attemptToken, attemptExpiresAt, shareCode, selectedAnswers, t]);
 
   const handleSelect = useCallback(
     (label: string) => {
@@ -115,8 +149,21 @@ export function QuizPage() {
     [quiz, currentIndex],
   );
 
+  useEffect(() => {
+    if (!shareCode || !attemptToken) return;
+    try {
+      sessionStorage.setItem(`quiz_session_${shareCode}`, JSON.stringify({
+        token: attemptToken, expiresAt: attemptExpiresAt,
+        answers: selectedAnswers, displayName,
+      }));
+    } catch {
+      // A browser with storage disabled can finish the current tab's attempt.
+    }
+  }, [shareCode, attemptToken, attemptExpiresAt, selectedAnswers, displayName]);
+
   const handleSubmit = useCallback(async () => {
-    if (!quiz || submitting) return;
+    if (!quiz || submitting || submitInFlightRef.current || !attemptToken) return;
+    submitInFlightRef.current = true;
     setSubmitting(true);
     setSubmitError("");
     try {
@@ -126,34 +173,30 @@ export function QuizPage() {
         body: JSON.stringify({
           answers: selectedAnswers,
           display_name: displayName.trim() || null,
+          attempt_token: attemptToken,
         }),
       });
       if (!resp.ok) {
         throw new Error(
           resp.status === 429
-            ? "This quiz has reached its attempt limit."
-            : "Failed to submit quiz. Please try again.",
+            ? t("assistant.quiz.publicLimitReached")
+            : t("assistant.quiz.publicSubmitFailed"),
         );
       }
       const data = await resp.json();
       setResult(data);
       setPageState("result");
-      // Remember submission in localStorage to prevent re-take on page reload
-      try {
-        localStorage.setItem(`quiz_submitted_${shareCode}`, JSON.stringify(data));
-      } catch {
-        // Storage may be unavailable in private or embedded contexts.
-      }
     } catch (submitFailure) {
       setSubmitError(
         submitFailure instanceof Error
           ? submitFailure.message
-          : "Failed to submit quiz. Please try again.",
+          : t("assistant.quiz.publicSubmitFailed"),
       );
     } finally {
+      submitInFlightRef.current = false;
       setSubmitting(false);
     }
-  }, [quiz, shareCode, selectedAnswers, displayName, submitting]);
+  }, [quiz, shareCode, selectedAnswers, displayName, submitting, attemptToken, t]);
 
   const allAnswered = quiz
     ? quiz.questions.every((q) => {
@@ -168,7 +211,7 @@ export function QuizPage() {
       <div className="flex min-h-dvh items-center justify-center bg-background">
         <div className="flex items-center gap-3 text-sm text-muted-foreground" role="status">
           <Loader2 className="h-5 w-5 animate-spin text-primary" aria-hidden="true" />
-          <span>Loading quiz…</span>
+          <span>{t("assistant.quiz.publicLoading")}</span>
         </div>
       </div>
     );
@@ -182,7 +225,7 @@ export function QuizPage() {
           <BookOpen className="w-12 h-12 mx-auto text-muted-foreground/40" />
           <h1 className="text-xl font-semibold text-foreground">{error}</h1>
           <p className="text-sm text-muted-foreground">
-            This quiz link may have expired or been removed.
+            {t("assistant.quiz.publicExpiredHint")}
           </p>
         </div>
       </div>
@@ -191,7 +234,7 @@ export function QuizPage() {
 
   if (!quiz && !(pageState === "result" && result)) return null;
   const currentQuestion = quiz?.questions[currentIndex];
-  const quizTitle = quiz?.title ?? "Quiz result";
+  const quizTitle = quiz?.title ?? t("assistant.quiz.publicResultTitle");
   const questionCount = quiz?.question_count ?? result?.total_count ?? 0;
 
   return (
@@ -205,7 +248,7 @@ export function QuizPage() {
           <div className="min-w-0">
             <h1 className="truncate text-sm font-semibold text-foreground">{quizTitle}</h1>
             <p className="text-xs text-muted-foreground">
-              {questionCount} questions
+              {questionCount} {t("assistant.quiz.questions")}
               {quiz?.difficulty && ` · ${quiz.difficulty}`}
             </p>
           </div>
@@ -233,20 +276,20 @@ export function QuizPage() {
                   <p className="mt-2 text-sm text-muted-foreground">{quiz.description}</p>
                 )}
                 <p className="mt-3 text-xs text-muted-foreground">
-                  {quiz.question_count} questions · ~{Math.ceil(quiz.question_count * 0.5)} min
+                  {quiz.question_count} {t("assistant.quiz.questions")} · ~{Math.ceil(quiz.question_count * 0.5)} {t("assistant.quiz.publicMinutes")}
                 </p>
               </div>
 
               {quiz.require_name && (
                 <div className="relative max-w-xs mx-auto">
                   <label htmlFor="quiz-display-name" className="sr-only">
-                    Your name
+                    {t("assistant.quiz.publicYourName")}
                   </label>
                   <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <input
                     id="quiz-display-name"
                     type="text"
-                    placeholder="Your name"
+                    placeholder={t("assistant.quiz.publicYourName")}
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleStart()}
@@ -265,9 +308,10 @@ export function QuizPage() {
                   "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
-                Start Quiz
+                {t("assistant.quiz.startQuiz")}
                 <ChevronRight className="w-4 h-4" />
               </button>
+              {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
             </motion.div>
           )}
 
@@ -289,7 +333,7 @@ export function QuizPage() {
                 <div
                   className="h-2 flex-1 overflow-hidden rounded-full bg-muted"
                   role="progressbar"
-                  aria-label="Quiz progress"
+                  aria-label={t("assistant.quiz.publicProgress")}
                   aria-valuemin={1}
                   aria-valuemax={quiz.question_count}
                   aria-valuenow={currentIndex + 1}
@@ -327,7 +371,7 @@ export function QuizPage() {
                   className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   <ChevronLeft className="w-4 h-4" />
-                  Previous
+                  {t("assistant.quiz.prev")}
                 </button>
 
                 {currentIndex < quiz.question_count - 1 ? (
@@ -337,7 +381,7 @@ export function QuizPage() {
                     onClick={() => setCurrentIndex((i) => i + 1)}
                     className="inline-flex items-center gap-1 text-sm text-primary hover:text-primary/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
-                    Next
+                    {t("assistant.quiz.next")}
                     <ChevronRight className="w-4 h-4" />
                   </button>
                 ) : (
@@ -356,7 +400,7 @@ export function QuizPage() {
                     ) : (
                       <Send className="w-4 h-4" />
                     )}
-                    Submit
+                    {t("assistant.quiz.submit")}
                   </button>
                 )}
               </div>

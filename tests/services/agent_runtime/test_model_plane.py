@@ -74,6 +74,20 @@ def test_chat_completions_preserves_collaboration_agent_message() -> None:
     assert messages == [{"role": "user", "content": "Payload:\n计算 1 到 100 的和"}]
 
 
+def test_chat_completions_keeps_image_input_in_user_content() -> None:
+    image = "data:image/png;base64,iVBORw0KGgo="
+    messages = _responses_input_to_messages({"input": [{
+        "type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "Describe this image"},
+            {"type": "input_image", "image_url": image},
+        ],
+    }]})
+    assert messages == [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": image}},
+    ]}]
+
+
 @pytest.mark.parametrize(
     "raw_input",
     [

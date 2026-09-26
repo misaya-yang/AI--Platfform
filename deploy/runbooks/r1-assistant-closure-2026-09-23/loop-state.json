@@ -1,0 +1,106 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "domain_id": "r1-assistant-daily-use",
+  "lifecycle": "active",
+  "status": "in_progress",
+  "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
+  "owner": "root single-writer integration session",
+  "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
+  "branch": "codex/as02-assistant-failure-history",
+  "active_phase": "R1-1",
+  "active_feature": "AS-03 / TL-03 J03 same-run Runtime restart recovery",
+  "active_package": "R1-1 through R1-3 integration",
+  "next_action": "J03 需增加 fenced recovery claim、持久审批重绑定、Worker 同调用回执查询/单次注入、in-process App Server 同 ID turn recover 桥和签名 lease 恢复；按重启前后多个 crash 点验证不重复执行。之后补未验证的 J05～J08/J29 与 390px 场景。",
+  "last_result": "用户授权先本地合并已验证的安全增量，J03 与未验证旅程仍列为 R1 未完成。最终独立 review 发现的批准 API 绕过与撤销分享后预签名下载已修复，31 条定向回归和 Ruff 通过。此前受影响 Python 305 passed、前端 Node 33 passed、本地 Docker Chromium 12 passed；type-check、lint、i18n、build、harness-check、architecture-boundary-gate、agent-runtime-source-contract、最终 Docker 热更新/validate/status 均通过。待选择性提交并本地合并；未推送。",
+  "updated_at": "2026-09-25",
+  "blockers": [
+    {
+      "id": "J03-runtime-restart",
+      "reason": "当前未实现而非技术上不可实现：审批 waiter 仅在 Rust 进程内；重启后 Runtime 持久取消旧 run，需补同 run 恢复围栏、审批重绑定、工具回执对账与租约恢复。",
+      "status": "confirmed_unmet"
+    },
+    {
+      "id": "R1-unverified-journeys",
+      "reason": "真实图片 provider 本次结果未知、无成功图片；Office 生成和认证 API 下载已通过但浏览器下载未观测；J05/J06/J07/J29 与窄屏部分旅程仍未逐项实机验收。见 reports/product/r1-progress-2026-09-23.md。",
+      "status": "unverified"
+    }
+  ],
+  "cycle": [
+    "observe",
+    "freeze",
+    "act",
+    "verify",
+    "review",
+    "integrate",
+    "decide"
+  ],
+  "iteration": 3,
+  "max_iterations": 20,
+  "phases": [
+    {
+      "id": "R1-0",
+      "file": "README.md",
+      "depends_on": [],
+      "status": "complete",
+      "evidence": [
+        "reports/product/r1-progress-2026-09-23.md"
+      ],
+      "review": "read_only_explorers"
+    },
+    {
+      "id": "R1-1",
+      "file": "README.md",
+      "depends_on": [
+        "R1-0"
+      ],
+      "status": "in_progress",
+      "evidence": [
+        "reports/product/r1-progress-2026-09-23.md"
+      ],
+      "review": "independent_static_review_passed_with_j03_blocker"
+    },
+    {
+      "id": "R1-2",
+      "file": "README.md",
+      "depends_on": [
+        "R1-1"
+      ],
+      "status": "in_progress",
+      "evidence": [
+        "reports/product/r1-progress-2026-09-23.md"
+      ],
+      "review": "independent_static_review_with_targeted_fixes"
+    },
+    {
+      "id": "R1-3",
+      "file": "README.md",
+      "depends_on": [
+        "R1-2"
+      ],
+      "status": "in_progress",
+      "evidence": [
+        "reports/product/r1-progress-2026-09-23.md"
+      ],
+      "review": "independent_static_review_with_targeted_fixes"
+    },
+    {
+      "id": "R1-4",
+      "file": "README.md",
+      "depends_on": [
+        "R1-3"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_started"
+    }
+  ],
+  "features": [],
+  "inherited_evidence": [
+    "reports/product/r1-a-as02-acceptance-2026-09-23.md",
+    "reports/product/assistant-model-selection-2026-09-23.md"
+  ],
+  "execution_authorization": {
+    "scope": "用户本轮明确授权完整 R1、本地 Docker 与内置浏览器，并在 2026-09-25 选择先提交且本地合并已验证的安全增量。仍不授权推送、生产部署、分支删除或共享数据破坏性操作。",
+    "parallel_agents": "只读调查与独立 review；主代理为唯一代码写入者。"
+  }
+}

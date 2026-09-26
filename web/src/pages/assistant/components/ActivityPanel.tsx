@@ -20,6 +20,7 @@ import { ActivityTimeline } from "./ActivityTimeline";
 import { T, ui, ensureActivityStyles } from "./activityTheme";
 import { Icon } from "./activityIcons";
 import { buildTimeline } from "./buildTimeline";
+import { ToolApprovalCard } from "./ToolApprovalCard";
 
 interface ActivityPanelProps {
   /** Whether the drawer is open. */
@@ -69,7 +70,8 @@ export function ActivityPanel({
   const failed =
     !cancelled && !blocked &&
     (message?.status === "failed" || message?.processSummary?.status === "failed");
-  const running = !cancelled && !blocked && !failed && !!message?.isStreaming;
+  const running = !cancelled && !blocked && !failed &&
+    (!!message?.isStreaming || message?.processSummary?.status === "running");
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
   const reasoningLabel = message?.processSummary?.reasoning?.effective_option
@@ -213,79 +215,15 @@ export function ActivityPanel({
           )}
 
           {message && pendingApprovals.length > 0 && onToolApproval && (
-            <div
-              style={{
-                marginTop: 16,
-                paddingTop: 12,
-                borderTop: `1px solid ${T.borderSoft}`,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
+            <div className="mt-4 flex flex-col gap-2 border-t pt-3">
               {pendingApprovals.map((tool) => (
-                <div
+                <ToolApprovalCard
                   key={tool.id}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
-                    fontSize: 12,
-                    color: T.text,
-                  }}
-                >
-                  <div>
-                    {t("assistant.activity.approvalRequired", {
-                      defaultValue: "Approval required",
-                    })}
-                    {": "}
-                    <span style={{ fontFamily: ui.mono }}>{tool.name}</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button
-                      type="button"
-                      className="act-btn act-hover"
-                      onClick={() =>
-                        void onToolApproval(
-                          message.id,
-                          tool.id,
-                          tool.approvalId as string,
-                          true,
-                        )
-                      }
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 6,
-                        border: `1px solid ${T.border}`,
-                        background: T.bg,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {t("assistant.activity.approve", { defaultValue: "Approve" })}
-                    </button>
-                    <button
-                      type="button"
-                      className="act-btn act-hover"
-                      onClick={() =>
-                        void onToolApproval(
-                          message.id,
-                          tool.id,
-                          tool.approvalId as string,
-                          false,
-                        )
-                      }
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 6,
-                        border: `1px solid ${T.border}`,
-                        background: T.bg,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {t("assistant.activity.reject", { defaultValue: "Reject" })}
-                    </button>
-                  </div>
-                </div>
+                  tool={tool}
+                  runtimeThreadId={message.processSummary?.runtimeThreadId}
+                  onApprove={() => onToolApproval(message.id, tool.id, tool.approvalId as string, true)}
+                  onReject={() => onToolApproval(message.id, tool.id, tool.approvalId as string, false)}
+                />
               ))}
             </div>
           )}

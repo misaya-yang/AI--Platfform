@@ -46,6 +46,7 @@ import type { ExecutionStatusType } from "./ExecutionStatus";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
+import { downloadAssistantArtifact } from "@/lib/authenticatedDownload";
 
 // ============================================================================
 // Types
@@ -69,6 +70,8 @@ export interface Artifact {
   filename?: string;
   mimeType?: string;
   sizeBytes?: number;
+  ready?: boolean;
+  messageId?: string;
   source?: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
   versions?: ArtifactVersion[];
   currentVersion?: number;
@@ -246,6 +249,7 @@ function ArtifactCard({
   const size = isOutputFile
     ? (artifact as OutputFile).size_bytes
     : (artifact as Artifact).sizeBytes;
+  const ready = isOutputFile ? (size ?? 0) > 0 : (artifact as Artifact).ready !== false && size !== 0;
 
   return (
     <motion.div
@@ -265,11 +269,14 @@ function ArtifactCard({
         <p className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
           {formatLabel}
           {size ? ` · ${formatFileSize(size)}` : ""}
+          {!ready ? ` · ${t("assistant.artifactEmpty", "Empty or unfinished file")}` : ""}
+          {!isOutputFile && (artifact as Artifact).createdAt ? ` · ${(artifact as Artifact).createdAt.toLocaleString()}` : ""}
         </p>
       </div>
       <button
         type="button"
         onClick={onDownload}
+        disabled={!ready}
         className={cn(
           "act-btn act-hover inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md",
           "text-[11.5px] text-[hsl(var(--assistant-text-secondary))]",
@@ -548,19 +555,23 @@ export function ArtifactsPanel({
     }
   }, [view, currentCode, executionOutput]);
 
-  const handleDownload = React.useCallback((item: Artifact | OutputFile) => {
-    if ("download_url" in item && item.download_url) {
-      window.open(item.download_url, "_blank");
-      toast.success("Download started", (item as OutputFile).filename);
-    } else if ("content_base64" in item) {
+  const handleDownload = React.useCallback(async (item: Artifact | OutputFile) => {
+    try {
+      if ("download_url" in item && item.download_url) {
+        await downloadAssistantArtifact(item.download_url, item.filename);
+        toast.success("Download started", item.filename);
+      } else if ("content_base64" in item) {
       const link = document.createElement("a");
       link.href = `data:${item.mime_type || "application/octet-stream"};base64,${item.content_base64}`;
       link.download = item.filename;
       link.click();
       toast.success("Download started", item.filename);
-    } else if ("url" in item && item.url) {
-      window.open(item.url, "_blank");
-      toast.success("Download started", item.filename || item.title);
+      } else if ("url" in item && item.url) {
+        await downloadAssistantArtifact(item.url, item.filename || item.title);
+        toast.success("Download started", item.filename || item.title);
+      }
+    } catch {
+      toast.error("Download unavailable", "Check access to this file and try again.");
     }
   }, []);
 

@@ -1,6 +1,6 @@
 {
   "baseline_id": "2026_08_post_kb_v1",
-  "epoch": 2,
+  "epoch": 3,
   "changes": [
     {
       "sequence": 1,
@@ -46,6 +46,28 @@
       "resume_handler": null,
       "repair_handler": null,
       "notes": "EV-02: quiesce legacy workers before applying; preserved running history becomes expired for handle reconciliation; all new worker writes fenced by owner and claim token. Requires epoch 2 reader/writer floor. Verification fingerprints must be generated on isolated authority DB, not inferred."
+    },
+    {
+      "sequence": 3,
+      "name": "assistant_quiz_attempt_idempotency",
+      "file": "003_assistant_quiz_attempt_idempotency.sql",
+      "sha256": "14de80ccb563c5e076bbff7557f17ae979c4e9b02e9d9ace9e1c176a97cd0d09",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('assistant.quiz_attempts') IS NOT NULL AND to_regclass('assistant.artifact_share_attempt_tokens') IS NOT NULL"
+      ],
+      "postconditions": [
+        "SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='assistant' AND table_name='quiz_attempts' AND column_name IN ('result_payload','attempt_token_hash')",
+        "SELECT to_regclass('assistant.idx_quiz_attempts_share_token_once') IS NOT NULL",
+        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='assistant' AND p.proname='record_artifact_share_quiz_attempt_v2')"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R1 AR-04: stable logged-in and public quiz result replay without duplicate attempt count; additive fields and a versioned atomic public function."
     }
   ]
 }

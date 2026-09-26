@@ -104,6 +104,14 @@ class ProviderTemplate:
 
 DASHSCOPE_MODELS: tuple[CatalogModel, ...] = (
     CatalogModel(
+        model_id="qwen3.8-flash",
+        display_name="Qwen 3.8 Flash",
+        context_window=1000000,
+        max_output_tokens=131072,
+        supports_tools=True,
+        sort_order=140,
+    ),
+    CatalogModel(
         model_id="qwen3.7-plus",
         display_name="Qwen 3.7 Plus",
         context_window=1000000,

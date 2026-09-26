@@ -73,23 +73,23 @@ test("last model cache scopes keys by user and can clear them", () => {
 test("legacy last model is migrated once and removed from the shared key", () => {
   const storage = new MemoryStorage();
   installStorage(storage);
-  storage.setItem("assistant.lastModelId.v1", "legacy-model");
+  storage.setItem("assistant.lastModelId.v2", "legacy-model");
 
   assert.equal(readLastModelId("user-a"), "legacy-model");
-  assert.equal(storage.getItem("assistant.lastModelId.v1"), null);
-  assert.equal(storage.getItem("assistant.lastModelId.v1:user-a"), "legacy-model");
+  assert.equal(storage.getItem("assistant.lastModelId.v2"), null);
+  assert.equal(storage.getItem("assistant.lastModelId.v2:user-a"), "legacy-model");
   assert.equal(readLastModelId("user-b"), "");
 });
 
 test("legacy cache is not consumed before auth hydration", () => {
   const storage = new MemoryStorage();
   installStorage(storage);
-  storage.setItem("assistant.lastModelId.v1", "legacy-model");
+  storage.setItem("assistant.lastModelId.v2", "legacy-model");
 
   assert.equal(readHydratedLastModelId(false, "user-a"), "");
-  assert.equal(storage.getItem("assistant.lastModelId.v1"), "legacy-model");
+  assert.equal(storage.getItem("assistant.lastModelId.v2"), "legacy-model");
   assert.equal(readHydratedLastModelId(true, "user-a"), "legacy-model");
-  assert.equal(storage.getItem("assistant.lastModelId.v1"), null);
+  assert.equal(storage.getItem("assistant.lastModelId.v2"), null);
 });
 
 test("last model cache degrades to empty when storage throws", () => {

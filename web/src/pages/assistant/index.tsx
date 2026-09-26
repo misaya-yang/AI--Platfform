@@ -18,6 +18,8 @@ import {
   Sparkles,
   MonitorCog,
   Network,
+  Brain,
+  Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,6 +45,15 @@ import { useAuthStore } from "@/store/useAuthStore";
 
 // Local Components & Hooks
 import { CompactModelSelector } from "./components/CompactModelSelector";
+import { activeAssistantModels, preferredAssistantModelId } from "./modelSelection";
+import {
+  assistantDraftKey,
+  bindNewAssistantDraft,
+  clearAdmittedAssistantDrafts,
+  readAssistantDrafts,
+  transitionAssistantDraft,
+  writeAssistantDrafts,
+} from "./sessionDrafts";
 import { AgentTaskTimeline, type AgentTask } from "./components/AgentTaskTimeline";
 import { ChatInputArea } from "./components/ChatInputArea";
 import {
@@ -96,6 +107,14 @@ const LocalOSPanel = lazy(async () => {
 const ShareDialog = lazy(async () => {
   const module = await import("./components/ShareDialog");
   return { default: module.ShareDialog };
+});
+const MemoryDialog = lazy(async () => {
+  const module = await import("./components/MemoryDialog");
+  return { default: module.MemoryDialog };
+});
+const ToolsDialog = lazy(async () => {
+  const module = await import("./components/ToolsDialog");
+  return { default: module.ToolsDialog };
 });
 const ConnectorsPanel = lazy(() => import("./components/ConnectorsPanel"));
 
@@ -258,9 +277,11 @@ export function AssistantPage() {
   const [modelsLoaded, setModelsLoaded] = useState(false);
 
   // 2. Settings State
-  // Unlock the composer with the last-selected model immediately; the catalog
-  // validates the cached id once listModels resolves (W3).
+  // Restore the last explicit choice for display; sending waits for the
+  // current enabled/provider catalog to validate it.
   const [selectedModel, setSelectedModel] = useState<string>("");
+  const [modelsLoadError, setModelsLoadError] = useState(false);
+  const [datasetsLoadError, setDatasetsLoadError] = useState(false);
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -269,8 +290,17 @@ export function AssistantPage() {
   
   // 3. UI State
   const [input, setInput] = useState("");
+  const draftInputRef = useRef("");
+  const imageViewEpochRef = useRef(0);
+  const currentUserIdRef = useRef(userId);
+  currentUserIdRef.current = userId;
+  const draftsRef = useRef<Record<string, string>>({});
+  const draftKeyRef = useRef(assistantDraftKey(undefined));
+  const draftsReadyRef = useRef(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
+  const [showMemoryDialog, setShowMemoryDialog] = useState(false);
+  const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [showConnectors, setShowConnectors] = useState(false);
   const [showLocalOS, setShowLocalOS] = useState(false);
   const [subagentMessageId, setSubagentMessageId] = useState<string | null>(null);
@@ -291,6 +321,7 @@ export function AssistantPage() {
     );
   }, [selectedModelInfo?.capability_revision, selectedModelInfo?.effective_capabilities]);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollAfterSendRef = useRef(false);
   const wasCompactLayoutRef = useRef(false);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
   const setShowLeftPanel = useAppStore((state) => state.setAssistantSidebarOpen);
@@ -307,9 +338,13 @@ export function AssistantPage() {
     sessions,
     setSessions,
     activeSessionId,
+    setActiveSessionId,
+    activeSessionConfig,
     messages,
     setMessages,
     isStreaming,
+    hasActiveRun,
+    modelRecreateNeeded,
     isComposerBlocked,
     sessionsLoading,
     historyRestoreState,
@@ -331,6 +366,55 @@ export function AssistantPage() {
     isOSAgentEligible: localOSState.isSessionOptInEffectiveNow,
     getLocalNodeBinding: localOSState.getSessionBindingNow,
   });
+
+  useLayoutEffect(() => {
+    if (!authHydrated) return;
+    const loaded = readAssistantDrafts(userId);
+    const key = assistantDraftKey(activeSessionId);
+    draftsRef.current = loaded;
+    draftKeyRef.current = key;
+    draftsReadyRef.current = true;
+    draftInputRef.current = loaded[key] ?? "";
+    setInput(draftInputRef.current);
+  // The active session is handled by switchDraft below after hydration.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authHydrated, userId]);
+
+  const setDraftInput = useCallback((value: string) => {
+    draftInputRef.current = value;
+    setInput(value);
+    if (!draftsReadyRef.current) return;
+    draftsRef.current = { ...draftsRef.current, [draftKeyRef.current]: value };
+    writeAssistantDrafts(userId, draftsRef.current);
+  }, [userId]);
+
+  const bindDraftToSession = useCallback((sessionId: string) => {
+    if (!draftsReadyRef.current || draftKeyRef.current !== assistantDraftKey(undefined)) return;
+    draftsRef.current = bindNewAssistantDraft(draftsRef.current, draftInputRef.current, sessionId);
+    draftKeyRef.current = assistantDraftKey(sessionId);
+    writeAssistantDrafts(userId, draftsRef.current);
+  }, [userId]);
+
+  const switchDraft = useCallback((targetSessionId: string | null | undefined) => {
+    if (!draftsReadyRef.current) return;
+    const target = assistantDraftKey(targetSessionId);
+    if (draftKeyRef.current === target) return;
+    const transition = transitionAssistantDraft(
+      draftsRef.current,
+      draftKeyRef.current,
+      draftInputRef.current,
+      target,
+    );
+    draftsRef.current = transition.drafts;
+    draftKeyRef.current = target;
+    draftInputRef.current = transition.input;
+    setInput(transition.input);
+    writeAssistantDrafts(userId, transition.drafts);
+  }, [userId]);
+
+  useEffect(() => {
+    if (authHydrated) switchDraft(activeSessionId);
+  }, [activeSessionId, authHydrated, switchDraft]);
   const {
     disableSessionOptIn,
     isSessionOptInEffectiveNow,
@@ -513,12 +597,16 @@ export function AssistantPage() {
   const {
     files,
     isUploading,
+    selectionNotice,
     fileInputRef,
     handleFileSelect,
     handlePaste,
     removeFile,
-    clearFiles
-  } = useFileHandler();
+    retryFile,
+    toggleFileSelection,
+    consumeSelectedFiles,
+    rekeyFiles,
+  } = useFileHandler(assistantDraftKey(activeSessionId));
 
   const {
     isImageMode,
@@ -531,16 +619,10 @@ export function AssistantPage() {
     selectedModel,
     setMessages,
     setArtifacts,
-    // Pass session setters to sync state if new session created during image gen
-    (id) => handleSelectSession(id).then(() => {}), // Slight mismatch in types, handleSelectSession returns promise
+    setActiveSessionId,
     createSession,
     listSessions,
-    // We can't easily update sessions list from hook without exposing setter, 
-    // so for now image gen might not refresh sidebar immediately, which is acceptable or fixable.
-    // Actually useChatSession doesn't expose setSessions. 
-    // Let's just pass a no-op or fix useChatSession later. 
-    // For now, we will rely on session auto-refresh or manual refresh.
-    () => {}, 
+    setSessions,
     { selected_style: selectedStyle, web_search_enabled: webSearchEnabled }
   );
 
@@ -559,38 +641,40 @@ export function AssistantPage() {
 
     async function loadData() {
       try {
-        const [modelsData, datasetsData, configData, connectionsData] = await Promise.all([
-          listModels().catch(() => []),
-          listDatasets().catch(() => []),
-          getConfig().catch(() => ({
-            default_model_id: "", // empty → the server applies its deployment default
-            available_providers: [],
-            kb_enabled: false,
-            web_search_enabled: false,
+        const [modelsResult, datasetsResult, configResult, connectionsData] = await Promise.all([
+          listModels().then((data) => ({ ok: true, data })).catch(() => ({ ok: false, data: [] as ModelInfo[] })),
+          listDatasets().then((data) => ({ ok: true, data })).catch(() => ({ ok: false, data: [] as DatasetInfo[] })),
+          getConfig().then((data) => ({ ok: true, data })).catch(() => ({
+            ok: false,
+            data: {
+              default_model_id: "",
+              available_providers: [],
+              kb_enabled: false,
+              web_search_enabled: false,
+            } as AssistantConfig,
           })),
           apiClient.get("/api/v1/connectors/available").catch(() => ({ data: [] })),
         ]);
         if (cancelled) return;
-        setModels(modelsData);
+        const modelsData = modelsResult.data;
+        const datasetsData = datasetsResult.data;
+        const configData = configResult.data;
+        const activeModels = activeAssistantModels(modelsData, configData.available_providers);
+        setModels(activeModels);
+        setModelsLoadError(!modelsResult.ok || !configResult.ok);
+        setDatasetsLoadError(!datasetsResult.ok);
         setDatasets(datasetsData);
         setConfig(configData);
         setConnectorCount(connectionsData.data.filter((c: { connected?: boolean }) => c.connected).length);
 
-        if (modelsData.length > 0) {
-          const defaultId = configData.default_model_id || modelsData[0].id;
-          const exists = modelsData.some((m) => m.id === defaultId);
-          const fallbackModelId = exists ? defaultId : modelsData[0].id;
-          // Validate the cache against the catalog; persist the resolved id.
-          const cached = readLastModelId(userId);
-          const resolved =
-            cached && modelsData.some((m) => m.id === cached)
-              ? cached
-              : fallbackModelId;
-          setSelectedModel(resolved);
-          writeLastModelId(resolved, userId);
-        }
+        setSelectedModel(preferredAssistantModelId(
+          activeModels,
+          configData.default_model_id,
+          readLastModelId(userId),
+        ));
       } catch (error) {
         console.error("Failed to load assistant data:", error);
+        if (!cancelled) setModelsLoadError(true);
       } finally {
         if (!cancelled) setModelsLoaded(true);
       }
@@ -600,6 +684,14 @@ export function AssistantPage() {
       cancelled = true;
     };
   }, [authHydrated, userId]);
+
+  // A saved conversation keeps its own model when restored on page load.
+  useEffect(() => {
+    const sessionModelId = activeSessionConfig?.selected_model;
+    if (activeSessionId && sessionModelId) {
+      setSelectedModel(sessionModelId);
+    }
+  }, [activeSessionId, activeSessionConfig?.selected_model]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(ASSISTANT_COMPACT_MEDIA_QUERY);
@@ -661,6 +753,8 @@ export function AssistantPage() {
 
   // Sync settings when session changes
   const onSessionSelect = useCallback(async (sessionId: string) => {
+    if (sessionId !== activeSessionId) imageViewEpochRef.current += 1;
+    scrollAfterSendRef.current = false;
     cancelImageMode(); // Reset image mode when switching sessions
     disableSessionOptIn();
     if (isMobile) setShowLeftPanel(false);
@@ -669,9 +763,8 @@ export function AssistantPage() {
       const sessionModel = sessionConfig.selected_model
         ? models.find((model) => model.id === sessionConfig.selected_model)
         : undefined;
-      if (sessionConfig.selected_model && sessionModel) {
+      if (sessionConfig.selected_model) {
         setSelectedModel(sessionConfig.selected_model);
-        writeLastModelId(sessionConfig.selected_model, userId);
       }
       setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
@@ -684,10 +777,18 @@ export function AssistantPage() {
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
-  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn, userId]);
+  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn, activeSessionId]);
+
+  const onDeleteSession = useCallback(async (sessionId: string) => {
+    if (sessionId === activeSessionId) imageViewEpochRef.current += 1;
+    return handleDeleteSession(sessionId);
+  }, [activeSessionId, handleDeleteSession]);
 
   // Handle new chat - reset all state including feature toggles
   const onNewChat = useCallback(() => {
+    imageViewEpochRef.current += 1;
+    scrollAfterSendRef.current = false;
+    switchDraft(undefined);
     cancelImageMode(); // Reset image mode
     disableSessionOptIn();
     handleNewChat();
@@ -696,22 +797,42 @@ export function AssistantPage() {
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
     setThinkingLevel("auto");
-    // Keep model and temperature as user preferences
-  }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
+    setSelectedModel(preferredAssistantModelId(
+      models,
+      config?.default_model_id || "",
+      readLastModelId(userId),
+    ));
+    // Keep temperature as a user preference.
+  }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn, models, config?.default_model_id, userId, switchDraft]);
+
+  const savedModelUnavailable = Boolean(
+    modelsLoaded && activeSessionId && activeSessionConfig?.selected_model &&
+    !models.some((model) => model.id === activeSessionConfig.selected_model),
+  );
+  const onNewChatKeepingDraft = useCallback(() => {
+    const retainedInput = input;
+    const chosenModel = models.some((model) => model.id === selectedModel)
+      ? selectedModel
+      : preferredAssistantModelId(models, config?.default_model_id || "", readLastModelId(userId));
+    if (activeSessionId) rekeyFiles(assistantDraftKey(activeSessionId), assistantDraftKey(undefined));
+    onNewChat();
+    setDraftInput(retainedInput);
+    setSelectedModel(chosenModel);
+  }, [input, selectedModel, models, config?.default_model_id, userId, activeSessionId, rekeyFiles, onNewChat, setDraftInput]);
 
   useChatShortcuts({
     surface: "assistant",
     composerId: ASSISTANT_COMPOSER_ID,
     onNewChat,
-    onStop: isStreaming ? stopStreaming : undefined,
+    onStop: hasActiveRun ? stopStreaming : undefined,
   });
 
   // Handle Send
   const handleSend = useCallback(() => {
-    // Block only once the catalog has loaded and is genuinely empty. While
-    // the catalog is still loading, the cached last model unlocks the first
-    // message (W3).
-    if (!selectedModel || (modelsLoaded && models.length === 0)) {
+    // A cached choice is provisional until the current enabled/provider
+    // catalog confirms it. Never start a turn with a stale model id.
+    if (!modelsLoaded) return;
+    if (!selectedModel || !models.some((model) => model.id === selectedModel)) {
       toast({
         title: t("assistant.noModels", "No models available"),
         variant: "destructive",
@@ -719,7 +840,20 @@ export function AssistantPage() {
       return;
     }
 
-    const successfulUploads = files.filter((f) => f.status === "success" && f.response);
+    const successfulUploads = files.filter((f) => f.status === "success" && f.selected && f.response);
+    if (!selectedModelInfo?.supports_vision && successfulUploads.some((f) => f.file.type.startsWith("image/"))) {
+      toast({ title: t("assistant.imageModelRequired", "The selected model cannot read images. Choose a vision model or exclude the image before sending."), variant: "destructive" });
+      return;
+    }
+    const unavailableDatasets = selectedDatasets.filter((id) => !datasets.some((dataset) => dataset.dataset_id === id));
+    if (selectedDatasets.length > 0 && (datasetsLoadError || unavailableDatasets.length > 0)) {
+      toast({ title: t("assistant.datasetScopeUnavailable", "Selected knowledge sources are unavailable. Review this round's sources before sending."), variant: "destructive" });
+      return;
+    }
+    if (webSearchEnabled && !config?.web_search_enabled) {
+      toast({ title: t("assistant.webScopeUnavailable", "Web search is unavailable for this round. Turn it off or check configuration."), variant: "destructive" });
+      return;
+    }
     if (
       isComposerBlocked ||
       isUploading ||
@@ -747,6 +881,7 @@ export function AssistantPage() {
     // the new message by clicking its Activity pill. Artifacts are
     // session-scoped, so leave them alone.
     setActivityMessageId(null);
+    scrollAfterSendRef.current = true;
 
     sendMessage({
       messageContent,
@@ -765,20 +900,31 @@ export function AssistantPage() {
       },
       selectedDatasets,
       models,
-      datasets
+      datasets,
+      onRunStarted: (acceptedSessionId) => {
+        draftsRef.current = clearAdmittedAssistantDrafts(draftsRef.current, activeSessionId, acceptedSessionId);
+        writeAssistantDrafts(userId, draftsRef.current);
+        setDraftInput("");
+        consumeSelectedFiles();
+        if (!activeSessionId) rekeyFiles(assistantDraftKey(undefined), assistantDraftKey(acceptedSessionId));
+      },
+      onSessionBound: bindDraftToSession,
     });
-    
-    setInput("");
-    clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, modelsLoaded, datasets, isComposerBlocked, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
+  }, [input, files, selectedModel, selectedModelInfo?.supports_vision, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, modelsLoaded, datasets, datasetsLoadError, config?.web_search_enabled, isComposerBlocked, isUploading, isGeneratingImage, sendMessage, consumeSelectedFiles, rekeyFiles, activeSessionId, userId, t, toast, isSessionOptInEffectiveNow, setDraftInput, bindDraftToSession]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
      // Same rationale as handleSend: close stale Activity drawer before a new send.
      setActivityMessageId(null);
-     sendImageGeneration(input, selectedStyle);
-     setInput("");
-  }, [input, selectedStyle, sendImageGeneration]);
+     scrollAfterSendRef.current = true;
+     const viewEpoch = imageViewEpochRef.current;
+     const originUserId = userId;
+     const isOriginCurrent = () =>
+       imageViewEpochRef.current === viewEpoch && currentUserIdRef.current === originUserId;
+     void sendImageGeneration(input, selectedStyle, bindDraftToSession, isOriginCurrent).then((accepted) => {
+       if (accepted && isOriginCurrent()) setDraftInput("");
+     });
+  }, [input, selectedStyle, sendImageGeneration, setDraftInput, bindDraftToSession, userId]);
 
   // Auto-scroll
   const scrollToBottomDom = useCallback((behavior: ScrollBehavior = "smooth") => {
@@ -809,8 +955,9 @@ export function AssistantPage() {
     const isNearBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight < 150;
 
-    if (isNearBottom || messages[messages.length - 1]?.isStreaming) {
+    if (isNearBottom || scrollAfterSendRef.current) {
       scrollToBottomDom();
+      scrollAfterSendRef.current = false;
     }
   }, [messages, scrollToBottomDom]);
 
@@ -887,7 +1034,7 @@ export function AssistantPage() {
                     isLoading={sessionsLoading}
                     onNewChat={onNewChat}
                     onSelectSession={onSessionSelect}
-                    onDeleteSession={handleDeleteSession}
+                    onDeleteSession={onDeleteSession}
                     onSessionsChange={setSessions}
                   />
                 </div>
@@ -917,6 +1064,16 @@ export function AssistantPage() {
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{showLeftPanel ? t("assistant.hideHistory", "Hide history") : t("assistant.showHistory", "Show history")}</TooltipContent>
               </Tooltip>
+              {activeSessionId && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0 rounded-md" onClick={() => setShowToolsDialog(true)} aria-label={t("assistant.toolsTitle", "Assistant tools")}>
+                      <Wrench className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))]" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{t("assistant.toolsTitle", "Assistant tools")}</TooltipContent>
+                </Tooltip>
+              )}
               <CompactModelSelector
                 models={models}
                 selectedModel={selectedModel}
@@ -924,10 +1081,24 @@ export function AssistantPage() {
                   setSelectedModel(modelId);
                   writeLastModelId(modelId, userId);
                 }}
-                disabled={isStreaming}
+                disabled={hasActiveRun}
               />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 rounded-md"
+                    onClick={() => setShowMemoryDialog(true)}
+                    aria-label={t("assistant.memoryTitle", "Assistant memory")}
+                  >
+                    <Brain className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))]" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t("assistant.memoryTitle", "Assistant memory")}</TooltipContent>
+              </Tooltip>
               {/* Share button */}
-              {activeSessionId && messages.length > 0 && !isStreaming && (
+              {activeSessionId && messages.length > 0 && !hasActiveRun && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -984,6 +1155,25 @@ export function AssistantPage() {
                   }
                 }}
               />
+              {isMobile && uniqueArtifactCount > 0 && (
+                <RightPanelChip
+                  icon={<FileText className="h-3.5 w-3.5" />}
+                  label={t("assistant.artifacts", "Artifacts")}
+                  count={uniqueArtifactCount}
+                  active={rightPanel === "artifacts"}
+                  compact
+                  onClick={() => {
+                    if (rightPanel === "artifacts") {
+                      setShowArtifacts(false);
+                    } else {
+                      setActivityMessageId(null);
+                      setSubagentMessageId(null);
+                      setShowLocalOS(false);
+                      setShowArtifacts(true);
+                    }
+                  }}
+                />
+              )}
               {/* Activity and Artifacts share the same mutex as Local OS
                   (rightPanel = "local_os" | "activity" | "artifacts" | null).
                   Each chip toggles its own panel; opening one auto-closes the
@@ -1039,7 +1229,23 @@ export function AssistantPage() {
               className="flex-1 overflow-y-auto"
               onScroll={handleScroll}
             >
-              <div className={cn("mx-auto px-3 py-5 sm:px-6 sm:py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
+            <div className={cn("mx-auto px-3 py-5 sm:px-6 sm:py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
+                {(savedModelUnavailable || modelRecreateNeeded || modelsLoadError) && (
+                  <div role="alert" className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
+                    <p>
+                      {modelsLoadError
+                        ? t("assistant.modelCatalogUnavailable", "The model catalog could not be loaded. Check the connection and reload this page.")
+                        : savedModelUnavailable
+                          ? t("assistant.savedModelUnavailable", "This conversation's saved model ({{model}}) is unavailable or you no longer have access. Its existing history is unchanged.", { model: activeSessionConfig?.selected_model })
+                          : t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")}
+                    </p>
+                    {!modelsLoadError && models.length > 0 && (
+                      <Button type="button" size="sm" variant="outline" className="mt-2" onClick={onNewChatKeepingDraft}>
+                        {t("assistant.newConversationKeepDraft", "New conversation with draft")}
+                      </Button>
+                    )}
+                  </div>
+                )}
                 {messages.length === 0 ? (
                   <div className="space-y-5">
                     {!isMobile && !showLeftPanel && sessions.length > 0 && (
@@ -1186,26 +1392,28 @@ export function AssistantPage() {
             <ChatInputArea
               composerId={ASSISTANT_COMPOSER_ID}
               input={input}
-              setInput={setInput}
+              setInput={setDraftInput}
               files={files}
               isUploading={isUploading}
-              isStreaming={isStreaming}
+              selectionNotice={selectionNotice}
+              isStreaming={hasActiveRun}
               isComposerBlocked={isComposerBlocked}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
-              // Match handleSend: a cached model stays usable while the catalog loads;
-              // only a resolved empty catalog disables the composer (W3).
-              hasAvailableModel={
-                Boolean(selectedModel) && !(modelsLoaded && models.length === 0)
-              }
+              hasAvailableModel={modelsLoaded && models.some((model) => model.id === selectedModel)}
+              supportsVision={selectedModelInfo?.supports_vision === true}
               handleFileSelect={handleFileSelect}
               removeFile={removeFile}
+              retryFile={retryFile}
+              toggleFileSelection={toggleFileSelection}
               onSend={isImageMode ? handleImageSend : handleSend}
               onStop={stopStreaming}
+              onCancelImageMode={cancelImageMode}
               handlePaste={handlePaste}
               fileInputRef={fileInputRef}
               config={config}
               datasets={datasets}
+              datasetsLoadError={datasetsLoadError}
               selectedDatasets={selectedDatasets}
               onToggleDataset={(id) => setSelectedDatasets(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
               webSearchEnabled={webSearchEnabled}
@@ -1464,6 +1672,16 @@ export function AssistantPage() {
           isOpen
           onClose={() => setShowShareDialog(false)}
         />
+      </Suspense>
+    )}
+    {showMemoryDialog && (
+      <Suspense fallback={null}>
+        <MemoryDialog open onClose={() => setShowMemoryDialog(false)} />
+      </Suspense>
+    )}
+    {showToolsDialog && activeSessionId && (
+      <Suspense fallback={null}>
+        <ToolsDialog sessionId={activeSessionId} open onClose={() => setShowToolsDialog(false)} />
       </Suspense>
     )}
 

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test, type TestContext } from "node:test";
 
-import type { AgentV2Event } from "../features/chat/runtimeV2State.ts";
+import {
+  ASSISTANT_VIEW_DETACH_REASON,
+  type AgentV2Event,
+} from "../features/chat/runtimeV2State.ts";
 
 const apiUrl = `data:text/javascript,${encodeURIComponent("export const api = { post: async () => { throw new Error('unconfigured fixture'); } }; export const getAuthToken = () => null;")}`;
 const apiModule = new URL("./agentThreads.ts", import.meta.url).href;
@@ -135,6 +138,19 @@ for (const explicitAbort of [false, true]) {
     assert.equal(calls.filter(path => path.endsWith(":interrupt")).length, explicitAbort ? 1 : 0);
   });
 }
+
+test("detaching the assistant view does not interrupt an admitted turn", async t => {
+  const calls = startFixture(t);
+  const incoming = response([event(1, "text_delta", { content: "partial" })], true);
+  t.mock.method(globalThis, "fetch", async () => incoming.response);
+  const caller = new AbortController();
+  const stream = streamAgentRuntimeV2({ message: "long task" }, caller.signal);
+  assert.equal((await stream.next()).value?.event_type, "text_delta");
+  caller.abort(ASSISTANT_VIEW_DETACH_REASON);
+  await stream.return();
+  assert.equal(calls.filter(path => path.endsWith("/turns")).length, 1);
+  assert.equal(calls.filter(path => path.endsWith(":interrupt")).length, 0);
+});
 
 test("a permanent 409 stream error is surfaced without retrying the admitted turn", async t => {
   const calls = startFixture(t);

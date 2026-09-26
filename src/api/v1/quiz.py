@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from ai_gateway_core.quiz import QuizAccessService, QuizGrader
+from ai_gateway_core.quiz.quiz_access_service import QuizAttemptConflictError
 from ai_gateway_core.sharing import ArtifactShareManager
 from ai_gateway_core.sharing.artifact_share_manager import (
     ArtifactShareError,
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 class QuizSubmitRequest(BaseModel):
     answers: dict[str, str] = Field(..., description="question_id → selected option label")
+    attempt_id: uuid.UUID | None = Field(None, description="Stable id for retrying this answer submission")
 
 
 class PublicQuizSubmitRequest(BaseModel):
@@ -66,8 +68,13 @@ class PublicQuizAttemptStartResponse(BaseModel):
     expires_at: datetime
 
 
+class PublicQuizAttemptResultRequest(BaseModel):
+    attempt_token: str = Field(min_length=1, max_length=200)
+
+
 class QuizAttemptResponse(BaseModel):
     attempt_id: uuid.UUID
+    cached: bool = False
     total_score: float
     correct_count: int
     total_count: int
@@ -213,10 +220,28 @@ async def submit_quiz(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
             answers=body.answers,
+            attempt_id=body.attempt_id,
         )
+    except QuizAttemptConflictError as e:
+        raise HTTPException(409, str(e)) from None
     except ValueError as e:
         raise HTTPException(404, str(e))
 
+    return result
+
+
+@router.get("/{quiz_id}/attempts/{attempt_id}", response_model=QuizAttemptResponse)
+async def get_attempt_result(
+    quiz_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    result = await _get_quiz_service(request).get_attempt_result(
+        quiz_id, user.tenant_id, user.user_id, attempt_id,
+    )
+    if result is None:
+        raise HTTPException(404, "Attempt not found")
     return result
 
 
@@ -280,6 +305,22 @@ async def start_shared_quiz_attempt(share_code: str, request: Request):
         return await _get_share_manager(request).start_attempt(share_code)
     except ArtifactShareError as exc:
         raise _share_http_error(exc) from exc
+
+
+@public_router.post("/public/{share_code}/attempts/result", response_model=QuizAttemptResponse)
+async def get_shared_quiz_attempt_result(
+    share_code: str,
+    body: PublicQuizAttemptResultRequest,
+    request: Request,
+):
+    await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
+    try:
+        result = await _get_share_manager(request).get_attempt_result(share_code, body.attempt_token)
+    except ArtifactShareError as exc:
+        raise _share_http_error(exc) from exc
+    if result is None:
+        raise HTTPException(404, "Attempt not found")
+    return result
 
 
 @public_router.post("/shared/{share_code}/submit", response_model=QuizAttemptResponse)

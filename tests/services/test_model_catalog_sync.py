@@ -86,6 +86,7 @@ async def test_dashscope_catalog_sync_creates_trusted_models() -> None:
     )
 
     created_ids = {item["model_id"] for item in result["created_models"]}
+    assert "qwen3.8-flash" in created_ids
     assert "qwen3.7-plus" in created_ids
     assert "qwen3.7-max" in created_ids
     assert "qwen3.6-plus" in created_ids

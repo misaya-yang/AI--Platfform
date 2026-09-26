@@ -49,7 +49,7 @@ export function CompactModelSelector({
           disabled={disabled || models.length === 0}
         >
           <span className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))] max-w-[180px] truncate">
-            {selectedModelInfo?.name || t("assistant.selectModel", "Select model")}
+            {selectedModelInfo?.name || selectedModel || t("assistant.selectModel", "Select model")}
           </span>
           <ChevronDown className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />
         </Button>

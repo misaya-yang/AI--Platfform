@@ -268,15 +268,56 @@ async def get_session_history(
         if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        legacy_messages = [
-            SessionHistoryMessage(
-                role=m.role,
-                content=m.content,
-                timestamp=m.timestamp.isoformat() if m.timestamp else None,
-                metadata=m.metadata,
+        visible_datasets: dict[str, str] = {}
+        kb_proxy = getattr(request.app.state, "kb_proxy", None)
+        if callable(getattr(kb_proxy, "list_datasets", None)):
+            try:
+                visible_datasets = {
+                    str(dataset["dataset_id"]): str(dataset.get("name") or dataset["dataset_id"])
+                    for dataset in await kb_proxy.list_datasets(user)
+                    if isinstance(dataset, dict) and dataset.get("dataset_id")
+                }
+            except Exception:
+                # History text remains readable to its owner. Source excerpts
+                # fail closed when current KB rights cannot be checked.
+                visible_datasets = {}
+
+        def safe_history_metadata(raw: dict | None) -> dict | None:
+            if not isinstance(raw, dict):
+                return raw
+            metadata = dict(raw)
+            contexts = metadata.get("contexts")
+            if isinstance(contexts, list):
+                revoked = any(
+                    isinstance(context, dict)
+                    and isinstance(context.get("dataset_id"), str)
+                    and context["dataset_id"] not in visible_datasets
+                    for context in contexts
+                )
+                if revoked:
+                    return {"source_access_revoked": True}
+                metadata["contexts"] = [
+                    context for context in contexts
+                    if isinstance(context, dict)
+                    and str(context.get("dataset_id") or "") in visible_datasets
+                ]
+            metadata.pop("rag_evaluation", None)
+            return metadata
+
+        legacy_messages: list[SessionHistoryMessage] = []
+        for message in session.history or []:
+            metadata = safe_history_metadata(message.metadata)
+            restricted = (
+                message.role == "assistant"
+                and isinstance(metadata, dict)
+                and metadata.get("source_access_revoked") is True
             )
-            for m in (session.history or [])
-        ]
+            legacy_messages.append(SessionHistoryMessage(
+                role=message.role,
+                content="" if restricted else message.content,
+                timestamp=message.timestamp.isoformat() if message.timestamp else None,
+                metadata=metadata,
+            ))
         runtime_messages: list[SessionHistoryMessage] = []
         runtime_total = 0
         database = getattr(request.app.state, "database", None)
@@ -296,6 +337,7 @@ async def get_session_history(
                     user_id=user.user_id,
                     runtime_thread_id=thread.runtime_thread_id,
                     limit=limit,
+                    allowed_datasets=visible_datasets,
                 )
                 runtime_messages = [SessionHistoryMessage(**message) for message in projected]
         messages = (legacy_messages + runtime_messages)[-limit:]

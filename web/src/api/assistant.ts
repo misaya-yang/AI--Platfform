@@ -71,7 +71,7 @@ export interface ChatRequest {
   web_search_max_results?: number;
   file_paths?: string[];
   system_prompt?: string;
-  execution_profile?: "safe" | "balanced" | "power";
+  execution_profile?: "safe";
   thinking_level?: "off" | "low" | "medium" | "high";
   reasoning_option?: string;
   memory_mode?: "auto" | "strict" | "off";
@@ -696,6 +696,9 @@ export interface ArtifactInfo {
   filename: string;
   storage_key: string;
   size_bytes: number;
+  ready?: boolean;
+  variant?: string;
+  parent_artifact_id?: string | null;
   mime_type?: string;
   source: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
   metadata?: Record<string, unknown>;
@@ -760,13 +763,52 @@ export interface ShareInfo {
   expires_at: string | null;
 }
 
+export interface ConversationSharePreview {
+  title: string;
+  messages: Array<{ role: "user" | "assistant"; content: string; quiz_data?: unknown }>;
+  artifacts: Array<{ artifact_id: string; title: string; filename: string; type: string }>;
+  message_count: number;
+  artifact_count: number;
+  audience: "anyone_with_link";
+  expires_days: number | null;
+  preview_hash: string;
+}
+
+export interface ExistingConversationShare extends ShareInfo {
+  session_id: string;
+  is_active: boolean;
+  view_count: number;
+}
+
+export async function previewConversationShare(
+  sessionId: string,
+  options: { expires_days?: number; include_artifacts: boolean },
+): Promise<ConversationSharePreview> {
+  const { data } = await api.get<ConversationSharePreview>(
+    `/api/v1/assistant/sessions/${sessionId}/share-preview`,
+    { params: options },
+  );
+  return data;
+}
+
+export async function listConversationShares(sessionId: string): Promise<ExistingConversationShare[]> {
+  const { data } = await api.get<{ shares: ExistingConversationShare[] }>("/api/v1/assistant/shares", {
+    params: { session_id: sessionId },
+  });
+  return data.shares;
+}
+
+export async function revokeConversationShare(shareCode: string): Promise<void> {
+  await api.delete(`/api/v1/assistant/shares/${shareCode}`);
+}
+
 export async function createConversationShare(
   sessionId: string,
-  options?: { expires_days?: number; include_artifacts?: boolean }
+  options: { expires_days?: number; include_artifacts: boolean; preview_hash: string }
 ): Promise<ShareInfo> {
   const { data } = await api.post<ShareInfo>(
     `/api/v1/assistant/sessions/${sessionId}/share`,
-    { expires_days: options?.expires_days, include_artifacts: options?.include_artifacts ?? true }
+    options,
   );
   return data;
 }
@@ -818,6 +860,7 @@ export interface AssistantRunStatus {
   run_id?: string;
   session_id?: string;
   status?: string;
+  terminal_reason?: "runtime_restart_interrupted" | null;
   harness_thread_id?: string | null;
   harness_turn_id?: string | null;
   checkpoint?: AssistantRunCheckpoint | null;
@@ -859,6 +902,7 @@ export async function prepareAssistantRunResume(
 export interface ImageGenerationRequest {
   prompt: string;
   model_id: string;
+  session_id?: string;
   style?: string;
   size?: string;
   n?: number;
@@ -866,6 +910,7 @@ export interface ImageGenerationRequest {
 
 export interface GeneratedImage {
   url: string;
+  artifact_id?: string;
   width?: number;
   height?: number;
 }
@@ -874,8 +919,13 @@ export interface ImageGenerationResponse {
   success: boolean;
   images: GeneratedImage[];
   provider: string;
-  duration_ms: number;
+  effective_model_id?: string | null;
+  duration_ms?: number;
+  session_id?: string;
+  output_artifact_id?: string;
   error?: string;
+  error_code?: string;
+  task_id?: string;
 }
 
 /**

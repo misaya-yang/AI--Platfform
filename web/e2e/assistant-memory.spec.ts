@@ -10,7 +10,7 @@
  */
 
 import { expect, test, type Page } from "@playwright/test";
-import { ensureAuthenticatedPage } from "./support/helpers";
+import { buildAuthHeaders, ensureAuthenticatedPage } from "./support/helpers";
 
 const COMPOSER = "#assistant-chat-composer";
 const APPROVE = /^(Approve|通过)$/;
@@ -101,4 +101,66 @@ test("assistant retains user identity across fresh sessions", async ({ page }) =
 
   const recallText = await log.innerText();
   expect(recallText).toContain(preferredName);
+});
+
+test("assistant memory edit, disable, and delete survive reload", async ({ page, request }) => {
+  const headers = await buildAuthHeaders(request);
+  const endpoint = `${process.env.E2E_API_URL}/api/v1/assistant/memory`;
+  const key = `r1-memory-control-${Date.now()}`;
+  const initial = "R1_MEMORY_INITIAL";
+  const updated = "R1_MEMORY_UPDATED";
+  const beforeResponse = await request.get(endpoint, { headers });
+  expect(beforeResponse.ok()).toBeTruthy();
+  const before = await beforeResponse.json() as { enabled: boolean };
+
+  const openMemory = async () => {
+    await page.getByRole("button", { name: /Assistant memory|助手记忆/ }).click();
+    const dialog = page.getByRole("dialog", { name: /Assistant memory|助手记忆/ });
+    await expect(dialog).toBeVisible();
+    return dialog;
+  };
+
+  try {
+    expect((await request.patch(endpoint, { headers, data: { enabled: true } })).ok()).toBeTruthy();
+    expect((await request.put(`${endpoint}/items`, {
+      headers, data: { key, value: initial },
+    })).ok()).toBeTruthy();
+
+    await ensureAuthenticatedPage(page, "/assistant");
+    let dialog = await openMemory();
+    let row = dialog.locator("div.rounded-lg.border.p-3").filter({ hasText: key });
+    await expect(row).toContainText(initial);
+    await row.getByRole("button", { name: /^(Edit|编辑)$/ }).click();
+    await row.locator("textarea").fill(updated);
+    await row.getByRole("button", { name: /^(Save|保存)$/ }).click();
+    await expect(row).toContainText(updated);
+
+    await page.reload();
+    dialog = await openMemory();
+    row = dialog.locator("div.rounded-lg.border.p-3").filter({ hasText: key });
+    await expect(row).toContainText(updated);
+    await dialog.getByRole("checkbox").click();
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+    await page.reload();
+    dialog = await openMemory();
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+    row = dialog.locator("div.rounded-lg.border.p-3").filter({ hasText: key });
+    await row.getByRole("button", { name: /^(Delete|删除)$/ }).click();
+    await row.getByRole("button", { name: /^(Remove|移除)$/ }).click();
+    await expect(row).toHaveCount(0);
+
+    await page.reload();
+    dialog = await openMemory();
+    await expect(dialog.getByText(key, { exact: true })).toHaveCount(0);
+    const afterResponse = await request.get(endpoint, { headers });
+    expect(afterResponse.ok()).toBeTruthy();
+    const after = await afterResponse.json() as {
+      enabled: boolean; items: Array<{ key: string }>;
+    };
+    expect(after.enabled).toBe(false);
+    expect(after.items.some((item) => item.key === key)).toBe(false);
+  } finally {
+    await request.delete(`${endpoint}/items?key=${encodeURIComponent(key)}`, { headers });
+    await request.patch(endpoint, { headers, data: { enabled: before.enabled } });
+  }
 });

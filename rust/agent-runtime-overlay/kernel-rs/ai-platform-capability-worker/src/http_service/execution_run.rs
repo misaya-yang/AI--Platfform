@@ -169,13 +169,9 @@ pub(super) async fn run_execution(
                             "attachment_executor_unavailable".into(),
                         ));
                     };
-                    let read_arguments =
-                        serde_json::from_value(arguments.clone()).map_err(|_| {
-                            OperationError::Failed("attachment_arguments_invalid".into())
-                        })?;
                     let lease = lease_for_record(&dispatch.record.execution);
                     return executor
-                        .read_scoped(lease, execution_id.clone(), read_arguments)
+                        .read_scoped_value(lease, execution_id.clone(), arguments.clone())
                         .await
                         .map(|value| serde_json::to_value(value).unwrap_or(Value::Null))
                         .map_err(|error| OperationError::Failed(error.to_string()));

@@ -241,6 +241,11 @@ async fn handle_dynamic_tool_call(
             &params.tool,
         )
         .map_err(|error| error.to_string())?;
+    if params.tool == "read_attachment"
+        && !selected_attachment_is_bound(&binding.payload, &params.arguments)
+    {
+        return Err("runtime_attachment_not_selected_for_turn".to_string());
+    }
     let bound_dataset_ids = binding
         .payload
         .get("items")
@@ -573,6 +578,26 @@ async fn handle_dynamic_tool_call(
         return Err("dynamic_tool_result_receipt_failed".to_string());
     }
     result.map(|outcome| outcome.response)
+}
+
+fn selected_attachment_is_bound(payload: &serde_json::Value, arguments: &serde_json::Value) -> bool {
+    let Some(attachment_id) = arguments.get("attachment_id").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    payload
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|item| {
+            item.get("kind").and_then(serde_json::Value::as_str) == Some("attachment")
+                && item.get("source").and_then(serde_json::Value::as_str) == Some("attachments")
+                && item
+                    .get("payload")
+                    .and_then(|value| value.get("content_ref"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(attachment_id)
+        })
 }
 
 fn capability_projection_event(
@@ -1044,6 +1069,21 @@ mod tests {
         assert_eq!(event.data["chunks"][0]["document_id"], "document-a");
         assert_eq!(event.data["chunks"][0]["segment_id"], "segment-a");
         assert_eq!(event.data["chunks"][0]["content"], "grounded");
+    }
+
+    #[test]
+    fn attachment_dispatch_accepts_only_this_turns_selected_id() {
+        let payload = serde_json::json!({"items": [{
+            "kind": "attachment", "source": "attachments",
+            "payload": {"content_ref": "art_1111111111111111"}
+        }]});
+        assert!(selected_attachment_is_bound(
+            &payload, &serde_json::json!({"attachment_id": "art_1111111111111111"})
+        ));
+        assert!(!selected_attachment_is_bound(
+            &payload, &serde_json::json!({"attachment_id": "art_2222222222222222"})
+        ));
+        assert!(!selected_attachment_is_bound(&payload, &serde_json::json!({})));
     }
 
     #[test]

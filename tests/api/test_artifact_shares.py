@@ -8,6 +8,7 @@ quiz routes alias over the same rows.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -38,6 +39,9 @@ class _FakeDB:
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
         query = query.replace("assistant.", "")
+        if "JOIN artifact_share_attempt_tokens AS token" in query:
+            share_id, token_hash = args
+            return next((attempt for attempt in self.attempts if attempt.get("share_id") == str(share_id) and attempt.get("token_hash") == token_hash), None)
         if "record_artifact_share_quiz_attempt" in query:
             (
                 share_code,
@@ -50,6 +54,7 @@ class _FakeDB:
                 _correct,
                 _total,
                 _client_ip,
+                result_json,
             ) = args
             row = next(
                 (s for s in self.shares.values() if s["share_code"] == share_code),
@@ -60,11 +65,8 @@ class _FakeDB:
                 row["expires_at"] is not None and row["expires_at"] <= now
             ):
                 raise ShareUnavailableError("Share not found or expired")
-            if row["max_attempts"] is not None and row["attempt_count"] >= row["max_attempts"]:
-                raise AttemptLimitReachedError("Maximum attempts reached")
             if row["require_name"] and not display_name:
                 raise AttemptInputError("This share requires a name before submitting")
-            started_at = now
             if token_hash is not None:
                 token = self.tokens.get(token_hash)
                 if (
@@ -73,12 +75,16 @@ class _FakeDB:
                 ):
                     raise AttemptInputError("Attempt token is invalid or expired")
                 if token["consumed_at"] is not None:
+                    prior = next((item for item in self.attempts if item.get("token_hash") == token_hash), None)
+                    if prior:
+                        return {"attempt_id": prior["id"], "result_payload": prior["result_payload"]}
                     raise AttemptConflictError("Attempt token has already been consumed")
                 if token["expires_at"] <= now:
                     raise AttemptInputError("Attempt token is invalid or expired")
-                started_at = token["started_at"]
             elif row["time_limit_minutes"] is not None:
                 raise AttemptInputError("An attempt token is required for timed shares")
+            if row["max_attempts"] is not None and row["attempt_count"] >= row["max_attempts"]:
+                raise AttemptLimitReachedError("Maximum attempts reached")
             if display_name:
                 key = (str(row["id"]), display_name)
                 if key in self.submitters:
@@ -87,8 +93,14 @@ class _FakeDB:
             row["attempt_count"] += 1
             if token_hash is not None:
                 self.tokens[token_hash]["consumed_at"] = now
-            self.attempts.append({"attempt_id": attempt_id, "status": "completed"})
-            return {"attempt_id": attempt_id, "started_at": started_at}
+            payload = json.loads(result_json)
+            self.attempts.append({
+                "id": attempt_id, "attempt_id": attempt_id, "status": "completed",
+                "share_id": str(row["id"]), "token_hash": token_hash,
+                "answers": json.loads(_answers), "display_name": display_name,
+                "result_payload": payload,
+            })
+            return {"attempt_id": attempt_id, "result_payload": payload}
         if "FROM quizzes" in query:
             quiz_id = str(args[0])
             row = self.quiz_rows.get(quiz_id)
@@ -277,12 +289,14 @@ async def test_manager_submit_enforces_max_attempts(fake_db: _FakeDB) -> None:
         max_attempts=1,
         require_name=False,
     )
-    first = await mgr.submit_attempt(share["share_code"], answers={})
+    first_token = await mgr.start_attempt(share["share_code"])
+    second_token = await mgr.start_attempt(share["share_code"])
+    first = await mgr.submit_attempt(share["share_code"], answers={}, attempt_token=first_token["attempt_token"])
     assert first["correct_count"] == 0
     assert fake_db.shares[share["share_id"]]["attempt_count"] == 1
 
     with pytest.raises(AttemptLimitReachedError):
-        await mgr.submit_attempt(share["share_code"], answers={})
+        await mgr.submit_attempt(share["share_code"], answers={}, attempt_token=second_token["attempt_token"])
 
 
 @pytest.mark.asyncio
@@ -312,12 +326,14 @@ async def test_atomic_quiz_attempt_does_not_persist_when_slot_is_lost(
         max_attempts=1,
         require_name=False,
     )
+    token = await mgr.start_attempt(share["share_code"])
     fake_db.shares[share["share_id"]]["attempt_count"] = 1
 
     with pytest.raises(AttemptLimitReachedError):
         await mgr.submit_attempt(
             share["share_code"],
             answers={},
+            attempt_token=token["attempt_token"],
         )
     assert fake_db.attempts == []
 
@@ -336,9 +352,11 @@ async def test_display_name_claim_is_atomic(
         require_name=True,
     )
 
-    await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
+    first_token = await mgr.start_attempt(share["share_code"])
+    second_token = await mgr.start_attempt(share["share_code"])
+    await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex", attempt_token=first_token["attempt_token"])
     with pytest.raises(AttemptConflictError):
-        await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
+        await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex", attempt_token=second_token["attempt_token"])
 
 
 @pytest.mark.asyncio
@@ -364,12 +382,11 @@ async def test_timed_attempt_uses_single_use_start_token(fake_db: _FakeDB) -> No
     )
     assert result["attempt_id"]
 
-    with pytest.raises(AttemptConflictError):
-        await mgr.submit_attempt(
-            share["share_code"],
-            answers={},
-            attempt_token=started["attempt_token"],
-        )
+    replay = await mgr.submit_attempt(
+        share["share_code"], answers={}, attempt_token=started["attempt_token"],
+    )
+    assert replay["cached"] is True
+    assert replay["attempt_id"] == result["attempt_id"]
 
     with pytest.raises(AttemptInputError):
         await mgr.submit_attempt(
@@ -506,6 +523,7 @@ def test_create_share_endpoint_returns_typed_contract(fake_db: _FakeDB) -> None:
         "description": "contract",
         "question_count": 0,
         "difficulty": "medium",
+        "dataset_ids": [],
     }
 
     response = client.post(
@@ -516,6 +534,31 @@ def test_create_share_endpoint_returns_typed_contract(fake_db: _FakeDB) -> None:
     assert response.status_code == 200
     assert response.json()["quiz_id"] == str(quiz_id)
     assert response.json()["quiz_title"] == "Typed quiz"
+
+
+def test_create_share_rejects_quiz_derived_from_private_knowledge(fake_db: _FakeDB) -> None:
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = fake_db
+
+    class _User:
+        user_id = "alex"
+        tenant_id = "tenant-a"
+
+    from src.api.v1.artifact_shares import get_user_context
+
+    app.dependency_overrides[get_user_context] = lambda: _User()
+    quiz_id = uuid.uuid4()
+    fake_db.quiz_rows[str(quiz_id)] = {
+        "id": quiz_id, "tenant_id": "tenant-a", "title": "Private quiz",
+        "description": "derived", "question_count": 0, "difficulty": "easy",
+        "dataset_ids": ["private-kb"],
+    }
+    response = TestClient(app).post(
+        "/artifact-shares", json={"kind": "quiz", "quiz_id": str(quiz_id)},
+    )
+    assert response.status_code == 409
+    assert fake_db.shares == {}
 
 
 def test_create_share_endpoint_rejects_invalid_bounds(fake_db: _FakeDB) -> None:
@@ -663,8 +706,9 @@ def test_public_attempt_start_and_timed_submit_contract(fake_db: _FakeDB) -> Non
         f"/api/v1/quiz/shared/{share['share_code']}/submit",
         json={"answers": {}, "attempt_token": attempt_token},
     )
-    assert replayed.status_code == 409
-    assert replayed.json()["detail"]["code"] == "attempt_conflict"
+    assert replayed.status_code == 200
+    assert replayed.json()["attempt_id"] == submitted.json()["attempt_id"]
+    assert replayed.json()["cached"] is True
 
 
 def test_public_attempt_errors_use_stable_codes(fake_db: _FakeDB) -> None:

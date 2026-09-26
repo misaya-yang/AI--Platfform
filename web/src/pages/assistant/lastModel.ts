@@ -1,12 +1,13 @@
 /**
  * Last-selected model cache.
  *
- * The composer unlocks with the last model the user picked instead of waiting
- * for `listModels` / `getConfig` on every page load. The catalog still
- * validates the cached id once it arrives (see AssistantPage loadData).
+ * The last explicit choice can be displayed while the catalog loads. Sending
+ * waits until the current enabled/provider catalog validates that choice.
  */
 
-const LAST_MODEL_STORAGE_PREFIX = "assistant.lastModelId.v1";
+// v1 also stored automatic defaults. Start a new preference epoch so the
+// Qwen 3.8 Flash default is not masked by an old auto-saved Qwen 3.7 choice.
+const LAST_MODEL_STORAGE_PREFIX = "assistant.lastModelId.v2";
 
 function lastModelStorageKey(userId?: string): string {
   return userId ? `${LAST_MODEL_STORAGE_PREFIX}:${userId}` : LAST_MODEL_STORAGE_PREFIX;

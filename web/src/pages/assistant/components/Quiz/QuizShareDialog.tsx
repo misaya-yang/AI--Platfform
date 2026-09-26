@@ -120,7 +120,7 @@ export function QuizShareDialog({ quizId, open, onClose }: QuizShareDialogProps)
               <>
                 {/* Share link generated */}
                 <div className="rounded-xl bg-muted/50 border border-border p-3">
-                  <p className="text-xs text-muted-foreground mb-1">Share Link</p>
+                  <p className="text-xs text-muted-foreground mb-1">{t("assistant.quiz.publicShareLink")}</p>
                   <div className="flex items-center gap-2">
                     <code className="flex-1 text-sm text-foreground truncate">
                       {window.location.origin}/quiz/{share.share_code}
@@ -140,8 +140,9 @@ export function QuizShareDialog({ quizId, open, onClose }: QuizShareDialogProps)
                 </div>
 
                 <p className="text-xs text-muted-foreground">
-                  Anyone with this link can take the quiz
-                  {share.require_name ? " (name required)" : ""}.
+                  {t(share.require_name
+                    ? "assistant.quiz.publicAnyoneName"
+                    : "assistant.quiz.publicAnyone")}
                 </p>
 
                 <Button onClick={handleCopy} className="w-full gap-2" variant="outline">

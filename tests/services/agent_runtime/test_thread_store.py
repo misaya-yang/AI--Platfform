@@ -1,10 +1,83 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 
 from src.services.agent_runtime.thread_store import AgentThreadStore, ThreadStoreError
+
+
+@pytest.mark.asyncio
+async def test_retrieved_context_restores_only_for_currently_visible_dataset() -> None:
+    class _ContextDB:
+        async def fetch(self, query: str, *_args):
+            if "assistant_capability_executions" in query:
+                return []
+            assert "compat/v1/context_retrieved" in query
+            return [{
+                "role": "assistant", "content": "Answer", "sequence": 3,
+                "run_id": "run-a", "created_at": datetime.now(timezone.utc),
+                "thinking_content": None, "tool_calls": None, "tool_results": None,
+                "runtime_events": [{"event_type": "context_retrieved", "data": {"chunks": [
+                    {"dataset_id": "visible", "document_id": "doc-a", "content": "Allowed excerpt", "score": 0.8},
+                    {"dataset_id": "revoked", "document_id": "doc-b", "content": "Private excerpt", "score": 0.9},
+                ]}}],
+                "total": 1,
+            }]
+
+    store = AgentThreadStore(_ContextDB())
+    scope = {
+        "tenant_id": "tenant-a", "user_id": "user-a",
+        "runtime_thread_id": "00000000-0000-0000-0000-000000000001", "limit": 10,
+    }
+    messages, _ = await store.history_messages(
+        **scope, allowed_datasets={"visible": "Visible KB", "revoked": "Other KB"},
+    )
+    assert messages[0]["metadata"]["contexts"][0]["chunks"][0]["content"] == "Allowed excerpt"
+    assert messages[0]["content"] == "Answer"
+    restricted, _ = await store.history_messages(**scope, allowed_datasets={"visible": "Visible KB"})
+    assert restricted[0]["content"] == ""
+    assert restricted[0]["metadata"]["source_access_revoked"] is True
+    assert "Private excerpt" not in json.dumps(restricted)
+    assert "Allowed excerpt" not in json.dumps(restricted)
+    denied, _ = await store.history_messages(**scope)
+    assert denied[0]["content"] == ""
+    assert "Allowed excerpt" not in json.dumps(denied)
+    assert "context_retrieved" not in json.dumps(denied)
+
+
+@pytest.mark.asyncio
+async def test_partial_delta_fallback_redacts_revoked_knowledge_source() -> None:
+    class _PartialDB:
+        async def fetch(self, query: str, *_args):
+            if "assistant_capability_executions" in query:
+                return []
+            # Both agent_message and text_delta fallback must carry source
+            # events; otherwise a partial failed answer escapes revocation.
+            assert query.count("'compat/v1/context_retrieved'") == 2
+            return [{
+                "role": "assistant", "content": "Private partial answer",
+                "sequence": 7, "run_id": "run-partial", "created_at": datetime.now(timezone.utc),
+                "thinking_content": "Private reasoning", "tool_calls": None, "tool_results": None,
+                "runtime_events": [
+                    {"event_type": "context_retrieved", "data": {"chunks": [
+                        {"dataset_id": "revoked", "content": "Private source text"},
+                    ]}},
+                    {"event_type": "run_error", "data": {"status": "failed"}},
+                ],
+                "total": 1,
+            }]
+
+    messages, _ = await AgentThreadStore(_PartialDB()).history_messages(
+        tenant_id="tenant-a", user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001", limit=10,
+        allowed_datasets={},
+    )
+    assert messages[0]["content"] == ""
+    assert messages[0]["metadata"]["source_access_revoked"] is True
+    assert messages[0]["metadata"]["process_summary"]["status"] == "failed"
+    assert "Private" not in json.dumps(messages)
 
 
 class _Database:
@@ -241,7 +314,16 @@ async def test_history_messages_preserves_empty_cancelled_turn() -> None:
                             "event_type": "cancelled",
                             "data": {"status": "cancelled"},
                             "timestamp": 1.0,
-                        }
+                        },
+                        {
+                            "event_type": "run_error",
+                            "data": {
+                                "status": "cancelled",
+                                "error_code": "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_ORPHANED",
+                                "error": "private internal detail",
+                            },
+                            "timestamp": 2.0,
+                        },
                     ],
                     "total": 1,
                 }
@@ -258,6 +340,85 @@ async def test_history_messages_preserves_empty_cancelled_turn() -> None:
     assert [(message["role"], message["content"]) for message in messages] == [("assistant", "")]
     assert messages[0]["metadata"]["thinking_content"] == "partial reasoning"
     assert messages[0]["metadata"]["process_summary"]["status"] == "cancelled"
+    assert messages[0]["metadata"]["process_summary"]["terminal_reason"] == "runtime_restart_interrupted"
+    assert "private internal detail" not in json.dumps(messages)
+
+
+@pytest.mark.asyncio
+async def test_history_messages_preserves_failed_and_uncertain_turns() -> None:
+    now = datetime.now(timezone.utc)
+
+    class _FailedHistoryDatabase(_Database):
+        async def fetch(self, query: str, *args):
+            # Both completed messages and fallback deltas must carry terminal facts.
+            assert query.count("'compat/v1/run_error'") >= 3
+            assert query.count("'compat/v1/side_effect_unknown'") >= 3
+            assert args[1:] == ("tenant-a", "user-a", 10)
+            return [
+                {
+                    "role": "assistant", "content": "Partial answer", "sequence": 5,
+                    "run_id": "run-uncertain", "created_at": now,
+                    "thinking_content": None, "tool_calls": None, "tool_results": None,
+                    "runtime_events": [
+                        {"event_type": "side_effect_unknown", "data": {}, "timestamp": 2.0},
+                        {"event_type": "run_error", "data": {
+                            "error": "private internal detail",
+                            "terminal_envelope": {"exit_reason": "side_effect_unknown"},
+                        }, "timestamp": 3.0},
+                    ], "total": 2,
+                },
+                {
+                    "role": "assistant", "content": "", "sequence": 2,
+                    "run_id": "run-failed", "created_at": now,
+                    "thinking_content": None, "tool_calls": None, "tool_results": None,
+                    "runtime_events": [{"event_type": "run_error", "data": {
+                        "error": "private internal detail", "status": "failed",
+                    }, "timestamp": 1.0}], "total": 2,
+                },
+            ]
+
+    messages, total = await AgentThreadStore(_FailedHistoryDatabase()).history_messages(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001",
+        limit=10,
+    )
+
+    assert total == 2
+    assert [(item["content"], item["metadata"]["process_summary"]["status"])
+            for item in messages] == [("", "failed"), ("Partial answer", "failed")]
+    assert messages[1]["metadata"]["process_summary"]["outcome_uncertain"] is True
+    assert "error" not in messages[1]["metadata"]["process_summary"]
+    assert "private internal detail" not in json.dumps(messages)
+
+
+@pytest.mark.asyncio
+async def test_history_messages_preserves_empty_successful_turn() -> None:
+    now = datetime.now(timezone.utc)
+
+    class _EmptySuccessDatabase(_Database):
+        async def fetch(self, query: str, *args):
+            assert query.count("'compat/v1/run_finished'") >= 3
+            assert "'side_effect_unknown', 'run_finished', 'run_error', 'cancelled'" in query
+            assert args[1:] == ("tenant-a", "user-a", 10)
+            return [{
+                "role": "assistant", "content": "", "sequence": 3,
+                "run_id": "run-empty", "created_at": now,
+                "thinking_content": None, "tool_calls": None, "tool_results": None,
+                "runtime_events": [{"event_type": "run_finished", "data": {}, "timestamp": 1.0}],
+                "total": 1,
+            }]
+
+    messages, total = await AgentThreadStore(_EmptySuccessDatabase()).history_messages(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001",
+        limit=10,
+    )
+
+    assert total == 1
+    assert messages[0]["content"] == ""
+    assert messages[0]["metadata"]["process_summary"]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio

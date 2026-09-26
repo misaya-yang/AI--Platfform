@@ -39,6 +39,9 @@ class _Database:
         self.thread = None
 
     async def fetchrow(self, query: str, *args):
+        if "FROM user_memory" in query:
+            assert args == ("tenant-a", "user-a", "__assistant_memory_control__")
+            return None
         if "ensure_assistant_runtime_thread" in query:
             self.thread = {
                 "runtime_thread_id": args[0], "tenant_id": args[1],
@@ -447,6 +450,67 @@ async def test_v2_approval_routes_forward_the_thread_scope_and_reject_repeat_dec
             _request(state), user,
         )
     assert getattr(exc_info.value, "status_code", None) == 409
+
+
+@pytest.mark.asyncio
+async def test_v2_approval_decision_requires_verified_action_for_approve(monkeypatch) -> None:
+    db = _Database()
+    thread_id = str(uuid4())
+    db.thread = {
+        "runtime_thread_id": thread_id, "tenant_id": "tenant-a", "user_id": "user-a",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
+        "import_status": "not_required", "last_sequence": 0,
+    }
+
+    class _Assignments:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
+
+    class _Control:
+        def __init__(self) -> None:
+            self.decisions = []
+
+        async def get_approval(self, **_kwargs):
+            return {"status": "pending", "run_id": "run-a", "tool_name": "execute_python_code"}
+
+        async def decide_approval(self, **kwargs):
+            self.decisions.append(kwargs)
+            return {"status": "approved"}
+
+    control = _Control()
+    state = SimpleNamespace(
+        database=db, assistant_runtime_assignments=_Assignments(), agent_runtime_control=control,
+    )
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+    previews = []
+
+    async def _preview(*_args, **kwargs):
+        previews.append(kwargs)
+        return {"can_approve": False}
+
+    monkeypatch.setattr("src.api.v2.agent.owner_approval_preview", _preview)
+    with pytest.raises(Exception) as exc_info:
+        await decide_thread_approval(
+            thread_id, "approval-1", ApprovalDecisionRequest(approved=True), _request(state), user,
+        )
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert control.decisions == []
+    assert previews[0]["runtime_thread_id"] == thread_id
+
+    # Rejection remains available when action details cannot be verified.
+    await decide_thread_approval(
+        thread_id, "approval-1", ApprovalDecisionRequest(approved=False), _request(state), user,
+    )
+    assert len(control.decisions) == 1 and control.decisions[0]["approved"] is False
+
+    async def _verified(*_args, **_kwargs):
+        return {"can_approve": True}
+
+    monkeypatch.setattr("src.api.v2.agent.owner_approval_preview", _verified)
+    await decide_thread_approval(
+        thread_id, "approval-1", ApprovalDecisionRequest(approved=True), _request(state), user,
+    )
+    assert control.decisions[-1]["approved"] is True
 
 
 @pytest.mark.asyncio

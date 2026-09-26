@@ -12248,7 +12248,7 @@
       "properties": [
         {
           "name": "ai-platform:overlay.sha256",
-          "value": "5dc36c43638a48bc63e7069d4513ccc3c4f45ad9d930092c88c4a4a75c3b2e85"
+          "value": "e5ed9f97145a28a5b8438ba6830267db3772e564a0fc26eb0a42e5840c770d2a"
         },
         {
           "name": "ai-platform:capability-schema.sha256",
@@ -12260,10 +12260,10 @@
         }
       ],
       "type": "application",
-      "version": "279ba894152b2c01c5294cc0723b463b209bdca4+5dc36c43638a"
+      "version": "279ba894152b2c01c5294cc0723b463b209bdca4+e5ed9f97145a"
     }
   },
-  "serialNumber": "urn:uuid:8b3d46f5-bb92-5e33-b04c-7813a386155a",
+  "serialNumber": "urn:uuid:5588897c-77bf-5c67-a96c-febec084d5d6",
   "specVersion": "1.5",
   "version": 1
 }
