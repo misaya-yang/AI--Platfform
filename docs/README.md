@@ -77,6 +77,7 @@ listed in [`harness/architecture.md`](harness/architecture.md) §6.
 
 | Plan | Subject |
 | --- | --- |
+| [现有功能完善 PRD](plans/product-feature-completion-2026-09-23/README.md) | **PRD v1.0 / 待产品评审** — 对13个现有模块进行产品分析，定义功能需求、优先级、正常/异常验收及R0～R5迭代；本轮仅规划，未启动开发。 |
 | [Codex内核更新与Gateway兼容优化](plans/codex-harness-refresh-2026-09-22.md) | **active / 实现与集成中** — 从`94cbbdda`升级到指定快照`279ba894`；用户授权多代理代码更新、优化/review及本地Docker/内置浏览器验收。状态以执行账本为准。 |
 | [`plans/agent-platform-vnext-2026-09/README.md`](plans/agent-platform-vnext-2026-09/README.md) | **active / 一期实现** — 三期升级PRD；一期已在 `codex/agent-platform-vnext-phase1` 启动，P1-01首批租户边界代码与验证见执行receipt；二/三期仍为计划。 |
 | [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md) | **superseded as execution instruction** — 证据保留；现行 provider/stability blocker 在 `sota-performance-dual-gate`。 |
