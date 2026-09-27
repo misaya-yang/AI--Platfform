@@ -81,3 +81,7 @@
 本地main可合入已验证安全增量；**不声明完整R1或整个产品验收完成**。剩余范围明确列为未验证，不是Runtime持久恢复无法实现，也不自动重试未知写操作。
 
 实现提交60ede5c5；src/main.py来源checker接线与证据单独进行命名integration提交，随后本地main快进。临时fixture恢复及正常Quiz兼容回归均完成，无额外provider任务。
+
+## 实际本地合入
+
+2026-09-27，codex/r1-remaining-acceptance 已快进合入本地main：实现60ede5c5，Gateway接线/证据66202d8b，日志规范2919a587。已合入Git blob与Docker源指纹一致；未推送、未删除分支。随后只记录本地合入收据，无产品代码变化。完整R1仍按上述未验证边界记录。

@@ -843,5 +843,7 @@
       "image_id": "sha256:0c449319307187e052d82bed40bb63b27d619da4a730144475a8e768d655dc0e",
       "healthy": true
     }
-  ]
+  ],
+  "merged_code_revision": "2919a587c6257f5dcd83e670b868e2a0edf1953f",
+  "git_blob_source_matches": true
 }

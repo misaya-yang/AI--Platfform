@@ -6,11 +6,11 @@
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "codex/r1-remaining-acceptance",
+  "branch": "main",
   "active_phase": "R1-1",
   "active_feature": "Verified R1 source authorization closure; complete R1 remaining journeys explicitly unverified",
-  "active_package": "R1-RP01",
-  "next_action": "Local main integration of verified R1-RP01 increment; no additional development this closure. Retain unverified full-R1 journeys in report.",
+  "active_package": null,
+  "next_action": "Current user-requested closure finished: verified RP01 locally merged; no further development in this round. Full-R1 unverified journeys remain explicit follow-up.",
   "last_result": "RP01 source-access closure: Python199, Node10, E2E2, source18, OpenAPI2; real Qwen memory-off/390 selected attachment/private KB and idle/pending revocation verified. Current-source Docker hashes12 Python/187 assets and health passed. Independent reviewer PASS after high/medium repairs. DR01 remains accepted C4; complete R1 still unverified.",
   "updated_at": "2026-09-27",
   "blockers": [
@@ -97,7 +97,7 @@
   "execution_authorization": {
     "scope": "Latest user authorizes prompt closure and local main integration of verified existing成果.",
     "parallel_agents": "Primary sole writer; bounded read-only reviewer/evidence audit; live operations serialized.",
-    "round_status": "closing",
+    "round_status": "closed",
     "commit_authorized": true,
     "local_merge_authorized": true,
     "push_authorized": false,
@@ -130,5 +130,13 @@
     "implementation_commit": "91eadb927a8e0fa02eac39fc1657470bcf84ff73",
     "remote_push_performed": false,
     "unrelated_work_preserved": true
+  },
+  "rp01_integration": {
+    "state": "integrated",
+    "target": "main",
+    "mode": "local fast-forward",
+    "merged_head": "2919a587c6257f5dcd83e670b868e2a0edf1953f",
+    "push_performed": false,
+    "branch_deleted": false
   }
 }

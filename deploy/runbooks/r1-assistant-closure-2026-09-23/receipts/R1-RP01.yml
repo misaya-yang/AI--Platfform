@@ -1,7 +1,7 @@
 package_id: R1-RP01
 state: verified
 base_sha: 425ce123
-head_sha: 425ce123
+head_sha: 2919a587c6257f5dcd83e670b868e2a0edf1953f
 changed_paths:
 - src/api/v1/_assistant_routes/artifacts.py
 - src/api/v1/_assistant_routes/chat.py
@@ -43,7 +43,9 @@ changed_paths:
 - web/src/pages/assistant/types.ts
 - src/main.py
 commits:
-- 60ede5c5
+- 60ede5c59eb6ad4327e1d8ecac77dccf26db8d93
+- 66202d8bfd9fd0a1cf4cefa53216472fae9ae037
+- 2919a587c6257f5dcd83e670b868e2a0edf1953f
 contracts_compared:
 - V1/V2 turn and original run identity unchanged
 - thread read adds optional restricted_source_run_ids
@@ -188,8 +190,11 @@ evidence:
 - reports/r1-remaining/390-attachment-run-facts.json
 - reports/r1-remaining/memory-off-run-facts.json
 integration:
-  state: ready_for_local_merge
+  state: integrated
+  target: main
+  mode: local fast-forward
+  merged_head: 2919a587c6257f5dcd83e670b868e2a0edf1953f
   push_performed: false
   branch_deleted: false
-source_note: Observed dirty source and final Docker fingerprints validated; Git code
-  commits will be recorded after scoped integration.
+source_note: Docker source manifest matched merged Git blobs; subsequent receipt-only
+  commit changes no product code.
