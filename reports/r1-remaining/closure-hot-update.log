@@ -276,7 +276,7 @@ dist/assets/index-DH1ZmL3M.js                         414.23 kB │ gzip: 136.54
 dist/assets/dashboard-CHmw6QFR.js                     511.35 kB │ gzip: 139.94 kB
 
 ✓ built in 813ms
-[plugin builtin:vite-reporter] 
+[plugin builtin:vite-reporter]
 (!) Some chunks are larger than 500 kB after minification. Consider:
 - Using dynamic import() to code-split the application
 - Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
@@ -315,18 +315,18 @@ dist/assets/dashboard-CHmw6QFR.js                     511.35 kB │ gzip: 139.94
 [OK]      Copied /tmp/ai-platform-hot-update-entrypoint.sRu9eL -> ai-gateway-frontend:/docker-entrypoint.d
 
 => Restarting updated services
- Container ai-gateway-frontend Restarting 
- Container ai-gateway-knowledge-service Restarting 
- Container ai-gateway-backend Restarting 
- Container ai-gateway-knowledge-worker-1 Restarting 
- Container ai-gateway-frontend Started 
- Container ai-gateway-knowledge-worker-1 Started 
- Container ai-gateway-knowledge-service Started 
- Container ai-gateway-backend Started 
- Container ai-gateway-agent-runtime Restarting 
- Container ai-gateway-agent-capability-worker-1 Restarting 
- Container ai-gateway-agent-capability-worker-1 Started 
- Container ai-gateway-agent-runtime Started 
+ Container ai-gateway-frontend Restarting
+ Container ai-gateway-knowledge-service Restarting
+ Container ai-gateway-backend Restarting
+ Container ai-gateway-knowledge-worker-1 Restarting
+ Container ai-gateway-frontend Started
+ Container ai-gateway-knowledge-worker-1 Started
+ Container ai-gateway-knowledge-service Started
+ Container ai-gateway-backend Started
+ Container ai-gateway-agent-runtime Restarting
+ Container ai-gateway-agent-capability-worker-1 Restarting
+ Container ai-gateway-agent-capability-worker-1 Started
+ Container ai-gateway-agent-runtime Started
 
 => Runtime health checks
 [INFO]    Waiting for Knowledge service...
