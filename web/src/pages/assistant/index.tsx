@@ -345,6 +345,7 @@ export function AssistantPage() {
     isStreaming,
     hasActiveRun,
     modelRecreateNeeded,
+    sourceRecreateNeeded,
     isComposerBlocked,
     sessionsLoading,
     historyRestoreState,
@@ -1230,11 +1231,13 @@ export function AssistantPage() {
               onScroll={handleScroll}
             >
             <div className={cn("mx-auto px-3 py-5 sm:px-6 sm:py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
-                {(savedModelUnavailable || modelRecreateNeeded || modelsLoadError) && (
+                {(savedModelUnavailable || modelRecreateNeeded || sourceRecreateNeeded || modelsLoadError) && (
                   <div role="alert" className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
                     <p>
                       {modelsLoadError
                         ? t("assistant.modelCatalogUnavailable", "The model catalog could not be loaded. Check the connection and reload this page.")
+                        : sourceRecreateNeeded
+                          ? t("assistant.sourceNeedsNewConversation", "Earlier knowledge sources are unavailable. Start a new conversation to continue.")
                         : savedModelUnavailable
                           ? t("assistant.savedModelUnavailable", "This conversation's saved model ({{model}}) is unavailable or you no longer have access. Its existing history is unchanged.", { model: activeSessionConfig?.selected_model })
                           : t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")}

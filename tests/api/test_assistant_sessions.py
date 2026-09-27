@@ -65,6 +65,9 @@ def _build_request(
 ) -> Request:
     app = FastAPI()
     app.state.session_manager = session_manager
+    app.state.database = SimpleNamespace(
+        fetch=AsyncMock(return_value=[]), fetchrow=AsyncMock(return_value=None),
+    )
     return Request(
         {
             "type": "http",
@@ -523,7 +526,7 @@ def test_local_artifact_url_stays_behind_authenticated_http_route() -> None:
             "https://storage.example/result.txt?signature=one",
             "artifact-1",
         )
-        == "https://storage.example/result.txt?signature=one"
+        == "/api/v1/assistant/artifacts/artifact-1/download"
     )
 
 
@@ -549,6 +552,7 @@ async def test_download_artifact_streams_local_content_instead_of_file_redirect(
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     artifact = SimpleNamespace(
         artifact_id="artifact-1",
+        session_id="session-1",
         tenant_id=user.tenant_id,
         user_id=user.user_id,
         mime_type="text/plain",

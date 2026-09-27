@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
+from ...services.assistant_entry.source_access import quiz_source_ids
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/artifact-shares", tags=["artifact-shares"])
@@ -80,10 +81,7 @@ async def create_artifact_share(
     )
     if not quiz_row:
         raise HTTPException(404, "Quiz not found or not authorized")
-    dataset_ids = quiz_row["dataset_ids"]
-    if isinstance(dataset_ids, str):
-        dataset_ids = json.loads(dataset_ids)
-    if dataset_ids:
+    if await quiz_source_ids(request, body.quiz_id, user.tenant_id, require_origin=True):
         raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
 
     # Freeze a snapshot: public questions + grading answer keys.

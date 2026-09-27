@@ -37,6 +37,11 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
+from ...services.assistant_entry.source_access import (
+    quiz_source_ids,
+    require_public_quiz_source_access,
+    visible_dataset_names,
+)
 from ..deps import enforce_rate_limit, get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
@@ -148,6 +153,13 @@ def _get_quiz_service(request: Request) -> QuizAccessService:
     return QuizAccessService(db=db, grader=QuizGrader())
 
 
+async def _require_quiz_source_access(quiz_id: uuid.UUID, request: Request, user: UserContext) -> None:
+    """Check both direct bindings and knowledge inherited by the creating run."""
+    sources = await quiz_source_ids(request, quiz_id, user.tenant_id)
+    if sources and not sources <= (await visible_dataset_names(request, user)).keys():
+        raise HTTPException(403, detail={"code": "ASSISTANT_SOURCE_ACCESS_REVOKED"})
+
+
 def _get_share_manager(request: Request) -> ArtifactShareManager:
     db = getattr(request.app.state, "database", None)
     if db is None:
@@ -198,6 +210,7 @@ async def get_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Get quiz details (questions without answers)."""
+    await _require_quiz_source_access(quiz_id, request, user)
     svc = _get_quiz_service(request)
     quiz = await svc.get_quiz(quiz_id, user.tenant_id, include_answers=False)
     if not quiz:
@@ -213,6 +226,7 @@ async def submit_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Submit quiz answers and receive grading results."""
+    await _require_quiz_source_access(quiz_id, request, user)
     svc = _get_quiz_service(request)
     try:
         result = await svc.submit_attempt(
@@ -237,6 +251,7 @@ async def get_attempt_result(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
+    await _require_quiz_source_access(quiz_id, request, user)
     result = await _get_quiz_service(request).get_attempt_result(
         quiz_id, user.tenant_id, user.user_id, attempt_id,
     )
@@ -254,6 +269,7 @@ async def list_attempts(
     user: UserContext = Depends(get_user_context),
 ):
     """List all attempts for a quiz (creator sees all, others see own). Paginated."""
+    await _require_quiz_source_access(quiz_id, request, user)
     svc = _get_quiz_service(request)
     return await svc.list_attempts(
         quiz_id, user.tenant_id, user.user_id, limit=limit, offset=offset,
@@ -284,6 +300,7 @@ public_router = APIRouter(prefix="/quiz", tags=["quiz-public"])
 @public_router.get("/shared/{share_code}", response_model=PublicQuizResponse)
 async def get_shared_quiz(share_code: str, request: Request):
     """Get a quiz for public taking (no auth required). Returns questions without answers."""
+    await require_public_quiz_source_access(request, share_code)
     mgr = _get_share_manager(request)
     artifact = await mgr.get_public_artifact(share_code)
     if not artifact:
@@ -301,6 +318,7 @@ async def get_shared_quiz(share_code: str, request: Request):
 async def start_shared_quiz_attempt(share_code: str, request: Request):
     """Start the per-attempt clock and return a single-use opaque token."""
     await enforce_rate_limit(request, user=None, operation="quiz_attempt_start_public")
+    await require_public_quiz_source_access(request, share_code)
     try:
         return await _get_share_manager(request).start_attempt(share_code)
     except ArtifactShareError as exc:
@@ -314,6 +332,7 @@ async def get_shared_quiz_attempt_result(
     request: Request,
 ):
     await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
+    await require_public_quiz_source_access(request, share_code)
     try:
         result = await _get_share_manager(request).get_attempt_result(share_code, body.attempt_token)
     except ArtifactShareError as exc:
@@ -332,6 +351,7 @@ async def submit_shared_quiz(
     """Submit answers for a shared quiz (no auth required)."""
     # Anonymous endpoint: IP-only rate limit to prevent submission spam
     await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
+    await require_public_quiz_source_access(request, share_code)
 
     mgr = _get_share_manager(request)
     client_ip = get_client_ip_from_request(request)

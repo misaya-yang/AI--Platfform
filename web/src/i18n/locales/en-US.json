@@ -389,6 +389,7 @@
     "sources": "sources",
     "stopGenerating": "Stop generating",
     "modelNeedsNewConversation": "This model uses a different tool configuration. Start a new conversation to continue.",
+    "sourceNeedsNewConversation": "Earlier knowledge sources are unavailable. Start a new conversation to continue.",
     "streamInterrupted": "The response stream was interrupted. The generated content above was preserved; please retry.",
     "styleHint": "Select a style above to customize how AI responds.",
     "styleTitle": "Customize Response Style",

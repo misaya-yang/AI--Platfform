@@ -21,6 +21,10 @@ from ....services.assistant_entry.session_binding import (
     ASSISTANT_SERVICE_IDS,
     get_session_manager,
 )
+from ....services.assistant_entry.source_access import (
+    conversation_sources,
+    visible_dataset_names,
+)
 from ...deps import get_user_context
 from .schemas import (
     SessionCreateRequest,
@@ -268,19 +272,14 @@ async def get_session_history(
         if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        visible_datasets: dict[str, str] = {}
-        kb_proxy = getattr(request.app.state, "kb_proxy", None)
-        if callable(getattr(kb_proxy, "list_datasets", None)):
-            try:
-                visible_datasets = {
-                    str(dataset["dataset_id"]): str(dataset.get("name") or dataset["dataset_id"])
-                    for dataset in await kb_proxy.list_datasets(user)
-                    if isinstance(dataset, dict) and dataset.get("dataset_id")
-                }
-            except Exception:
-                # History text remains readable to its owner. Source excerpts
-                # fail closed when current KB rights cannot be checked.
-                visible_datasets = {}
+        visible_datasets = await visible_dataset_names(request, user)
+        database = getattr(request.app.state, "database", None)
+        sources = await conversation_sources(request, user, session_id) if database is not None else None
+        restricted_runs = {
+            run_id for run_id, dataset_ids in sources.inherited_by_run.items()
+            if not dataset_ids <= visible_datasets.keys()
+        } if sources else set()
+        legacy_restricted = bool(sources and not sources.legacy_dataset_ids <= visible_datasets.keys())
 
         def safe_history_metadata(raw: dict | None) -> dict | None:
             if not isinstance(raw, dict):
@@ -309,9 +308,13 @@ async def get_session_history(
             metadata = safe_history_metadata(message.metadata)
             restricted = (
                 message.role == "assistant"
-                and isinstance(metadata, dict)
-                and metadata.get("source_access_revoked") is True
+                and (legacy_restricted or (
+                    isinstance(metadata, dict)
+                    and metadata.get("source_access_revoked") is True
+                ))
             )
+            if restricted:
+                metadata = {"source_access_revoked": True}
             legacy_messages.append(SessionHistoryMessage(
                 role=message.role,
                 content="" if restricted else message.content,
@@ -320,7 +323,6 @@ async def get_session_history(
             ))
         runtime_messages: list[SessionHistoryMessage] = []
         runtime_total = 0
-        database = getattr(request.app.state, "database", None)
         if database is not None:
             store = getattr(request.app.state, "agent_thread_store", None)
             if store is None:
@@ -338,6 +340,7 @@ async def get_session_history(
                     runtime_thread_id=thread.runtime_thread_id,
                     limit=limit,
                     allowed_datasets=visible_datasets,
+                    restricted_run_ids=restricted_runs,
                 )
                 runtime_messages = [SessionHistoryMessage(**message) for message in projected]
         messages = (legacy_messages + runtime_messages)[-limit:]

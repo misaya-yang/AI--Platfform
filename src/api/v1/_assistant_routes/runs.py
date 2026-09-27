@@ -22,6 +22,7 @@ from ....services.assistant_entry.run_queries import (
     fetch_approval_run_owner,
     fetch_cancellable_run,
 )
+from ....services.assistant_entry.source_access import require_conversation_source_access
 from ...deps import get_user_context
 from .schemas import (
     ApprovalRequest,
@@ -74,6 +75,7 @@ async def approve_tool_call(
                 raise HTTPException(status_code=404, detail="Approval not found")
             payload = body.model_dump()
             if payload["approved"]:
+                await require_conversation_source_access(request, user, session_id, for_execution=True)
                 preview = await owner_approval_preview(
                     database,
                     approval_id=approval_id,

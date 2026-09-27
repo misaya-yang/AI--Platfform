@@ -258,6 +258,7 @@ class AgentThreadStore:
         runtime_thread_id: str,
         limit: int,
         allowed_datasets: dict[str, str] | None = None,
+        restricted_run_ids: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         rows = await self.database.fetch(
             """
@@ -554,8 +555,9 @@ class AgentThreadStore:
                     runtime_events_value = None
             source_access_revoked = (
                 role == "assistant"
-                and isinstance(runtime_events_value, list)
-                and any(
+                and (str(row.get("run_id") or "") in (restricted_run_ids or set()) or (
+                    isinstance(runtime_events_value, list)
+                    and any(
                     isinstance(event, dict)
                     and event.get("event_type") == "context_retrieved"
                     and isinstance(event.get("data"), dict)
@@ -567,7 +569,8 @@ class AgentThreadStore:
                         for chunk in event["data"]["chunks"]
                     )
                     for event in runtime_events_value
-                )
+                    )
+                ))
             )
             if source_access_revoked:
                 text = ""
@@ -722,6 +725,7 @@ class AgentThreadStore:
             for message in messages
             if message.get("role") == "assistant"
             and isinstance(message.get("metadata"), dict)
+            and not message["metadata"].get("source_access_revoked")
             and not message["metadata"].get("quiz_id")
             and message["metadata"].get("runtime_run_id")
         }

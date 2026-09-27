@@ -15,6 +15,7 @@ export function hydrateMessageArtifacts(
   const idsByMessageIndex = resolveArtifactIdsByMessageIndex(messages, artifacts);
 
   return messages.map((message, messageIndex) => {
+    if (message.sourceAccessRevoked) return message;
     const ids = idsByMessageIndex.get(messageIndex);
     if (!ids?.length) return message;
     const generated = new Map<string, GeneratedArtifact>(
@@ -49,6 +50,7 @@ export function buildLatestRunOutputFilesFromArtifacts(
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (message.sourceAccessRevoked) continue;
     if (message.role !== "assistant" || !message._artifactIds?.length) continue;
     const files = message._artifactIds.flatMap((id) => {
       const artifact = artifactMap.get(id);

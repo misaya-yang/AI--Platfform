@@ -501,3 +501,15 @@ async def test_attach_quiz_ids_is_advisory_when_the_ledger_is_unavailable() -> N
     await store._attach_quiz_ids(messages, tenant_id="tenant-a", user_id="user-a")
 
     assert "quiz_id" not in messages[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_restricted_message_never_recovers_a_quiz_card():
+    class Ledger:
+        async def fetch(self, *_args):
+            raise AssertionError("revoked message must not load quiz identifiers")
+    messages = [{"role": "assistant", "content": "", "metadata": {
+        "runtime_run_id": "private-run", "source_access_revoked": True,
+    }}]
+    await AgentThreadStore(Ledger())._attach_quiz_ids(messages, tenant_id="tenant-a", user_id="user-a")
+    assert "quiz_id" not in messages[0]["metadata"]

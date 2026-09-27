@@ -38,7 +38,13 @@ class _Database:
     def __init__(self) -> None:
         self.thread = None
 
+    async def fetch(self, query: str, *_args):
+        assert "FROM assistant_runtime_snapshots" in query
+        return []
+
     async def fetchrow(self, query: str, *args):
+        if "SELECT history FROM assistant.sessions" in query:
+            return None
         if "FROM user_memory" in query:
             assert args == ("tenant-a", "user-a", "__assistant_memory_control__")
             return None

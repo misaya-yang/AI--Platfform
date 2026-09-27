@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -113,7 +114,9 @@ async def test_v1_decision_cannot_approve_unverified_action(monkeypatch) -> None
     monkeypatch.setattr("src.api.v1._assistant_routes.runs.fetch_approval_run_owner", _owner)
     monkeypatch.setattr("src.api.v1._assistant_routes.runs.owner_approval_preview", _unverified)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        database=object(), agent_runtime_control=_Control(),
+        database=SimpleNamespace(
+            fetch=AsyncMock(return_value=[]), fetchrow=AsyncMock(return_value=None),
+        ), agent_runtime_control=_Control(),
     )))
     user = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
     with pytest.raises(HTTPException) as exc_info:

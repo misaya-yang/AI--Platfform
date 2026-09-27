@@ -39,7 +39,6 @@ export function assistantOutcome(message: ChatMessage): {
     : typeof message.diagnosticId === "string" && IMAGE_TASK_ID.test(message.diagnosticId)
       ? message.diagnosticId : undefined;
   const status = message.processSummary?.status ?? message.status;
-  if (message.sourceAccessRevoked) return { kind: "source_revoked" };
   if (message.isGeneratingImage) return { kind: "running" };
   if (message.outcomeUncertain) return { kind: "unknown", diagnosticId };
   if (status === "failed" || message.status === "failed") return { kind: "failed", diagnosticId };
@@ -52,6 +51,9 @@ export function assistantOutcome(message: ChatMessage): {
   }
   if (message.isStreaming || status === "running" || status === "blocked" || status === "streaming") {
     return { kind: "running" };
+  }
+  if (message.sourceAccessRevoked) {
+    return { kind: status === "succeeded" || status === "completed" ? "succeeded" : "source_revoked" };
   }
   return { kind: message.content.trim() ? "succeeded" : "empty" };
 }

@@ -32,6 +32,12 @@ from ...services.assistant_entry.launch_resolution import (
 )
 from ...services.assistant_entry.memory_controls import effective_assistant_memory_mode
 from ...services.assistant_entry.model_access import assistant_model_service
+from ...services.assistant_entry.source_access import (
+    ConversationEventGuard,
+    conversation_sources,
+    require_conversation_source_access,
+    visible_dataset_names,
+)
 from ..deps import get_user_context
 from ..v1._assistant_routes.attachment_refs import (
     bind_assistant_attachment_refs,
@@ -330,7 +336,11 @@ async def _get_thread(request: Request, user: UserContext, thread_id: str) -> Ru
 @router.get("/threads/{thread_id}")
 async def get_thread(thread_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
-    return {"thread": _thread_payload(await _get_thread(request, user, thread_id))}
+    thread = await _get_thread(request, user, thread_id)
+    sources = await conversation_sources(request, user, thread.session_id)
+    visible = await visible_dataset_names(request, user) if sources.dataset_ids else {}
+    restricted = [run_id for run_id, ids in sources.inherited_by_run.items() if not ids <= visible.keys()]
+    return {"thread": {**_thread_payload(thread), "restricted_source_run_ids": restricted}}
 
 
 @router.post("/threads/{thread_id}/turns", status_code=202)
@@ -343,6 +353,7 @@ async def create_turn(
     _require_actor(user)
     _reject_unmigrated_turn_capabilities(body)
     thread = await _get_thread(request, user, thread_id)
+    await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
     control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
@@ -474,6 +485,7 @@ async def interrupt_turn(
 async def recover_turn(thread_id: str, turn_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
+    await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
     control = getattr(request.app.state, "agent_runtime_control", None)
     recover = getattr(control, "recover_turn", None)
     if recover is None:
@@ -500,6 +512,13 @@ async def get_thread_approval(
     """
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
+    source_revoked = False
+    try:
+        await require_conversation_source_access(request, user, thread.session_id)
+    except HTTPException as exc:
+        if not isinstance(exc.detail, dict) or exc.detail.get("code") != "ASSISTANT_SOURCE_ACCESS_REVOKED":
+            raise
+        source_revoked = True
     control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
@@ -514,6 +533,17 @@ async def get_thread_approval(
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     if approval is None:
         raise HTTPException(status_code=404, detail={"code": "APPROVAL_NOT_FOUND"})
+    if source_revoked:
+        # A revoked source must not expose action arguments, but its owner can
+        # still reject the parked action through the normal approval card.
+        safe_approval = {key: approval[key] for key in (
+            "approval_id", "status", "tool_name", "expires_at", "run_id",
+        ) if key in approval}
+        return {
+            "schema_version": "agent-approval/v2",
+            "approval": safe_approval,
+            "preview": {"can_approve": False, "reason": "Knowledge source access is unavailable. Reject this action or stop the task."},
+        }
     database = getattr(request.app.state, "database", None)
     preview = await owner_approval_preview(
         database,
@@ -543,6 +573,7 @@ async def decide_thread_approval(
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         if body.approved:
+            await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
             approval = await control.get_approval(
                 approval_id=approval_id,
                 tenant_id=user.tenant_id,
@@ -596,6 +627,7 @@ async def thread_events(
 ) -> StreamingResponse:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
+    source_guard = ConversationEventGuard(request, user, await conversation_sources(request, user, thread.session_id), session_id=thread.session_id)
 
     control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
@@ -621,6 +653,7 @@ async def thread_events(
             limit=limit,
             turn_id=turn_id_value,
         ):
+            raw = await source_guard.project(raw)
             payload = raw.get("data") if isinstance(raw.get("data"), dict) else {}
             if raw.get("event_type") == "run_started" and turn_metadata:
                 payload = {**payload, **turn_metadata}

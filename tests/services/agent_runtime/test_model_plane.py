@@ -1406,3 +1406,54 @@ async def test_provider_read_error_emits_one_failed_terminal_and_preserves_unkno
         plane._mark_unknown_if_dispatched.assert_awaited_once_with(call.call_id)
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_unavailable", [False, True])
+async def test_resumed_model_checks_current_sources_before_reserving_budget(authority_unavailable):
+    from dataclasses import asdict
+    from datetime import datetime, timedelta, timezone
+    from hashlib import sha256
+    from unittest.mock import AsyncMock
+
+    from ai_gateway_contracts.agent_runtime import canonical_runtime_json
+
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(minutes=5)
+    lease_id, snapshot_id, run_id, thread_id = [uuid.uuid4() for _ in range(4)]
+    claims = RuntimeModelLeaseClaims(
+        schema_version="agent-runtime-model-lease/v1", lease_id=str(lease_id),
+        snapshot_id=str(snapshot_id), run_id=str(run_id), runtime_thread_id=str(thread_id),
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        provider_id="dashscope", model_id="qwen3.8-flash", capability_revision=1,
+        issued_at_ms=int(issued.timestamp()*1000), expires_at_ms=int(expires.timestamp()*1000),
+        nonce_sha256="0"*64,
+    )
+    snapshot = {"readonly_capabilities": {"items": []}}
+    row = {**asdict(claims), "lease_id": lease_id, "snapshot_id": snapshot_id,
+           "run_id": run_id, "runtime_thread_id": thread_id, "issued_at": issued,
+           "expires_at": expires, "snapshot": snapshot,
+           "snapshot_sha256": sha256(canonical_runtime_json(snapshot).encode()).hexdigest()}
+    class DB:
+        queries = []
+        async def fetchrow(self, query, *_args):
+            self.queries.append(query)
+            assert "FROM assistant_runtime_model_leases" in query
+            return row
+    checker = AsyncMock(return_value=False)
+    if authority_unavailable:
+        checker.side_effect = RuntimeError("private internal details")
+    signer = RuntimeModelLeaseSigner("x"*32)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200))) as client:
+        db = DB()
+        plane = AgentModelPlane(database=db, provider_service=object(), lease_signer=signer,
+                                http_client=client, source_access_checker=checker)
+        metadata = {"ai_platform_lease_id": str(lease_id), "ai_platform_lease_signature": signer.sign(claims),
+                    "thread_id": str(thread_id), "turn_id": str(run_id),
+                    "ai_platform_scope_sha256": _runtime_scope_sha256("tenant-a", "user-a", "session-a")}
+        expected = "ASSISTANT_SOURCE_CHECK_UNAVAILABLE" if authority_unavailable else "ASSISTANT_SOURCE_ACCESS_REVOKED"
+        with pytest.raises(AgentModelPlaneError, match=expected) as caught:
+            await plane.authorize_and_reserve(body={"model": "qwen3.8-flash"}, turn_metadata=metadata)
+        assert caught.value.status_code == (503 if authority_unavailable else 403)
+        assert len(db.queries) == 1  # No budget reservation or provider dispatch.
+        checker.assert_awaited_once_with(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id=str(run_id))

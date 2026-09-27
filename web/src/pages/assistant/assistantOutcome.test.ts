@@ -72,3 +72,11 @@ test("an image transport loss after dispatch stays unknown, while an explicit pr
   } } } }, true), { uncertain: false });
   assert.deepEqual(imageFailureReceipt(new Error("user message not saved"), false), { uncertain: false });
 });
+
+test("source restriction keeps the public cancelled or failed outcome", () => {
+  const restricted = { id: "source", role: "assistant", content: "", sourceAccessRevoked: true } as ChatMessage;
+  assert.equal(assistantOutcome({ ...restricted, status: "cancelled" }).kind, "cancelled");
+  assert.equal(assistantOutcome({ ...restricted, status: "failed" }).kind, "failed");
+  assert.equal(assistantOutcome({ ...restricted, status: "completed" }).kind, "succeeded");
+  assert.equal(assistantOutcome(restricted).kind, "source_revoked");
+});

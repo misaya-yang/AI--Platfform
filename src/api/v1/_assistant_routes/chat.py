@@ -37,6 +37,10 @@ from ....services.assistant_entry.session_binding import (
     ensure_agent_runtime_session,
     validate_chat_session_access,
 )
+from ....services.assistant_entry.source_access import (
+    guarded_conversation_frames,
+    require_conversation_source_access,
+)
 from ...deps import get_user_context
 from ...schemas.assistant import AssistantChatRequest, AssistantChatResponse
 from .._agent_runtime_headers import reject_client_agent_forgery
@@ -100,6 +104,7 @@ async def _start_agent_runtime_turn(
     model_id: str,
 ) -> Any:
     _require_agent_runtime_request(body)
+    await require_conversation_source_access(request, user, session_id, for_execution=True)
     control = agent_runtime_control(request)
     try:
         memory_mode = await effective_assistant_memory_mode(
@@ -221,12 +226,12 @@ async def chat(
     )
     control = agent_runtime_control(request)
     content_parts: list[str] = []
-    async for frame in control.stream_events(
+    async for frame in guarded_conversation_frames(request, user, session_id, control.stream_events(
         turn=turn,
         tenant_id=user.tenant_id,
         user_id=user.user_id,
         session_id=session_id,
-    ):
+    )):
         for line in frame.decode("utf-8", errors="ignore").splitlines():
             if not line.startswith("data:"):
                 continue
@@ -234,6 +239,8 @@ async def chat(
                 event = json.loads(line[5:].strip())
             except json.JSONDecodeError:
                 continue
+            if (event.get("data") or {}).get("source_access_revoked"):
+                content_parts.clear()
             if event.get("event_type") == "text_delta":
                 data = event.get("data")
                 if isinstance(data, dict) and isinstance(data.get("content"), str):
@@ -316,12 +323,12 @@ async def chat_stream(
     )
     control = agent_runtime_control(request)
     return StreamingResponse(
-        control.stream_events(
+        guarded_conversation_frames(request, user, session_id, control.stream_events(
             turn=turn,
             tenant_id=user.tenant_id,
             user_id=user.user_id,
             session_id=session_id,
-        ),
+        )),
         media_type="text/event-stream",
         headers={
             "cache-control": "no-cache",

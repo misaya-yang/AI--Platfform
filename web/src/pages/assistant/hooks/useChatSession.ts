@@ -103,6 +103,8 @@ import {
   trackChatHistoryRestored,
 } from "@/features/chat/telemetry";
 import { loadDeadApprovalReconciliation } from "../deadApprovalReconciliation";
+import { redactRestrictedSourceMessages, redactSourceMessage } from "../sourceVisibility";
+import { getAgentRuntimeThread } from "@/api/agentThreads";
 
 function buildTextParts(messageId: string, content: string, createdAt: string) {
   if (!content) return [];
@@ -342,6 +344,7 @@ async function restoreLatestRun(
         processSummary: {
           ...base,
           status: processStatus,
+          runtimeThreadId: runtimeThreadId ?? base.runtimeThreadId,
           terminalReason: run.terminal_reason === "runtime_restart_interrupted"
             ? "runtime_restart_interrupted" : base.terminalReason,
           collapsed: succeeded || active ? base.collapsed : false,
@@ -397,6 +400,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 
   // Restore assistant metadata
   if (msg.role === "assistant" && msg.metadata) {
+    baseMessage.runtimeRunId = nonEmptyString(msg.metadata.runtime_run_id);
     baseMessage.sourceAccessRevoked = msg.metadata.source_access_revoked === true;
     // Initialize search status array
     const searchStatusItems: any[] = [];
@@ -571,7 +575,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
     }
 
   }
-  return baseMessage;
+  return baseMessage.sourceAccessRevoked ? redactSourceMessage(baseMessage) : baseMessage;
 };
 
 function toArtifact(artifact: ArtifactInfo): Artifact {
@@ -596,7 +600,7 @@ async function hydrateQuizData(
   messages: ChatMessageType[],
   setMessages: React.Dispatch<React.SetStateAction<ChatMessageType[]>>,
 ) {
-  const quizMessages = messages.filter((m) => (m as any)._quizId);
+  const quizMessages = messages.filter((m) => !m.sourceAccessRevoked && (m as any)._quizId);
   if (quizMessages.length === 0) return;
 
   const results = await Promise.allSettled(
@@ -618,7 +622,7 @@ async function hydrateQuizData(
     setMessages((prev) =>
       prev.map((m) => {
         const quiz = quizMap.get(m.id);
-        if (quiz) {
+        if (quiz && !m.sourceAccessRevoked) {
           const updated = { ...m, quizData: quiz };
           delete (updated as any)._quizId;
           return updated;
@@ -786,6 +790,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [observedRun, setObservedRun] = useState<{ sessionId: string; runId: string } | null>(null);
   const [modelRecreateNeeded, setModelRecreateNeeded] = useState(false);
+  const [sourceRecreateNeeded, setSourceRecreateNeeded] = useState(false);
   const [restoredStopPending, setRestoredStopPending] = useState(false);
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const messagesRef = useRef<ChatMessageType[]>([]);
@@ -890,6 +895,34 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  const sourceWatchThreadId = [...messages].reverse().find((m) => m.processSummary?.runtimeThreadId)?.processSummary?.runtimeThreadId;
+  const hasKnowledgeHistory = messages.some((m) => Boolean(m.contexts?.length || m.sourceAccessRevoked));
+  useEffect(() => {
+    if (!activeSessionId || !sourceWatchThreadId || !hasKnowledgeHistory) return;
+    let disposed = false;
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const thread = await getAgentRuntimeThread(sourceWatchThreadId);
+        const restricted = new Set(thread.restricted_source_run_ids || []);
+        if (disposed || !restricted.size) return;
+        setSourceRecreateNeeded(true);
+        setMessages((previous) => redactRestrictedSourceMessages(previous, restricted));
+        const allowed = await getSessionArtifacts(activeSessionId).catch(() => []);
+        if (!disposed) setArtifacts(allowed.map(toArtifact));
+      } catch {
+        // A failed read never changes execution or grants access.
+      } finally {
+        checking = false;
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 3000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [activeSessionId, sourceWatchThreadId, hasKnowledgeHistory]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -1052,6 +1085,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     setServerRunBlocking(false);
     setObservedRun(null);
     setModelRecreateNeeded(false);
+    setSourceRecreateNeeded(false);
     setRestoredStopPending(false);
     setActiveSessionId(undefined);  // 清除 AI助手 的活动会话
     setHistoryRestoreState("idle");
@@ -1098,6 +1132,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     abandonActiveStream();
     setObservedRun(null);
     setModelRecreateNeeded(false);
+    setSourceRecreateNeeded(false);
     setRestoredStopPending(false);
     const restoreEpoch = ++restoreEpochRef.current;
     try {
@@ -1352,6 +1387,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     setHistoryRestoreState("idle");
     setHistoryRestoreError(null);
     setModelRecreateNeeded(false);
+    setSourceRecreateNeeded(false);
     const interactionStartedAtMs = performance.now();
     const streamEpoch = streamEpochRef.current + 1;
     streamEpochRef.current = streamEpoch;
@@ -1499,6 +1535,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     let content = "";
     let accumulatedThinkingContent = "";
     let thinkingActivityStarted = false;
+    let sourceAccessWasRevoked = false;
     let contexts: RetrievedContext[] = [];
     const datasetNames = Object.fromEntries(
       datasets.map((dataset) => [dataset.dataset_id, dataset.name]),
@@ -1785,6 +1822,30 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           typeof event.data === "object" && event.data !== null
             ? (event.data as Record<string, unknown>)
             : undefined;
+        if (eventPayload?.source_access_revoked === true) {
+          activityQueue.flushNow();
+          content = "";
+          accumulatedThinkingContent = "";
+          contexts = [];
+          webSearchResults = [];
+          streamTurnState = { ...streamTurnState, content: "", toolCalls: [] };
+          setSourceRecreateNeeded(true);
+          setArtifacts([]);
+          updateAssistantMessage(redactSourceMessage);
+          if (!sourceAccessWasRevoked) {
+            sourceAccessWasRevoked = true;
+            // Read-only reconciliation covers earlier inherited answers too.
+            void Promise.all([getAssistantSessionHistory(sessionId, 200), getSessionArtifacts(sessionId).catch(() => [])]).then(([history, allowedArtifacts]) => {
+              if (!isCurrentStream()) return;
+              const restrictedRuns = new Set(history.messages.filter((m) => m.metadata?.source_access_revoked).map((m) => m.metadata?.runtime_run_id).filter((runId) => typeof runId === "string" && runId.length > 0));
+              const restrictedIds = new Set(history.messages.flatMap((m, index) => m.metadata?.source_access_revoked ? [`${sessionId}-${index}`] : []));
+              setMessages((previous) => previous.map((m) => restrictedRuns.has(m.processSummary?.runId ?? m.runtimeRunId) || restrictedIds.has(m.id) ? redactSourceMessage(m) : m));
+              setArtifacts(allowedArtifacts.map(toArtifact));
+            }).catch(() => {
+              if (isCurrentStream()) setMessages((previous) => previous.map(redactSourceMessage));
+            });
+          }
+        }
         const toolCallForReducer = (() => {
           if (
             event.event_type !== SSEEventType.TOOL_CALL_START &&
@@ -3515,13 +3576,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         closeStreamTrace("completed", { reason: "awaiting_approval" });
       } else if (!userCancelled) {
         const finishedAtMs = Date.now();
+        const sourceRevoked = error.response?.data?.detail?.code === "ASSISTANT_SOURCE_ACCESS_REVOKED";
         const needsNewThread = error.response?.data?.detail?.code ===
           "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED";
-        const startFailureMessage = needsNewThread
+        const startFailureMessage = sourceRevoked
+          ? t("assistant.sourceNeedsNewConversation", "Earlier knowledge sources are unavailable. Start a new conversation to continue.")
+          : needsNewThread
           ? t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")
           : undefined;
         if (startFailureMessage) {
-          setModelRecreateNeeded(true);
+          setModelRecreateNeeded(needsNewThread);
+          setSourceRecreateNeeded(sourceRevoked);
           streamTurnState = { ...streamTurnState, content: startFailureMessage };
         }
         const accepted = settleRunTerminal("failed", finishedAtMs, {
@@ -3874,6 +3939,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     isStreaming,
     hasActiveRun: isStreaming || Boolean(observedRun),
     modelRecreateNeeded,
+    sourceRecreateNeeded,
     isComposerBlocked: isStreaming || serverRunBlocking,
     sessionsLoading,
     historyRestoreState,

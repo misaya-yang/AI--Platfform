@@ -1,0 +1,291 @@
+"""Revoked sources cannot escape through replay, inherited turns or downloads."""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import UUID
+
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+from src.api.schemas.assistant import AssistantChatRequest
+from src.api.v1 import quiz as quiz_routes
+from src.api.v1._assistant_routes import artifacts, chat
+from src.api.v2 import agent
+from src.core.auth.user_resolver import UserContext
+from src.services.assistant_entry.source_access import (
+    ConversationEventGuard,
+    conversation_sources,
+    require_conversation_source_access,
+)
+
+USER = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+THREAD = SimpleNamespace(session_id="session-a", runtime_thread_id="00000000-0000-0000-0000-000000000001")
+
+
+def request(*, visible=(), snapshots=None, legacy=None, kb_error=False):
+    if snapshots is None:
+        snapshots = [snapshot("run-a", ["private-a"]), snapshot("run-b", [])]
+    async def fetch(query, *args):
+        assert "FROM assistant_runtime_snapshots" in query
+        assert "tenant_id = $2 AND user_id = $3" in query
+        assert "ORDER BY created_at" in query
+        assert args == ("session-a", "tenant-a", "user-a")
+        return snapshots
+    async def fetchrow(query, *args):
+        assert "SELECT history FROM assistant.sessions" in query
+        assert args == ("session-a", "tenant-a", "user-a")
+        return {"history": legacy} if legacy else None
+    async def list_datasets(user):
+        assert user is USER
+        if kb_error:
+            raise RuntimeError("internal secret must not appear")
+        return [{"dataset_id": item} for item in visible]
+    state = SimpleNamespace(
+        database=SimpleNamespace(fetch=fetch, fetchrow=fetchrow),
+        kb_proxy=SimpleNamespace(list_datasets=list_datasets),
+        agent_runtime_control=SimpleNamespace(
+            stream_thread_events=AsyncMock(), start_turn=AsyncMock(),
+            get_approval=AsyncMock(), decide_approval=AsyncMock(return_value={"status": "rejected"}),
+        ),
+    )
+    return Request({"type": "http", "headers": [], "app": SimpleNamespace(state=state)})
+
+
+def snapshot(run_id, dataset_ids):
+    return {"run_id": run_id, "snapshot": {"readonly_capabilities": {"items": [
+        {"kind": "knowledge", "payload": {"dataset_id": item}} for item in dataset_ids
+    ]}}}
+
+
+@pytest.mark.asyncio
+async def test_source_influence_follows_later_turns_but_not_earlier_public_turns():
+    req = request(snapshots=[snapshot("public", []), snapshot("private", ["private-a"]), snapshot("later-off", [])])
+    sources = await conversation_sources(req, USER, "session-a")
+    assert sources.inherited_by_run == {"public": frozenset(), "private": frozenset({"private-a"}), "later-off": frozenset({"private-a"})}
+
+
+@pytest.mark.asyncio
+async def test_legacy_context_is_inherited_and_string_snapshots_are_supported():
+    req = request(legacy=json.dumps({"messages": [{"role": "assistant", "metadata": {"contexts": [{"dataset_id": "legacy-a"}]}}]}), snapshots=[{"run_id": "later", "snapshot": json.dumps(snapshot("unused", ["private-a"])["snapshot"])}])
+    sources = await conversation_sources(req, USER, "session-a")
+    assert sources.inherited_by_run["later"] == frozenset({"legacy-a", "private-a"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kb_error", [False, True])
+async def test_revocation_and_authority_outage_fail_closed(kb_error):
+    with pytest.raises(HTTPException) as caught:
+        await require_conversation_source_access(request(kb_error=kb_error), USER, "session-a")
+    assert caught.value.status_code == 403
+    assert caught.value.detail["code"] == "ASSISTANT_SOURCE_ACCESS_REVOKED"
+    assert "secret" not in json.dumps(caught.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_no_knowledge_and_current_authorized_sources_keep_working():
+    await require_conversation_source_access(request(snapshots=[], kb_error=True), USER, "session-a")
+    await require_conversation_source_access(request(visible=["private-a"]), USER, "session-a")
+
+
+@pytest.mark.asyncio
+async def test_revoked_event_cursor_keeps_only_safe_terminal_and_cursor(monkeypatch):
+    req = request()
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=THREAD))
+    async def events(**kw):
+        for seq, kind, data in [(1, "text_delta", {"content": "Private source"}), (2, "run_finished", {"status": "succeeded"})]:
+            yield {"sequence": seq, "event_type": kind, "data": {"run_id": "run-a", **data}}
+    req.app.state.agent_runtime_control.stream_thread_events = events
+    result = await agent.thread_events(THREAD.runtime_thread_id, req, after_sequence=0, limit=100, turn_id=None, user=USER)
+    body = b"".join([chunk async for chunk in result.body_iterator])
+    assert b"Private" not in body
+    assert b'"sequence":1' in body and b'"sequence":2' in body
+    assert b'"source_access_revoked":true' in body
+    assert b'"status":"succeeded"' in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["v1", "v2"])
+async def test_turn_with_knowledge_off_cannot_resample_revoked_history(entry, monkeypatch):
+    req = request()
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=THREAD))
+    with pytest.raises(HTTPException) as caught:
+        if entry == "v1":
+            await chat._start_agent_runtime_turn(req, USER, AssistantChatRequest(message="Repeat earlier source", kb_mode="off"), session_id="session-a", model_id="qwen3.8-flash")
+        else:
+            await agent.create_turn(THREAD.runtime_thread_id, agent.TurnCreateRequest(message="Repeat earlier source", kb_mode="off"), req, USER)
+    assert caught.value.status_code == 409
+    req.app.state.agent_runtime_control.start_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_revoked_approval_cannot_be_read_or_approved_but_can_be_rejected(monkeypatch):
+    req = request()
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=THREAD))
+    req.app.state.agent_runtime_control.get_approval.return_value = {"approval_id": "approval-a", "status": "pending", "arguments": {"secret": "Private source"}}
+    summary = await agent.get_thread_approval(THREAD.runtime_thread_id, "approval-a", req, USER)
+    assert summary["approval"]["status"] == "pending"
+    assert summary["preview"]["can_approve"] is False
+    assert "Private" not in json.dumps(summary)
+    with pytest.raises(HTTPException):
+        await agent.decide_thread_approval(THREAD.runtime_thread_id, "approval-a", agent.ApprovalDecisionRequest(approved=True), req, USER)
+    req.app.state.agent_runtime_control.get_approval.assert_awaited_once()
+    result = await agent.decide_thread_approval(THREAD.runtime_thread_id, "approval-a", agent.ApprovalDecisionRequest(approved=False), req, USER)
+    assert result["approval"]["status"] == "rejected"
+    req.app.state.agent_runtime_control.decide_approval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [artifacts.get_artifact, artifacts.download_artifact])
+async def test_revoked_derived_artifact_denies_before_content_or_storage_url(handler, monkeypatch):
+    req = request()
+    storage = AsyncMock()
+    storage.get_artifact.return_value = SimpleNamespace(artifact_id="art_a", session_id="session-a", tenant_id=USER.tenant_id, user_id=USER.user_id)
+    monkeypatch.setattr(artifacts, "get_artifact_storage", lambda: storage)
+    with pytest.raises(HTTPException) as caught:
+        await handler("art_a", req, USER)
+    assert caught.value.status_code == 403
+    storage.get_presigned_download_url.assert_not_awaited()
+    storage.download_artifact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_event_stream_rechecks_current_rights_before_later_delivery(monkeypatch):
+    req = request(visible=["private-a"])
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
+    ticks = iter([0.0, 2.0, 4.0])
+    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: next(ticks))
+    raw = {"sequence": 1, "event_type": "text_delta", "data": {"run_id": "run-a", "content": "Private source"}}
+    assert (await guard.project(raw))["data"]["content"] == "Private source"
+    req.app.state.kb_proxy.list_datasets = AsyncMock(return_value=[])
+    second = await guard.project({**raw, "sequence": 2})
+    assert second["sequence"] == 2 and second["data"]["source_access_revoked"]
+    assert "Private" not in json.dumps(second)
+    terminal = await guard.project({"sequence": 3, "event_type": "run_error", "data": {"run_id": "run-a", "status": "failed", "error": "Private exception"}})
+    assert terminal["data"]["status"] == "failed" and "Private" not in json.dumps(terminal)
+
+
+@pytest.mark.asyncio
+async def test_explicit_recover_cannot_restart_with_revoked_sources(monkeypatch):
+    req = request()
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=THREAD))
+    req.app.state.agent_runtime_control.recover_turn = AsyncMock()
+    with pytest.raises(HTTPException) as caught:
+        await agent.recover_turn(THREAD.runtime_thread_id, "run-b", req, USER)
+    assert caught.value.status_code == 409
+    req.app.state.agent_runtime_control.recover_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cloud_artifact_download_stays_on_authenticated_gateway(monkeypatch):
+    req = request(visible=["private-a"])
+    storage = AsyncMock()
+    storage.get_artifact.return_value = SimpleNamespace(artifact_id="art_a", session_id="session-a", tenant_id=USER.tenant_id, user_id=USER.user_id, filename="real.txt", mime_type="text/plain")
+    storage.get_presigned_download_url.return_value = "https://storage.example/file?signature=private"
+    storage.download_artifact.return_value = b"real artifact bytes"
+    monkeypatch.setattr(artifacts, "get_artifact_storage", lambda: storage)
+    result = await artifacts.download_artifact("art_a", req, USER)
+    assert result.status_code == 200
+    assert "location" not in result.headers
+    assert b"".join([chunk async for chunk in result.body_iterator]) == b"real artifact bytes"
+    storage.get_presigned_download_url.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["get", "submit", "result", "attempts"])
+async def test_quiz_reads_and_grading_deny_revoked_inherited_sources(entry, monkeypatch):
+    req = request()
+    original_fetchrow = req.app.state.database.fetchrow
+    async def fetchrow(query, *args):
+        if "FROM assistant.quizzes q" in query:
+            assert args == (UUID(int=1), "tenant-a")
+            return {"dataset_ids": [], "created_by": "user-a", "session_id": "session-a", "run_id": "run-b"}
+        return await original_fetchrow(query, *args)
+    req.app.state.database.fetchrow = fetchrow
+    service = AsyncMock()
+    monkeypatch.setattr(quiz_routes, "_get_quiz_service", lambda _req: service)
+    with pytest.raises(HTTPException) as caught:
+        if entry == "get":
+            await quiz_routes.get_quiz(UUID(int=1), req, USER)
+        elif entry == "submit":
+            await quiz_routes.submit_quiz(UUID(int=1), quiz_routes.QuizSubmitRequest(answers={}), req, USER)
+        elif entry == "result":
+            await quiz_routes.get_attempt_result(UUID(int=1), UUID(int=2), req, USER)
+        else:
+            await quiz_routes.list_attempts(UUID(int=1), req, limit=100, offset=0, user=USER)
+    assert caught.value.status_code == 403
+    assert service.mock_calls == []
+
+
+@pytest.mark.asyncio
+async def test_quiz_checks_current_reader_rights_for_creator_direct_sources():
+    req = request(visible=["private-a"], snapshots=[])
+    req.app.state.database.fetchrow = AsyncMock(return_value={"dataset_ids": '["private-a"]', "created_by": "someone-else", "session_id": None, "run_id": None})
+    await quiz_routes._require_quiz_source_access(UUID(int=1), req, USER)
+    req.app.state.kb_proxy.list_datasets = AsyncMock(return_value=[])
+    with pytest.raises(HTTPException) as caught:
+        await quiz_routes._require_quiz_source_access(UUID(int=1), req, USER)
+    assert caught.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_background_model_source_check_uses_current_identity_not_recovered_roles():
+    from src.services.assistant_entry.source_access import runtime_source_access_checker
+    req = request()
+    req.app.state.database.get_user = AsyncMock(return_value={"status": "active", "tenant_id": "tenant-a", "roles": ["user"], "tier": "normal"})
+    req.app.state.kb_proxy.list_datasets = AsyncMock(return_value=[{"dataset_id": "private-a"}])
+    check = runtime_source_access_checker(req.app)
+    assert await check(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b") is True
+    actor = req.app.state.kb_proxy.list_datasets.call_args.args[0]
+    assert actor.roles == ["user"] and actor.tier == "normal"
+    req.app.state.kb_proxy.list_datasets.return_value = []
+    assert await check(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b") is False
+    req.app.state.database.get_user.return_value["status"] = "disabled"
+    assert await check(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b") is False
+
+
+@pytest.mark.asyncio
+async def test_artifact_before_later_knowledge_and_uploaded_original_stay_available():
+    from datetime import datetime, timedelta, timezone
+
+    from src.services.assistant_entry.source_access import require_artifact_source_access
+    start = datetime.now(timezone.utc)
+    public, private = snapshot('public', []), snapshot('private', ['private-a'])
+    public['created_at'], private['created_at'] = start, start + timedelta(minutes=2)
+    req = request(snapshots=[public, private])
+    artifact = SimpleNamespace(session_id='session-a', source='ai', created_at=start + timedelta(seconds=20))
+    await require_artifact_source_access(req, USER, artifact)
+    artifact.created_at = start + timedelta(minutes=3)
+    with pytest.raises(HTTPException) as caught:
+        await require_artifact_source_access(req, USER, artifact)
+    assert caught.value.status_code == 403
+    artifact.source = 'user'
+    await require_artifact_source_access(req, USER, artifact)
+
+
+@pytest.mark.asyncio
+async def test_whole_thread_stream_tracks_sources_added_after_open():
+    snapshots = [snapshot('public', [])]
+    req = request(snapshots=snapshots)
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, 'session-a'), session_id='session-a')
+    public = {'sequence': 1, 'event_type': 'text_delta', 'data': {'run_id': 'public', 'content': 'ordinary'}}
+    assert (await guard.project(public))['data']['content'] == 'ordinary'
+    snapshots.append(snapshot('new-private', ['private-a']))
+    private = {'sequence': 2, 'event_type': 'text_delta', 'data': {'run_id': 'new-private', 'content': 'Private newly selected source'}}
+    projected = await guard.project(private)
+    assert projected['sequence'] == 2 and projected['data']['source_access_revoked']
+    assert 'Private' not in json.dumps(projected)
+    # The later denied source does not retroactively hide an earlier public run.
+    assert (await guard.project(public))['data']['content'] == 'ordinary'
+
+
+@pytest.mark.asyncio
+async def test_thread_read_reports_restricted_run_ids_without_private_content(monkeypatch):
+    req = request(snapshots=[snapshot('public', []), snapshot('private', ['private-a']), snapshot('inherited', [])])
+    owned = SimpleNamespace(session_id='session-a', runtime_thread_id='00000000-0000-0000-0000-000000000001', import_status='ready', last_sequence=9, source_kind='native', kernel_owner='agent_runtime')
+    monkeypatch.setattr(agent, '_get_thread', AsyncMock(return_value=owned))
+    result = await agent.get_thread(owned.runtime_thread_id, req, USER)
+    assert result['thread']['restricted_source_run_ids'] == ['private', 'inherited']
+    assert 'private-a' not in json.dumps(result)

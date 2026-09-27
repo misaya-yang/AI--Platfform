@@ -36,6 +36,14 @@ class _FakeDB:
         self.attempts: list[dict] = []
         self.submitters: set[tuple[str, str]] = set()
         self.tokens: dict[str, dict] = {}
+        self.source_snapshots: list[dict] = []
+
+    def add_verified_quiz(self, quiz_id: str) -> None:
+        self.quiz_rows[quiz_id] = {
+            "id": quiz_id, "tenant_id": "tenant-a", "created_by": "alex",
+            "dataset_ids": [], "session_id": "source-session", "run_id": "source-run",
+        }
+        self.source_snapshots = [{"run_id": "source-run", "snapshot": {"readonly_capabilities": {"items": []}}}]
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
         query = query.replace("assistant.", "")
@@ -119,6 +127,8 @@ class _FakeDB:
         return None
 
     async def fetch(self, query: str, *args):  # noqa: ANN201, ARG002
+        if "FROM assistant_runtime_snapshots" in query:
+            return self.source_snapshots
         return []
 
     async def execute(self, query: str, *args):  # noqa: ANN201
@@ -523,8 +533,9 @@ def test_create_share_endpoint_returns_typed_contract(fake_db: _FakeDB) -> None:
         "description": "contract",
         "question_count": 0,
         "difficulty": "medium",
-        "dataset_ids": [],
+        "dataset_ids": [], "created_by": "alex", "session_id": "source-session", "run_id": "source-run",
     }
+    fake_db.source_snapshots = [{"run_id": "source-run", "snapshot": {"readonly_capabilities": {"items": []}}}]
 
     response = client.post(
         "/artifact-shares",
@@ -664,12 +675,15 @@ def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) ->
 def test_public_attempt_start_and_timed_submit_contract(fake_db: _FakeDB) -> None:
     mgr = ArtifactShareManager(db=fake_db)
 
+    quiz_id = str(uuid.uuid4())
+    fake_db.add_verified_quiz(quiz_id)
+
     async def _create():
         return await mgr.create_share(
             kind="quiz",
             title="Timed endpoint",
-            payload={"quiz_id": str(uuid.uuid4()), "questions": []},
-            answer_keys=[],
+            payload={"quiz_id": quiz_id, "questions": []},
+            answer_keys=[], tenant_id="tenant-a", user_id="alex",
             require_name=False,
             time_limit_minutes=5,
         )
@@ -727,12 +741,15 @@ def test_public_attempt_errors_use_stable_codes(fake_db: _FakeDB) -> None:
 
     mgr = ArtifactShareManager(db=fake_db)
 
+    quiz_id = str(uuid.uuid4())
+    fake_db.add_verified_quiz(quiz_id)
+
     async def _create():
         return await mgr.create_share(
             kind="quiz",
             title="Capped endpoint",
-            payload={"quiz_id": str(uuid.uuid4()), "questions": []},
-            answer_keys=[],
+            payload={"quiz_id": quiz_id, "questions": []},
+            answer_keys=[], tenant_id="tenant-a", user_id="alex",
             max_attempts=1,
             require_name=True,
         )
@@ -751,3 +768,60 @@ def test_public_attempt_errors_use_stable_codes(fake_db: _FakeDB) -> None:
     )
     assert capped.status_code == 429
     assert capped.json()["detail"]["code"] == "attempt_limit_reached"
+
+
+@pytest.mark.parametrize("origin", ["inherited_private", "unverifiable"])
+def test_public_quiz_routes_reject_private_or_unverifiable_origin(fake_db: _FakeDB, origin: str) -> None:
+    quiz_id = str(uuid.uuid4())
+    fake_db.add_verified_quiz(quiz_id)
+    if origin == "inherited_private":
+        fake_db.source_snapshots.insert(0, {
+            "run_id": "earlier-private", "snapshot": {"readonly_capabilities": {
+                "items": [{"kind": "knowledge", "payload": {"dataset_id": "private-kb"}}],
+            }},
+        })
+    else:
+        fake_db.source_snapshots = []
+    share = asyncio.run(ArtifactShareManager(db=fake_db).create_share(
+        kind="quiz", title="Legacy link", payload={"quiz_id": quiz_id, "questions": []},
+        answer_keys=[], tenant_id="tenant-a", user_id="alex", require_name=False,
+    ))
+    app = FastAPI()
+    app.state.database = fake_db
+    app.state.multi_rate_limiter = None
+    app.include_router(quiz_public_router, prefix="/api/v1")
+    client = TestClient(app)
+    code = share["share_code"]
+    for method, url, body in [
+        ("get", f"/api/v1/quiz/shared/{code}", None),
+        ("post", f"/api/v1/quiz/public/{code}/attempts/start", {}),
+        ("post", f"/api/v1/quiz/shared/{code}/submit", {"answers": {}}),
+        ("post", f"/api/v1/quiz/public/{code}/attempts/result", {"attempt_token": "opaque"}),
+    ]:
+        response = client.request(method, url, **({"json": body} if body is not None else {}))
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "share_unavailable"
+    assert fake_db.tokens == {} and fake_db.attempts == []
+
+
+@pytest.mark.parametrize("origin", ["inherited_private", "unverifiable"])
+def test_create_quiz_share_checks_creating_turn_origin(fake_db: _FakeDB, origin: str) -> None:
+    quiz_id = str(uuid.uuid4())
+    fake_db.add_verified_quiz(quiz_id)
+    if origin == "inherited_private":
+        fake_db.source_snapshots.insert(0, {
+            "run_id": "earlier-private", "snapshot": {"readonly_capabilities": {
+                "items": [{"kind": "knowledge", "payload": {"dataset_id": "private-kb"}}],
+            }},
+        })
+    else:
+        fake_db.source_snapshots = []
+    app = FastAPI()
+    app.state.database = fake_db
+    app.include_router(artifact_shares_router)
+    from src.api.v1.artifact_shares import get_user_context
+    from src.core.auth.user_resolver import UserContext
+    app.dependency_overrides[get_user_context] = lambda: UserContext(user_id="alex", tenant_id="tenant-a", is_authenticated=True)
+    response = TestClient(app).post("/artifact-shares", json={"quiz_id": quiz_id})
+    assert response.status_code == 409
+    assert fake_db.shares == {}

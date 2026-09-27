@@ -353,7 +353,8 @@ export default async function globalSetup(config: FullConfig) {
   await fs.mkdir(ARTIFACT_DIR, { recursive: true });
   await verifyApi(apiURL);
 
-  const defaultPassword = await detectDefaultPassword();
+  const existingAccountOnly = process.env.E2E_EXISTING_ACCOUNT_ONLY === "1";
+  const defaultPassword = existingAccountOnly ? "" : await detectDefaultPassword();
   const providedEmail = process.env.E2E_USER_EMAIL;
   const providedPassword = process.env.E2E_USER_PASSWORD;
   if ((providedEmail && !providedPassword) || (!providedEmail && providedPassword)) {
@@ -361,6 +362,9 @@ export default async function globalSetup(config: FullConfig) {
   }
   const persistedCredentials =
     providedEmail && providedPassword ? null : await readPersistedE2ECredentials();
+  if (existingAccountOnly && !persistedCredentials && !(providedEmail && providedPassword)) {
+    throw new Error("Existing-account E2E requires the configured dedicated account.");
+  }
   const authEmailDomain = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
   const email =
     providedEmail || persistedCredentials?.email || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
@@ -387,6 +391,7 @@ export default async function globalSetup(config: FullConfig) {
   }
 
   if (loginPayload.force_password_change === true) {
+    if (existingAccountOnly) throw new Error("Existing-account E2E cannot change credentials.");
     const nextPassword = buildNextPassword();
     await changePassword(apiURL, String(loginPayload.access_token), password, nextPassword);
     password = nextPassword;
@@ -399,7 +404,7 @@ export default async function globalSetup(config: FullConfig) {
   }
 
   const currentUser = await validateToken(apiURL, token);
-  await createOrResetModelTesterUsers(
+  if (!existingAccountOnly) await createOrResetModelTesterUsers(
     apiURL,
     provisioningToken || token,
     authEmailDomain,
@@ -416,7 +421,7 @@ export default async function globalSetup(config: FullConfig) {
     version: 0,
   };
 
-  await fs.writeFile(USER_FILE, JSON.stringify({ email, password }, null, 2));
+  if (!existingAccountOnly) await fs.writeFile(USER_FILE, JSON.stringify({ email, password }, null, 2));
 
   const browser = await chromium.launch();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });

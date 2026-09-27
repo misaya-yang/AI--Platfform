@@ -51,6 +51,10 @@ pnpm -C web e2e:headed          # same, with a visible browser
 
 Against a stack you already started with `make quickstart`:
 
+For acceptance with the existing dedicated account and no account creation or
+credential changes, set `E2E_EXISTING_ACCOUNT_ONLY=1`. This also skips the
+model-tester account provisioning/reset step.
+
 ```bash
 cd web && E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
   pnpm exec playwright test -c playwright.live.config.ts --workers=1

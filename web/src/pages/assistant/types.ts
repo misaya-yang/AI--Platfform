@@ -252,6 +252,7 @@ export interface AssistantUiV2Flags {
 // =============================================================================
 
 export interface ChatMessage {
+  runtimeRunId?: string;
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;

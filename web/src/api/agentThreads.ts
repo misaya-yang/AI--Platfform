@@ -28,6 +28,12 @@ export interface AgentV2Thread {
   import_status: string;
   last_sequence: number;
   runtime: { owner: string; source: string };
+  restricted_source_run_ids?: string[];
+}
+
+export async function getAgentRuntimeThread(threadId: string): Promise<AgentV2Thread> {
+  const { data } = await api.get<{ thread: AgentV2Thread }>(`/api/v2/agent/threads/${encodeURIComponent(threadId)}`);
+  return data.thread;
 }
 
 async function createAgentThread(

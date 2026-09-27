@@ -286,6 +286,7 @@ class AgentModelPlane:
         clock: Callable[[], float] = time.perf_counter,
         admission_controller: Any | None = None,
         capacity_resolver: Any | None = None,
+        source_access_checker: Any | None = None,
     ) -> None:
         self.database = database
         self.provider_service = provider_service
@@ -299,6 +300,7 @@ class AgentModelPlane:
         self._clock = clock
         self.admission_controller = admission_controller
         self.capacity_resolver = capacity_resolver
+        self.source_access_checker = source_access_checker
 
     async def close(self) -> None:
         if self._owns_http_client:

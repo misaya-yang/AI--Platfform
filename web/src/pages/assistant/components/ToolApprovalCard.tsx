@@ -8,11 +8,13 @@ import type { ToolTimelineItem } from "../types";
 export function ToolApprovalCard({
   tool,
   runtimeThreadId,
+  sourceAccessRevoked = false,
   onApprove,
   onReject,
 }: {
   tool: ToolTimelineItem;
   runtimeThreadId?: string;
+  sourceAccessRevoked?: boolean;
   onApprove: () => void | Promise<void>;
   onReject: () => void | Promise<void>;
 }) {
@@ -21,6 +23,8 @@ export function ToolApprovalCard({
   const [approvalStatus, setApprovalStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [expiresAtMs, setExpiresAtMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const pendingRef = useRef(false);
   const displayName = capabilityDisplayName(tool.name);
 
@@ -33,6 +37,10 @@ export function ToolApprovalCard({
       const value = await getAgentRuntimeApproval(runtimeThreadId, tool.approvalId);
       setApprovalStatus(value.approval.status);
       setPreview(value.preview);
+      const checkedAt = Date.now();
+      setNowMs(checkedAt);
+      setExpiresAtMs(typeof value.preview.expires_in_seconds === "number"
+        ? checkedAt + value.preview.expires_in_seconds * 1000 : null);
       setError("");
       return value;
     } catch {
@@ -42,12 +50,27 @@ export function ToolApprovalCard({
   }, [runtimeThreadId, tool.approvalId, t]);
 
   useEffect(() => {
+    if (sourceAccessRevoked) setPreview(null);
     void refresh();
-  }, [refresh]);
+  }, [refresh, sourceAccessRevoked]);
+
+  useEffect(() => {
+    if (approvalStatus !== "pending" || expiresAtMs === null) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setNowMs(now);
+      if (now >= expiresAtMs) {
+        window.clearInterval(timer);
+        void refresh();
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [approvalStatus, expiresAtMs, refresh]);
+  const expiresInSeconds = expiresAtMs === null ? null : Math.max(0, Math.ceil((expiresAtMs - nowMs) / 1000));
 
   const decide = async (approved: boolean) => {
     if (pendingRef.current || approvalStatus !== "pending") return;
-    if (approved && !preview?.can_approve) return;
+    if (approved && (sourceAccessRevoked || !preview?.can_approve)) return;
     pendingRef.current = true;
     setBusy(true);
     try {
@@ -80,11 +103,11 @@ export function ToolApprovalCard({
       <p className="mt-1 text-xs text-muted-foreground">
         {t("assistant.activity.approvalScope", "Approval applies to this action only. A changed or expired request needs a new decision.")}
       </p>
-      {preview?.can_approve ? (
+      {preview?.can_approve && !sourceAccessRevoked ? (
         <div className="mt-2 space-y-1 text-xs">
           <p><strong>{t("assistant.activity.approvalEffect", "Effect")}:</strong> {preview.effect}</p>
           <p><strong>{t("assistant.activity.approvalTarget", "Target")}:</strong> {preview.target}</p>
-          <p><strong>{t("assistant.activity.approvalExpiry", "Expires in")}:</strong> {preview.expires_in_seconds}s</p>
+          <p><strong>{t("assistant.activity.approvalExpiry", "Expires in")}:</strong> {expiresInSeconds}s</p>
           <div className="max-h-52 space-y-1 overflow-y-auto rounded border border-amber-500/20 bg-background/50 p-2">
             {preview.parameters?.map((parameter) => (
               <p key={parameter.name} className="break-all whitespace-pre-wrap"><strong>{parameter.name}:</strong> {parameter.value}</p>
@@ -93,12 +116,12 @@ export function ToolApprovalCard({
         </div>
       ) : (
         <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">
-          {preview?.reason || error || t("assistant.activity.approvalLoading", "Verifying this action…")}
+          {sourceAccessRevoked ? t("assistant.sourceNeedsNewConversation") : preview?.reason || error || t("assistant.activity.approvalLoading", "Verifying this action…")}
         </p>
       )}
       {error && preview?.can_approve && <p role="alert" className="mt-2 text-xs text-red-600">{error}</p>}
       <div className="mt-3 flex gap-2">
-        <button type="button" disabled={busy || approvalStatus !== "pending" || !preview?.can_approve} onClick={() => void decide(true)} className="rounded-md bg-[hsl(var(--assistant-accent))] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+        <button type="button" disabled={busy || approvalStatus !== "pending" || sourceAccessRevoked || !preview?.can_approve || expiresInSeconds === 0} onClick={() => void decide(true)} className="rounded-md bg-[hsl(var(--assistant-accent))] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
           {t("common.approve", "Approve")}
         </button>
         <button type="button" disabled={busy || approvalStatus !== "pending"} onClick={() => void decide(false)} className="rounded-md border border-[hsl(var(--assistant-border))] px-3 py-1.5 text-xs disabled:opacity-50">

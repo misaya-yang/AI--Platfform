@@ -433,6 +433,18 @@ async def authorize_and_reserve(
     if snapshot_hash != str(data["snapshot_sha256"]):
         raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_HASH_MISMATCH", status_code=503)
 
+    checker = getattr(self, "source_access_checker", None)
+    if checker is not None:
+        try:
+            allowed = await checker(
+                tenant_id=claims.tenant_id, user_id=claims.user_id,
+                session_id=claims.session_id, run_id=claims.run_id,
+            )
+        except Exception:
+            raise AgentModelPlaneError("ASSISTANT_SOURCE_CHECK_UNAVAILABLE", status_code=503) from None
+        if not allowed:
+            raise AgentModelPlaneError("ASSISTANT_SOURCE_ACCESS_REVOKED", status_code=403)
+
     estimated_input = _helpers._estimate_tokens(body.get("input"))
     limits = snapshot.get("limits") if isinstance(snapshot.get("limits"), dict) else {}
     requested_output = body.get("max_output_tokens")

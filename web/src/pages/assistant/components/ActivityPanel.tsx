@@ -220,6 +220,7 @@ export function ActivityPanel({
                 <ToolApprovalCard
                   key={tool.id}
                   tool={tool}
+                  sourceAccessRevoked={message.sourceAccessRevoked}
                   runtimeThreadId={message.processSummary?.runtimeThreadId}
                   onApprove={() => onToolApproval(message.id, tool.id, tool.approvalId as string, true)}
                   onReject={() => onToolApproval(message.id, tool.id, tool.approvalId as string, false)}

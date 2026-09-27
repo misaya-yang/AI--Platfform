@@ -475,6 +475,7 @@ export const ChatMessage = memo(function ChatMessage({
                   <ToolApprovalCard
                     key={tool.id}
                     tool={tool}
+                    sourceAccessRevoked={message.sourceAccessRevoked}
                     runtimeThreadId={message.processSummary?.runtimeThreadId}
                     onApprove={() =>
                       onToolApproval(message.id, tool.id, tool.approvalId as string, true)
@@ -547,6 +548,12 @@ export const ChatMessage = memo(function ChatMessage({
             </div>
           ) : null}
 
+          {message.sourceAccessRevoked && (
+            <div role="status" className="rounded-lg border border-amber-300/60 bg-amber-50/70 px-3 py-2 text-sm text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+              <p className="font-medium">{t("assistant.outcome.source_revoked.title")}</p>
+              <p className="mt-1 text-xs">{t("assistant.outcome.source_revoked.next")}</p>
+            </div>
+          )}
           {outcome && (
             <div
               role="status"

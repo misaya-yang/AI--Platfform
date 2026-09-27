@@ -9,7 +9,6 @@ fingerprint, no message) instead of being echoed to the caller.
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlsplit
 
 from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.storage import get_artifact_storage
@@ -18,6 +17,7 @@ from fastapi.responses import StreamingResponse
 
 from ....core.auth.user_resolver import UserContext
 from ....services.assistant_entry.session_binding import get_session_manager
+from ....services.assistant_entry.source_access import require_artifact_source_access
 from ...deps import get_user_context
 from ...schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
 from .._artifact_headers import attachment_content_disposition
@@ -27,10 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def _browser_artifact_download_url(raw_url: str | None, artifact_id: str) -> str:
-    """Return only browser-reachable URLs; local file paths stay server-side."""
-
-    if raw_url and urlsplit(raw_url).scheme.lower() in {"http", "https"}:
-        return raw_url
+    """Every browser read rechecks ownership and current source rights."""
+    del raw_url
     return f"/api/v1/assistant/artifacts/{artifact_id}/download"
 
 
@@ -102,6 +100,12 @@ async def list_session_artifacts(
         for art in artifacts:
             if art.source == "user" or getattr(art, "variant", "raw") != "raw":
                 continue
+            try:
+                await require_artifact_source_access(request, user, art)
+            except HTTPException as exc:
+                if exc.status_code == 403:
+                    continue  # Restricted messages explain the unavailable source.
+                raise
             raw_download_url = await artifact_storage.get_presigned_download_url(art)
             download_url = _browser_artifact_download_url(
                 raw_download_url,
@@ -129,6 +133,8 @@ async def list_session_artifacts(
             )
 
         return ArtifactListResponse(artifacts=artifact_list, total=len(artifact_list))
+    except HTTPException:
+        raise
     except Exception as exc:
         if _is_missing_artifact_schema_error(exc):
             logger.warning(
@@ -171,6 +177,8 @@ async def get_artifact(
         # Verify ownership
         if artifact.tenant_id != user.tenant_id or artifact.user_id != user.user_id:
             raise HTTPException(status_code=404, detail="Artifact not found")
+
+        await require_artifact_source_access(request, user, artifact)
 
         # Generate fresh presigned URL
         raw_download_url = await artifact_storage.get_presigned_download_url(artifact)
@@ -378,15 +386,9 @@ async def download_artifact(
         # Verify ownership
         if artifact.tenant_id != user.tenant_id or artifact.user_id != user.user_id:
             raise HTTPException(status_code=404, detail="Artifact not found")
+        await require_artifact_source_access(request, user, artifact)
 
-        # Get presigned URL and redirect
-        download_url = await artifact_storage.get_presigned_download_url(artifact)
-        if download_url and urlsplit(download_url).scheme.lower() in {"http", "https"}:
-            from fastapi.responses import RedirectResponse
-
-            return RedirectResponse(url=download_url)
-
-        # Fallback: stream content directly
+        # Do not issue a storage URL that outlives a later source revocation.
         content = await artifact_storage.download_artifact(artifact_id)
         if content is None:
             raise HTTPException(status_code=404, detail="Artifact content not found")
