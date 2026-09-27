@@ -74,3 +74,7 @@ PDF实际9451字节、一页，%PDF头、MIME正确，中英标题/数字/两条
 独立closure_review最初发现待审批覆盖取消/失败，主代理最小修正并实际复测；最终静态+facts review PASS，无剩余blocker/high，可合入安全增量。Reviewer独立Python23、Node12、diff-check通过，没有操作live；实际Docker/IAB为主代理。详细报告见independent-review.md。
 
 不改代理/SSRF/TLS，不重放unknown，不创建账号，不扩展R2、不迁移数据库。旧C4镜像保留，回滚需恢复对应三项本地非秘密pin并按既有release unit流程同步；没有删除镜像/缓存/分支。远程推送未授权。
+
+## 本地合入事实
+
+已在codex/r1-artifacts-long-tasks提交实现 `9373a65005fbbf440937d79433606262c52bd5cc`，本地main已从1107bd06 fast-forward到该实现。最终收据文档另记一笔；未推送、未删除分支。Docker运行候选与该实现源文件一致，不需要再次重启来同步文档。完整R1仍未验收完成；本轮安全增量收口。

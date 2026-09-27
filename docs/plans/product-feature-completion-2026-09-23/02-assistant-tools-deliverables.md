@@ -123,3 +123,5 @@ DR-01 已实现并完成本地范围验收：有持久上下文的原 root 动�
 保留DR01/RP01成果。修复Wan2.6 choices图片响应解析、图片持久事实的只读历史恢复、PDF认证打开入口、停止/未知活动分类与迟到取消回执；独立review发现的待审批覆盖取消/失败也已修正。终态原thread继续发送的旧租约检查错误改为复用不可变权限上限的只读路径，写入fence和未知动作不重放合同保留。
 
 已运行Python89、Node14、源码合同18、OpenAPI2及受影响规范检查。真实PDF内容与390px认证下载/完整Chromium预览、受控图片pending→unknown恢复分别记录；真实长Python停止资源证据复用本轮报告。图片provider实际成功后CDN下载仍受本机Fake-IP DNS阻塞，未降低SSRF保护或改共享网络。最新用户授权快速收尾及本地main合入，不代表完整R1/J01～J08/J29全部验收完成；实际Docker/Rust/原thread续接及未验证项由[验收记录](../../../reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md)和执行状态补全。
+
+R1-RP02实际本地合入main：实现9373a650；新a55739b4a6c5 Runtime/Worker、Rust160（PG2忽略）、原thread取消/成功旧owner过期后新轮、刷新/重开不新增执行均通过，review PASS。未推送；完整R1未验证项不变。

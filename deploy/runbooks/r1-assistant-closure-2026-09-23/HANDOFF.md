@@ -43,3 +43,13 @@ RP01 current-source rights guard is verified across new turns, explicit and back
 Full R1 remains explicitly incomplete where image success/vision, long-task resource reclamation, activity1000/PDF and other remaining journeys lack current live proof. IAB download event unobserved; standard Playwright actual Office bytes verified. Do not repeat DR01 or automatically replay any unknown writes. Reports/product/r1-remaining-acceptance-2026-09-27.md and receipts/R1-RP01.yml own current evidence. This closure starts no further development.
 
 Actual RP01 local fast-forward completed at main@2919a587; code60ede5c5/integration66202d8b included. Docker source hashes equal merged Git blobs. Remote unchanged; receipt-only final record follows.
+
+## 2026-09-27 R1-RP02 local integration
+
+Latest user requested prompt closure and main integration. Source branch codex/r1-artifacts-long-tasks; implementation9373a650; local main fast-forward completed. No push, branch deletion or cleanup. Earlier DR01/RP01 remain included.
+
+Fixed immutable-ceiling read incorrectly checking terminal run's expired write fence; image provider choices parsing/read-only history; activity unknown/cancelled/unapproved-action terminal display; bounded late cancellation receipt; PDF authenticated open. Final Docker Runtime/Worker unit a55739b4a6c5 is healthy, Python/core4 and188 assets match. Actual same-thread pending cancel→owner expiry→new text success, then successful owner expiry→another text success; refresh/reopen keeps original unknown execution/attempt and no extra run/dispatch.
+
+Python89, Node14, Docker Rust160 (2 optional PG ignored), source18, OpenAPI2, E2E2 and affected gates passed. Independent read-only review PASS after pending-terminal fix, no blocker/high. Reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md and receipts/R1-RP02.yml own evidence. IAB viewport reset, preserved final original session.
+
+Full R1 is not RELEASE_100: image CDN Fake-IP remains an external DNS prerequisite; vision/activity1000/extra sharing and PDF failure combinations remain unverified. No shared host network/security guard changes and no paid image replay. This increment stops; do not infer permission for further expansion or push.
