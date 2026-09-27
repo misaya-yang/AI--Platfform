@@ -33,3 +33,11 @@ Native/unprovable descendants and old runs without durable context fail closed.
 No hosted CI, whole-platform HA, Gateway restart continuity or complete R1
 claim. Remaining R1 journeys stay in loop-state's separate unverified blocker.
 No further DR-01 development is required unless a new concrete defect is reported.
+
+## 2026-09-27 R1-RP01 closure
+
+Latest user authorized prompt closure and local main integration, superseding the earlier no-commit/local-merge constraint; no remote push or branch deletion. Branch codex/r1-remaining-acceptance, base425ce123. DR01 remains accepted C4 and is not a blocker.
+
+RP01 current-source rights guard is verified across new turns, explicit and background recovery, history/SSE, pending decisions, Quiz and downloads. Real Qwen and IAB pending/idle revocation passed; cold thread ID and same-run multi-message redaction repaired after review. Python199, Node10, E2E2, OpenAPI2, source18 and current Docker12-source/187-assets hashes and health passed. Read-only independent review PASS. Synthetic subject roles and viewer grant restored; memory switch restored; no credentials stored.
+
+Full R1 remains explicitly incomplete where image success/vision, long-task resource reclamation, activity1000/PDF and other remaining journeys lack current live proof. IAB download event unobserved; standard Playwright actual Office bytes verified. Do not repeat DR01 or automatically replay any unknown writes. Reports/product/r1-remaining-acceptance-2026-09-27.md and receipts/R1-RP01.yml own current evidence. This closure starts no further development.

@@ -85,3 +85,44 @@ packages:
     review: Independent read-only migration authority review before resuming DR-01.
     evidence: [reports/product/runtime-durable-recovery-2026-09-26.md]
     stop_conditions: [A frozen input or prior epoch would be modified, Unknown migration history identity]
+
+  - id: R1-RP01
+    state: verified
+    result: Current source rights follow inherited run context through recovery, approvals, history, Quiz and authenticated downloads; verified R1 increment closes without claiming all R1 journeys.
+    base_sha: 425ce123
+    depends_on: [DR-01:verified]
+    owned_paths:
+      - src/services/assistant_entry/source_access.py
+      - src/services/agent_runtime/**
+      - src/api/v1/_assistant_routes/**
+      - src/api/v1/quiz.py
+      - src/api/v1/artifact_shares.py
+      - src/api/v2/agent.py
+      - tests/api/**
+      - tests/services/agent_runtime/**
+      - web/src/pages/assistant/**
+      - web/src/api/agentThreads.ts
+      - web/src/i18n/locales/**
+      - web/e2e/**
+      - docs/plans/product-feature-completion-2026-09-23/02-assistant-tools-deliverables.md
+      - docs/design/agent-runtime-durable-recovery.md
+      - deploy/runbooks/r1-assistant-closure-2026-09-23/**
+      - reports/product/r1-remaining-acceptance-2026-09-27.md
+      - reports/r1-remaining/**
+    forbidden_paths: [rust/**, apps/**, database/**, sdk/src/**, billing/**]
+    integration_paths: [src/main.py]
+    must_preserve:
+      - Rust remains sole execution/recovery owner; Gateway current source policy cannot replay actions.
+      - Original run/turn/tool identities and terminal outcomes remain stable.
+      - Unknown writes never automatically replay.
+      - User uploads and older public artifacts remain accessible; no presigned download bypass.
+      - No credential logging, new account, password change, migration or dependency.
+      - Latest user permits selective commit and local main merge; no push or branch deletion.
+    direct_gates: [affected Python199, Node10, Ruff, direct app/node TS, affected ESLint, i18n, OpenAPI2, source18, architecture-boundary-gate, harness-check]
+    integration_gates: [live current-source history and SSE replay, actual no-source Quiz share and repeated submission/revoke, original write dispatch count unchanged]
+    live_gates: [serialized hot-update all and source/bundle hashes, real Qwen private KB pending/idle revocation, memory-off and selected attachment facts, controlled upload503 and real Office download E2E2, validate, status]
+    skip_policy: {required: none, optional: full R1 image/PDF/long-task journeys outside this increment remain explicitly unverified}
+    rollback: Source-only old-binary-compatible rollback; no data or schema changes; old anonymous unverifiable Quiz remains denied under current policy.
+    review: Independent read-only closure_review PASS after high/medium repairs; no remaining blocker/high.
+    evidence: [reports/product/r1-remaining-acceptance-2026-09-27.md, reports/r1-remaining/independent-review.md, deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/R1-RP01.yml]
+    stop_conditions: [Unknown write would be replayed, conflicting writer or Compose owner, unrelated scope expansion]

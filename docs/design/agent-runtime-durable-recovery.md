@@ -109,3 +109,9 @@ Historical projection also reads original scoped lifecycle-only unknown
 receipts, so older records retain their body, diagnostic run ID and uncertainty.
 Cold cancellation appends its terminal receipt in the same scoped transaction;
 duplicate stop repairs a missing receipt without advancing or replaying a run.
+
+## 2026-09-27：Gateway 当前来源权益校验
+
+Rust保留原run/turn/模型/lease与工具回执，Gateway在新轮、显式恢复与每个恢复模型请求前核验当前账号/来源权益。原线程含有前文知识时，本轮关闭知识库不移除Core上下文；累积来源从原owner的持久snapshot解析，权限复用KB可见目录。撤权或权限无法核验时拒绝推进，不重建run，不自动执行未知动作。
+
+历史、SSE、待审批预览、Quiz与认证下载使用同一来源规则。只读thread响应可携带restricted_source_run_ids，客户端轮询只遮蔽内容并保留公开终态；不是执行所有权或恢复引擎。匿名Quiz必须有可核验且无私有知识的原run来源，不能从dataset_ids为空推断可公开。证据见R1-RP01收据与2026-09-27收尾报告。

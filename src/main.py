@@ -1069,6 +1069,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     ).strip()
     lease_secret = os.environ.get("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET", "").strip()
     app.state.agent_model_plane_internal_token = model_plane_token
+    from .services.assistant_entry.source_access import runtime_source_access_checker
     app.state.agent_model_plane = (
         AgentModelPlane(
             admission_controller=container.admission_controller,
@@ -1076,6 +1077,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
             database=container.database,
             provider_service=app.state.provider_service,
             lease_signer=RuntimeModelLeaseSigner(lease_secret),
+            source_access_checker=runtime_source_access_checker(app),
         )
         if container.settings.database.enabled and model_plane_token and lease_secret
         else None

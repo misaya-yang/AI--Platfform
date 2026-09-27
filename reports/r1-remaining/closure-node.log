@@ -1,0 +1,18 @@
+✔ a failed turn remains failed with no text or with partial text (0.686875ms)
+✔ cancelled, unknown, empty success, normal success and running remain distinct (0.090667ms)
+✔ restart-orphaned approval is distinct from a user cancellation (0.157167ms)
+✔ only a valid existing run ID is exposed as a diagnostic ID (0.121083ms)
+✔ image generation stays running, and a failed image task exposes only its safe ID (0.185708ms)
+✔ an image transport loss after dispatch stays unknown, while an explicit provider failure does not (0.174375ms)
+✔ source restriction keeps the public cancelled or failed outcome (0.13425ms)
+✔ source revocation clears content and private activity while retaining pending decision identity (0.40225ms)
+✔ uploaded user messages stay unchanged (0.047708ms)
+✔ all messages of a restricted run are hidden, including an earlier tool prelude (0.324042ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 79.856625

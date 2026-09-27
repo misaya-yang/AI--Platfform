@@ -1,0 +1,9 @@
+
+Running 2 tests using 1 worker
+
+(node:76506) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [chromium] › e2e/r1-remaining.spec.ts:13:1 › controlled one-file upload 503 retries only that file and leaves originals intact (1.5s)
+  ✓  2 [chromium] › e2e/r1-remaining.spec.ts:48:1 › real Office artifact downloads from the browser after reopening saved history (3.4s)
+
+  2 passed (5.8s)
