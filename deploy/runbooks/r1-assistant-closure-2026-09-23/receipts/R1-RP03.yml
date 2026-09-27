@@ -5,9 +5,11 @@ source_branch: codex/r1-remaining-flow-acceptance
 integration:
   target: main
   mode: local-fast-forward
-  status: pending
+  status: integrated
   pushed: false
   branch_deleted: false
+  merged_code_head: 2521d0a4f4e2faadb3f1aaa559bfff7a6bd2800b
+  documentation_followup: true
 full_R1_complete: false
 status_label: CANDIDATE_80
 direct_verdict: PASS
@@ -135,3 +137,5 @@ accepted_activity_checkpoint:
   evidence: reports/r1-flows/activity1000-final.log
   scope: Same RP03 Stop guard and event tests; controlled frontend fixture at1280/390,
     not real Worker throughput.
+implementation_commit: 0033b8c6d4bd008049c4283980fbb31f3114d2c8
+head_sha: 2521d0a4f4e2faadb3f1aaa559bfff7a6bd2800b

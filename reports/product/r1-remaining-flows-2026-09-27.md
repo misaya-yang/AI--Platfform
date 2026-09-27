@@ -65,3 +65,7 @@ Compose owner均为本仓库。按规范分别 Python `make hot-update ARGS="--p
 因此本次是已验证安全增量的本地main交付，不是完整R1完成声明。没有新账号、凭据输出/复制、权限扩展、共享网络修改、远程推送或分支删除。
 
 证据：`reports/r1-flows/`；临时截图：`tmp/r1-flows/pdf-shared-final.png`、`vision-history-final.png`、`quiz-share-final.png`、`expired-share-final.png`。IAB已恢复普通视口并保留原视觉会话。
+
+## 实际本地集成
+
+实现 `0033b8c6`；记录规范化 `2521d0a4` 已快进合入本地main。最终Docker三处源码SHA与实现commit的Git blobs一致；Runtime/Worker与前端无需为记录commit重建。文档跟随记录随后合入；没有push、history rewrite或branch deletion。归档日志末尾空行在跟随记录中规范化后，最终diff-check通过；早期缓存检查曾报告两处日志空行，不算最终通过。

@@ -51,5 +51,8 @@
     "address_count": 1
   },
   "frontend_css_file_count": 5,
-  "frontend_css_sha256_equal": true
+  "frontend_css_sha256_equal": true,
+  "expected_implementation_commit": "0033b8c6d4bd008049c4283980fbb31f3114d2c8",
+  "merged_code_head": "2521d0a4f4e2faadb3f1aaa559bfff7a6bd2800b",
+  "git_blob_source_sha256_equal": true
 }
