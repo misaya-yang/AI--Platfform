@@ -23,4 +23,3 @@ ai-gateway-redis                       redis:7-alpine                           
   Agent Runtime:     Healthy
   Capability worker: Healthy
   Topology replicas: Healthy
-
