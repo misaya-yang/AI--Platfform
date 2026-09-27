@@ -322,7 +322,12 @@
       "viewHistory": "History",
       "wrongCountChip": "Wrong",
       "wrongCountSep": ": ",
-      "wrongDetail": "Wrong (you: {{user}}, answer: {{correct}})"
+      "wrongDetail": "Wrong (you: {{user}}, answer: {{correct}})",
+      "shareListFailed": "Could not load share links. Reopen to retry.",
+      "copyFailed": "Could not copy. Select the link and copy it manually.",
+      "questionPreview": "Visitor question preview (answers hidden)",
+      "linkExpired": "Expired",
+      "linkActive": "Active"
     },
     "ragChunksUsed": "{{used}}/{{total}} chunks used",
     "ragCitations": "Citations",
@@ -485,7 +490,13 @@
       "currentRun": "Current run",
       "sessionArtifacts": "Session artifacts"
     },
-    "yesterday": "Yesterday"
+    "yesterday": "Yesterday",
+    "sharedFiles": "Shared files",
+    "sharedLinkUnavailable": "This link was revoked or was not found",
+    "sharedLinkExpired": "This link expired or its source rights need review",
+    "sharedLinkLoadFailed": "Unable to load this shared conversation",
+    "sharedLinkLoading": "Loading shared conversation…",
+    "sharedLinkNextStep": "Ask the owner for a new link if you still need access."
   },
   "common": {
     "actions": "Actions",

@@ -425,11 +425,11 @@ export function QuizCard({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (viewMode !== "quiz" && viewMode !== "quiz-all-answered") return;
-      if (result) return;
+      if (result || showShareDialog || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       if (target) {
         const tag = target.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable || target.closest('button, a, select, [role="dialog"]')) {
           return;
         }
       }
@@ -480,6 +480,7 @@ export function QuizCard({
     allAnswered,
     handleSelect,
     handleSubmit,
+    showShareDialog,
   ]);
 
   // --- render helpers ----------------------------------------------------
@@ -505,6 +506,10 @@ export function QuizCard({
             {quizData.difficulty && ` · ${quizData.difficulty}`}
           </p>
         </div>
+        {scope === "main" && <button type="button" onClick={() => setShowShareDialog(true)}
+          className="act-btn act-hover shrink-0 p-1.5 rounded-md" aria-label={t("assistant.quiz.shareQuiz")}>
+          <Link2 className="w-[14px] h-[14px]" />
+        </button>}
         <StateChip
           viewMode={viewMode}
           answeredCount={answeredCount}
@@ -773,16 +778,7 @@ export function QuizCard({
                   wrongCount > 0 ? handleReviewIncorrect : undefined
                 }
               />
-              <div className="mt-3 flex justify-center">
-                <button
-                  type="button"
-                  onClick={() => setShowShareDialog(true)}
-                  className="act-btn act-hover inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
-                >
-                  <Link2 className="w-[14px] h-[14px]" />
-                  {t("assistant.quiz.shareQuiz", "Share Quiz")}
-                </button>
-              </div>
+
             </motion.div>
           )}
 
@@ -918,11 +914,11 @@ export function QuizCard({
       </AnimatePresence>
 
       {/* Share dialog */}
-      <QuizShareDialog
+      {scope === "main" && <QuizShareDialog
         quizId={quizData.quiz_id}
         open={showShareDialog}
         onClose={() => setShowShareDialog(false)}
-      />
+      />}
     </div>
   );
 }

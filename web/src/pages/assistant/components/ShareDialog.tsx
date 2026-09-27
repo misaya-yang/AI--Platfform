@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Share2, Copy, Check, X, ExternalLink } from "lucide-react";
 import {
@@ -12,6 +12,8 @@ import {
 } from "@/api/assistant";
 import { toast } from "@/hooks/use-toast";
 
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+
 interface ShareDialogProps {
   sessionId: string;
   messageCount: number;
@@ -22,6 +24,7 @@ interface ShareDialogProps {
 
 export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, onClose }: ShareDialogProps) {
   const { t } = useTranslation();
+  const returnFocus = useRef<HTMLElement | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [shareInfo, setShareInfo] = useState<ShareInfo | null>(null);
   const [copied, setCopied] = useState(false);
@@ -123,19 +126,17 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={handleClose}>
-      <div
-        className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md max-h-[90dvh] mx-4 overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="assistant-share-dialog-title"
-      >
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
+      <DialogContent showCloseButton={false}
+        className="max-w-md max-h-[90dvh] gap-0 p-0 sm:p-0 bg-white dark:bg-slate-800 rounded-2xl"
+        onOpenAutoFocus={() => { returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }}
+        onCloseAutoFocus={(event) => { event.preventDefault(); returnFocus.current?.focus(); }}>
+        <DialogDescription className="sr-only">{t("assistant.shareVisitorPreview")}</DialogDescription>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
           <div className="flex items-center gap-2">
             <Share2 className="w-5 h-5 text-primary" />
-            <h3 id="assistant-share-dialog-title" className="text-lg font-semibold">{t("assistant.shareConversation", "Share Conversation")}</h3>
+            <DialogTitle className="text-lg font-semibold">{t("assistant.shareConversation", "Share Conversation")}</DialogTitle>
           </div>
           <button type="button" onClick={handleClose} className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" aria-label={t("common.close", "Close")}>
             <X className="w-5 h-5" />
@@ -279,7 +280,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
             </div>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

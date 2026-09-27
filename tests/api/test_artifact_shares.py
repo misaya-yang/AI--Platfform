@@ -825,3 +825,32 @@ def test_create_quiz_share_checks_creating_turn_origin(fake_db: _FakeDB, origin:
     response = TestClient(app).post("/artifact-shares", json={"quiz_id": quiz_id})
     assert response.status_code == 409
     assert fake_db.shares == {}
+
+
+def test_owner_share_list_is_scoped_and_excludes_grading_payload() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from src.api.v1.artifact_shares import get_user_context
+    quiz_id = uuid.uuid4()
+    class ListDB:
+        async def fetch(self, query, *args):
+            assert "tenant_id = $1 AND created_by = $2 AND kind = 'quiz'" in query
+            assert "payload ->> 'quiz_id' = $3" in query
+            assert "SELECT id AS share_id" in query and "answer_keys" not in query
+            assert args == ("tenant-a", "alex", str(quiz_id), 50)
+            return [{"share_id": uuid.uuid4(), "share_code": "test-code", "is_active": True, "expired": True,
+                     "created_at": datetime.now(timezone.utc), "expires_at": datetime.now(timezone.utc),
+                     "revoked_at": None, "require_name": True,
+                     "payload": {"secret": "private"}, "answer_keys": ["hidden"]}]
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = ListDB()
+    async def actor():
+        return SimpleNamespace(tenant_id="tenant-a", user_id="alex")
+    app.dependency_overrides[get_user_context] = actor
+    response = TestClient(app).get(f"/artifact-shares?quiz_id={quiz_id}")
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result) == 1 and result[0]["expired"] is True
+    assert "payload" not in result[0] and "answer_keys" not in result[0]

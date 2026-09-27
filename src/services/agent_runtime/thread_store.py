@@ -700,9 +700,60 @@ class AgentThreadStore:
                     "metadata": metadata,
                 }
             )
+        await self._attach_user_uploads(messages, tenant_id=tenant_id, user_id=user_id, runtime_thread_id=runtime_thread_id)
         await self._attach_quiz_ids(messages, tenant_id=tenant_id, user_id=user_id)
         total = int(rows[0].get("total") or 0) if rows else 0
         return messages, total
+
+    async def _attach_user_uploads(
+        self, messages: list[dict[str, Any]], *, tenant_id: str, user_id: str,
+        runtime_thread_id: str,
+    ) -> None:
+        """Recover selected uploads from the immutable snapshot, without execution."""
+        pending: dict[str, list[dict[str, Any]]] = {}
+        for message in messages:
+            if message.get("role") == "user" and message.get("metadata", {}).get("runtime_run_id"):
+                pending.setdefault(str(message["metadata"]["runtime_run_id"]), []).append(message)
+        if not pending:
+            return
+        rows = await self.database.fetch(
+            """
+            SELECT s.run_id::text AS run_id, a.artifact_id, a.filename, a.mime_type,
+                   a.metadata ->> 'original_filename' AS original_filename
+              FROM assistant_runtime_snapshots AS s
+              JOIN assistant_runs AS r
+                ON r.run_id = s.run_id AND r.harness_thread_id = s.runtime_thread_id
+               AND r.tenant_id = s.tenant_id AND r.user_id = s.user_id AND r.session_id = s.session_id
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(s.snapshot #> '{readonly_capabilities,platform_config,attachments}') = 'array'
+                      THEN s.snapshot #> '{readonly_capabilities,platform_config,attachments}'
+                      ELSE '[]'::jsonb END
+             ) WITH ORDINALITY AS selected(value, ordinality)
+              JOIN assistant.artifacts AS a
+                ON a.artifact_id = selected.value ->> 'ref'
+               AND a.tenant_id = s.tenant_id AND a.user_id = s.user_id AND a.session_id = s.session_id
+             WHERE s.runtime_thread_id = $1 AND s.tenant_id = $2 AND s.user_id = $3
+               AND s.run_id::text = ANY($4::text[])
+               AND selected.value ->> 'descriptor' = 'read_attachment'
+               AND selected.value ->> 'version' = 'v1'
+               AND a.source = 'user' AND a.size_bytes > 0
+             ORDER BY s.run_id, selected.ordinality
+            """,
+            uuid.UUID(str(runtime_thread_id)), tenant_id, user_id, list(pending),
+        )
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            run_id, artifact_id = str(row.get("run_id") or ""), str(row.get("artifact_id") or "")
+            if run_id not in pending or not re.fullmatch(r"art_[0-9a-f]{16}", artifact_id) or (run_id, artifact_id) in seen:
+                continue
+            seen.add((run_id, artifact_id))
+            attachment = {
+                "type": "image" if str(row.get("mime_type") or "").startswith("image/") else "file",
+                "filename": row.get("original_filename") or row.get("filename"),
+                "url": f"/api/v1/assistant/artifacts/{artifact_id}/download",
+            }
+            for message in pending[run_id]:
+                message["metadata"].setdefault("attachments", []).append(attachment)
 
     async def _attach_quiz_ids(
         self,

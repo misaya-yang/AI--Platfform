@@ -125,3 +125,9 @@ DR-01 已实现并完成本地范围验收：有持久上下文的原 root 动�
 已运行Python89、Node14、源码合同18、OpenAPI2及受影响规范检查。真实PDF内容与390px认证下载/完整Chromium预览、受控图片pending→unknown恢复分别记录；真实长Python停止资源证据复用本轮报告。图片provider实际成功后CDN下载仍受本机Fake-IP DNS阻塞，未降低SSRF保护或改共享网络。最新用户授权快速收尾及本地main合入，不代表完整R1/J01～J08/J29全部验收完成；实际Docker/Rust/原thread续接及未验证项由[验收记录](../../../reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md)和执行状态补全。
 
 R1-RP02实际本地合入main：实现9373a650；新a55739b4a6c5 Runtime/Worker、Rust160（PG2忽略）、原thread取消/成功旧owner过期后新轮、刷新/重开不新增执行均通过，review PASS。未推送；完整R1未验证项不变。
+
+### 2026-09-27 独立剩余流程收尾（R1-RP03）
+
+完成已发现的发送双击误停止、上传附件冷恢复缺失、分享PDF白名单未绑定文件缺卡、390px长地址溢出及分享弹窗键盘问题；Quiz答前分享/安全预览、期限与刷新后本人链接撤销管理已补齐，新管理GET及OpenAPI同步。Python83/Node8、真实分享E2E2、受控活动E2E2与受控到期中英文E2E1通过；IAB视觉/冷恢复/PDF/Quiz/ESC/到期页和最终Docker源码/前端哈希及健康通过。独立review PASS，无blocker/high。
+
+按最新用户授权本地合入main，不推送/删分支；保留DR01/RP01/RP02。完整R1仍不声明完成：真实图片CDN Fake-IP阻塞与其余未验证必需旅程如实列在[RP03收尾记录](../../../reports/product/r1-remaining-flows-2026-09-27.md)及执行状态，不把受控场景混称真实provider/自然到期。

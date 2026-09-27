@@ -1,0 +1,9 @@
+
+Running 2 tests using 1 worker
+
+(node:5868) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [chromium] › e2e/r1-sharing.spec.ts:18:1 › real PDF share matches preview, file exclusion and owner revocation at 390px (10.7s)
+  ✓  2 [chromium] › e2e/r1-sharing.spec.ts:68:1 › real Quiz links can be previewed before taking, found after refresh and revoked (3.8s)
+
+  2 passed (15.5s)

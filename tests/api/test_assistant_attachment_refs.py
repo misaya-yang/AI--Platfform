@@ -206,3 +206,40 @@ async def test_selected_image_bytes_are_transient_bounded_model_input(monkeypatc
     assert len(images) == 1
     assert images[0].startswith("data:image/png;base64,")
     assert base64.b64decode(images[0].split(",", 1)[1]) == image_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original, expected", [("说明.png", "说明.png"), ("../secret.png", None), ("bad\nname.png", None)])
+async def test_binding_preserves_safe_original_upload_name_once(monkeypatch, original, expected) -> None:
+    files, artifacts = _Files(), _Artifacts()
+    class Backend:
+        async def head(self, key):
+            assert key.startswith("uploads/tenant-1/user-1/")
+            return SimpleNamespace(metadata={"original_filename": original})
+    files._backend = Backend()
+    monkeypatch.setattr(attachment_refs, "get_file_storage", lambda: files)
+    monkeypatch.setattr(attachment_refs, "get_artifact_storage", lambda: artifacts)
+    await attachment_refs.bind_assistant_attachment_refs(
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())), _owner(), session_id="session-1", model_id="text-model",
+        refs=["/uploads/tenant-1/user-1/abcdef01_20260923_150000.txt"],
+    )
+    assert artifacts.creates[0]["metadata"].get("original_filename") == expected
+
+
+@pytest.mark.asyncio
+async def test_optional_upload_metadata_failure_keeps_verified_bytes_usable(monkeypatch) -> None:
+    files, artifacts = _Files(), _Artifacts()
+    class Backend:
+        async def head(self, _key):
+            raise RuntimeError("controlled metadata service unavailable")
+    files._backend = Backend()
+    monkeypatch.setattr(attachment_refs, "get_file_storage", lambda: files)
+    monkeypatch.setattr(attachment_refs, "get_artifact_storage", lambda: artifacts)
+    bound = await attachment_refs.bind_assistant_attachment_refs(
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())), _owner(),
+        session_id="session-1", model_id="text-model",
+        refs=["/uploads/tenant-1/user-1/abcdef01_20260923_150000.txt"],
+    )
+    assert len(bound) == 1
+    assert artifacts.creates[0]["filename"] == "abcdef01_20260923_150000.txt"
+    assert "original_filename" not in artifacts.creates[0]["metadata"]

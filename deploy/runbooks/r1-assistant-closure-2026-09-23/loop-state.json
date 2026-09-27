@@ -2,16 +2,16 @@
   "schema_version": "prd-phase-harness/loop-state/v4",
   "domain_id": "r1-assistant-daily-use",
   "lifecycle": "active",
-  "status": "in_progress",
+  "status": "blocked",
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "main",
-  "active_phase": "R1-1",
-  "active_feature": "R1-RP02 safe increment locally integrated; full-R1 acceptance remains incomplete",
-  "active_package": "R1-RP02",
-  "next_action": "This increment is closed. Keep full-R1 remaining checks explicit; resume only when requested and CDN prerequisite is fixed. Do not replay unknown actions.",
-  "last_result": "RP02 safe increment verified: Python89/Node14/Rust160 (2 optional PG ignored)/source18/OpenAPI2/E2E2; actual expired cancelled+succeeded owners allow original-thread followups; original unknown execution/attempt unchanged. New a55739b4a6c5 release unit healthy. Independent review PASS. Full R1 still incomplete: image CDN Fake-IP/vision/activity1000/extra sharing unverified.",
+  "branch": "codex/r1-remaining-flow-acceptance",
+  "active_phase": "R1-4",
+  "active_feature": "Remaining required R1 evidence after verified RP03 increment",
+  "active_package": "R1-RP03",
+  "next_action": "Finish local authorized safe-increment integration. Full R1 remains incomplete: shared-CDN DNS prerequisite and named unverified UI journeys; do not replay paid/unknown writes.",
+  "last_result": "RP03 Python83/Node8, real sharingE2E2, controlled activityE2E2 and controlled expiry localesE2E1 passed; real configured vision and original attachment cold history passed; final source/bundle hashes/health passed; independent review PASS. Local integration pending.",
   "updated_at": "2026-09-27",
   "blockers": [
     {
@@ -22,7 +22,7 @@
     {
       "id": "R1-unverified-journeys",
       "status": "unverified",
-      "reason": "Vision, activity1000 and extra sharing/PDF failure combinations not newly verified; no complete R1 release claim."
+      "reason": "Required unverified UI journeys are explicitly listed in RP03 report; vision/activity1000/normal sharing are now verified. No complete R1 declaration."
     }
   ],
   "cycle": [
@@ -34,7 +34,7 @@
     "integrate",
     "decide"
   ],
-  "iteration": 6,
+  "iteration": 7,
   "max_iterations": 20,
   "phases": [
     {
@@ -100,9 +100,9 @@
     "reports/product/assistant-model-selection-2026-09-23.md"
   ],
   "execution_authorization": {
-    "scope": "Latest user authorizes prompt closure, necessary local commits and main integration; no remote push or branch deletion.",
+    "scope": "Latest user: quick bounded closure ensuring functionality then local main integration.",
     "parallel_agents": "At most three bounded read-only investigators/reviewers; primary sole writer; live serialized.",
-    "round_status": "locally_integrated",
+    "round_status": "verified_awaiting_local_integration",
     "commit_authorized": true,
     "local_merge_authorized": true,
     "push_authorized": false,
@@ -156,5 +156,13 @@
     "integration_target": "main",
     "integration_mode": "fast-forward",
     "push_performed": false
+  },
+  "remaining_flows": {
+    "package": "R1-RP03",
+    "state": "verified",
+    "full_R1_complete": false,
+    "status_label": "CANDIDATE_80",
+    "report": "reports/product/r1-remaining-flows-2026-09-27.md",
+    "review": "PASS"
   }
 }

@@ -128,7 +128,7 @@ packages:
     evidence: [reports/product/r1-remaining-acceptance-2026-09-27.md, reports/r1-remaining/independent-review.md, deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/R1-RP01.yml]
     stop_conditions: [Unknown write would be replayed, conflicting writer or Compose owner, unrelated scope expansion]
   - id: R1-RP02
-    state: in_progress
+    state: blocked
     result: Complete remaining R1 configured images/vision, PDF, long-task stop/resource
       evidence, activity1000 and sharing/narrow flows without weakening DR01/RP01.
     base_sha: 1107bd06082d214c29a61bb8f04e16df483c6fce
@@ -193,3 +193,21 @@ packages:
     - Unknown write would be replayed
     - Conflicting writer/Compose owner
     - Irrelevant scope or credential exposure
+
+  - id: R1-RP03
+    state: verified
+    result: Close independently executable remaining activity1000, sharing/expiry/narrow and configured vision flows without repeating accepted evidence or paid image generation.
+    base_sha: 2a5b7d74
+    depends_on: [DR-01:verified, R1-RP01:verified, R1-RP02:locally_integrated_safe_increment]
+    owned_paths: [sdk/openapi.json, web/src/pages/assistant/**, web/src/pages/SharePage.tsx, web/src/components/ui/dialog.tsx, web/src/components/artifacts/**, web/src/api/**, web/src/i18n/locales/**, web/e2e/**, src/api/v1/**, src/api/v2/agent.py, src/services/assistant_entry/**, src/services/agent_runtime/**, src/api/v1/_assistant_routes/attachment_refs.py, tests/**, docs/plans/product-feature-completion-2026-09-23/**, deploy/runbooks/r1-assistant-closure-2026-09-23/**, reports/r1-flows/**, reports/product/r1-remaining-flows-2026-09-27.md]
+    forbidden_paths: [rust/**, database/**, apps/**, billing/**, sdk/src/**]
+    integration_paths: [src/main.py]
+    must_preserve: [Rust execution/recovery owner, current source and share authorization, original run/tool identities, unknown actions never replay, no dependencies/accounts/secrets/network settings changes, primary writer and three bounded read-only agents, latest user authorizes selective commit and local main integration; no push/delete]
+    direct_gates: [affected tests and Ruff/TS/ESLint/i18n, harness and boundaries as affected]
+    integration_gates: [activity identity and repeated-stop counts, actual shares and revoked/expired guest access, actual uploaded pixels in independent vision path]
+    live_gates: [owned Docker identity and health, built-in browser desktop/390px, independent review and affected retest]
+    skip_policy: {required: none, external_blockers: Image CDN DNS blocks only image generation download; continue independent flows}
+    rollback: Minimal compatible source changes only; no data cleanup or schema migration
+    review: Independent read-only final diff and evidence check
+    evidence: [reports/product/r1-remaining-flows-2026-09-27.md, reports/r1-flows/**]
+    stop_conditions: [Unknown actions would replay, shared network mutation, credential exposure, conflicting writer/owner, scope outside R1]

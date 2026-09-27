@@ -221,6 +221,8 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
 
     class _HistoryDatabase(_Database):
         async def fetch(self, query: str, *args):
+            if "FROM assistant_runtime_snapshots AS s" in query:
+                return []
             assert "FROM assistant_runs AS run" in query
             assert "item_type = 'event_msg'" in query
             assert "JOIN LATERAL" in query
@@ -513,3 +515,23 @@ async def test_restricted_message_never_recovers_a_quiz_card():
     }}]
     await AgentThreadStore(Ledger())._attach_quiz_ids(messages, tenant_id="tenant-a", user_id="user-a")
     assert "quiz_id" not in messages[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_selected_upload_history_uses_scoped_snapshot_and_deduplicates() -> None:
+    class UploadsDB:
+        async def fetch(self, query, *args):
+            assert "r.harness_thread_id = s.runtime_thread_id" in query
+            assert "a.tenant_id = s.tenant_id AND a.user_id = s.user_id AND a.session_id = s.session_id" in query
+            assert "s.tenant_id = $2 AND s.user_id = $3" in query
+            assert "AND a.source = 'user' AND a.size_bytes > 0" in query
+            assert args[1:] == ("tenant-a", "user-a", ["run-a", "run-b"])
+            image = {"run_id": "run-a", "artifact_id": "art_0123456789abcdef", "mime_type": "image/png", "filename": "saved.png", "original_filename": "original.png"}
+            return [image, image, {"run_id": "run-b", "artifact_id": "art_1111111111111111", "mime_type": "text/plain", "filename": "saved.txt"}, {**image, "run_id": "unselected"}]
+
+    messages = [{"role": "user", "metadata": {"runtime_run_id": run}} for run in ["run-a", "run-b"]]
+    await AgentThreadStore(UploadsDB())._attach_user_uploads(
+        messages, tenant_id="tenant-a", user_id="user-a", runtime_thread_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert messages[0]["metadata"]["attachments"] == [{"type": "image", "filename": "original.png", "url": "/api/v1/assistant/artifacts/art_0123456789abcdef/download"}]
+    assert messages[1]["metadata"]["attachments"][0]["filename"] == "saved.txt"

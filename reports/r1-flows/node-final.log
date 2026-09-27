@@ -1,0 +1,16 @@
+✔ a cancelled/failed run preserves completed results and exposes uncertain unfinished tools (0.616042ms)
+✔ live tools keep running and repeated terminal projection is idempotent (0.067709ms)
+✔ an explicit cancelled or failed message wins over a stale approval hold (0.075875ms)
+✔ runtime restore preserves cancellation instead of converting it to failure (0.849833ms)
+✔ restored terminal status preserves cancelled and failed turns (0.084709ms)
+✔ restored active and successful summaries map to chat turn states (0.054083ms)
+✔ old snapshots show unlinked authorized artifacts once (0.744958ms)
+✔ placements exclude nonmembers, malformed IDs and duplicates across messages (0.105208ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 117.686958

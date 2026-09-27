@@ -17,7 +17,7 @@ from typing import Any
 
 from ai_gateway_core.quiz.public_projection import safe_quiz_options
 from ai_gateway_core.sharing import ArtifactShareManager
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
@@ -52,6 +52,44 @@ class ArtifactShareCreateResponse(BaseModel):
 
 class ArtifactShareRevokeResponse(BaseModel):
     revoked: bool
+
+
+class ArtifactShareSummary(BaseModel):
+    share_id: uuid.UUID
+    share_code: str
+    is_active: bool
+    expired: bool
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    require_name: bool
+
+
+@router.get("", response_model=list[ArtifactShareSummary])
+async def list_artifact_shares(
+    request: Request, quiz_id: uuid.UUID, limit: int = Query(50, ge=1, le=200),
+    user: UserContext = Depends(get_user_context),
+):
+    """Owner-only management metadata; never expose grading keys or payload.
+
+    Listing/revoking remains available when source rights prohibit publishing.
+    """
+    db = getattr(request.app.state, "database", None)
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    rows = await db.fetch(
+        """
+        SELECT id AS share_id, share_code, is_active, created_at, expires_at,
+               revoked_at, require_name,
+               (expires_at IS NOT NULL AND expires_at <= NOW()) AS expired
+          FROM assistant.artifact_shares
+         WHERE tenant_id = $1 AND created_by = $2 AND kind = 'quiz'
+           AND payload ->> 'quiz_id' = $3
+         ORDER BY created_at DESC, id DESC LIMIT $4
+        """,
+        user.tenant_id, user.user_id, str(quiz_id), limit,
+    )
+    return [dict(row) for row in rows]
 
 
 @router.post("", response_model=ArtifactShareCreateResponse)

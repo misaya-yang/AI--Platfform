@@ -1,0 +1,8 @@
+
+Running 1 test using 1 worker
+
+(node:6312) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [chromium] › e2e/r1-sharing.spec.ts:109:1 › controlled expired dedicated share gives English and Chinese next-step guidance (1.2s)
+
+  1 passed (2.3s)

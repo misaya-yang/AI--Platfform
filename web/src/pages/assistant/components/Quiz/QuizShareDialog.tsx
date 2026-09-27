@@ -1,168 +1,113 @@
-/**
- * QuizShareDialog — Generate and copy a shareable quiz link.
- */
-
-import { useCallback, useState } from "react";
+/** Owner management of public Quiz links; public answers remain server-side. */
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, Copy, Link2, Loader2, X } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { createQuizShare, type ShareQuizResponse } from "@/api/quiz";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { createQuizShare, getQuiz, listQuizShares, revokeQuizShare, type ShareQuizResponse, type QuizShareSummary } from "@/api/quiz";
+import type { QuizData } from "../../types";
 
-interface QuizShareDialogProps {
-  quizId: string;
-  open: boolean;
-  onClose: () => void;
-}
+interface QuizShareDialogProps { quizId: string; open: boolean; onClose: () => void }
 
 export function QuizShareDialog({ quizId, open, onClose }: QuizShareDialogProps) {
   const { t } = useTranslation();
+  const returnFocus = useRef<HTMLElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [share, setShare] = useState<ShareQuizResponse | null>(null);
+  const [shares, setShares] = useState<QuizShareSummary[]>([]);
+  const [preview, setPreview] = useState<QuizData | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [requireName, setRequireName] = useState(true);
+  const [expiresDays, setExpiresDays] = useState(7);
+  const [revoking, setRevoking] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setPreview(null); setShare(null); setCopied(false); setError(""); setShares([]);
+    void getQuiz(quizId).then((value) => { if (!cancelled) setPreview(value); })
+      .catch(() => { if (!cancelled) setError(t("assistant.sharePreviewUnavailable")); });
+    void listQuizShares(quizId).then((value) => { if (!cancelled) setShares(value); })
+      .catch(() => { if (!cancelled) setError(t("assistant.quiz.shareListFailed")); });
+    return () => { cancelled = true; };
+  }, [quizId, open, t]);
 
   const handleGenerate = useCallback(async () => {
-    setLoading(true);
-    setError("");
+    if (loading || !preview) return;
+    setLoading(true); setError("");
     try {
       const result = await createQuizShare(quizId, {
         require_name: requireName,
+        ...(expiresDays ? { expires_hours: expiresDays * 24 } : {}),
       });
       setShare(result);
-    } catch (err) {
-      setError("Failed to generate share link");
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [quizId, requireName]);
+      setShares(await listQuizShares(quizId));
+    } catch { setError(t("assistant.shareFailed")); }
+    finally { setLoading(false); }
+  }, [quizId, requireName, expiresDays, loading, preview, t]);
 
-  const handleCopy = useCallback(() => {
+  const handleRevoke = async (id: string) => {
+    if (revoking) return;
+    setRevoking(id); setError("");
+    try {
+      await revokeQuizShare(id);
+      setShares((current) => current.map((item) => item.share_id === id ? { ...item, is_active: false } : item));
+      if (share?.share_id === id) setShare(null);
+    } catch { setError(t("assistant.shareRevokeFailed")); }
+    finally { setRevoking(null); }
+  };
+
+  const handleCopy = async () => {
     if (!share) return;
-    const url = `${window.location.origin}/quiz/${share.share_code}`;
-    navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }, [share]);
-
-  if (!open) return null;
+    try { await navigator.clipboard.writeText(`${window.location.origin}/quiz/${share.share_code}`); setCopied(true); }
+    catch { setError(t("assistant.quiz.copyFailed")); }
+  };
 
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs"
-        onClick={onClose}
-      >
-        <motion.div
-          initial={{ scale: 0.95, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.95, opacity: 0 }}
-          onClick={(e) => e.stopPropagation()}
-          className="bg-card border border-border rounded-2xl shadow-xl w-full max-w-md mx-4 overflow-hidden"
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <div className="flex items-center gap-2">
-              <Link2 className="w-4 h-4 text-primary" />
-              <h3 className="text-sm font-semibold text-foreground">
-                {t("assistant.quiz.shareQuiz", "Share Quiz")}
-              </h3>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1 rounded-lg hover:bg-muted transition-colors"
-            >
-              <X className="w-4 h-4 text-muted-foreground" />
-            </button>
-          </div>
-
-          <div className="p-5 space-y-4">
-            {!share ? (
-              <>
-                {/* Options */}
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={requireName}
-                    onChange={(e) => setRequireName(e.target.checked)}
-                    className="rounded border-border"
-                  />
-                  <span className="text-sm text-foreground">
-                    {t("assistant.quiz.requireName", "Require name before taking")}
-                  </span>
-                </label>
-
-                {error && (
-                  <p className="text-xs text-red-500">{error}</p>
-                )}
-
-                <Button
-                  onClick={handleGenerate}
-                  disabled={loading}
-                  className="w-full gap-2"
-                >
-                  {loading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Link2 className="w-4 h-4" />
-                  )}
-                  {t("assistant.quiz.generateLink", "Generate Share Link")}
-                </Button>
-              </>
-            ) : (
-              <>
-                {/* Share link generated */}
-                <div className="rounded-xl bg-muted/50 border border-border p-3">
-                  <p className="text-xs text-muted-foreground mb-1">{t("assistant.quiz.publicShareLink")}</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 text-sm text-foreground truncate">
-                      {window.location.origin}/quiz/{share.share_code}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      className="shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
-                    >
-                      {copied ? (
-                        <Check className="w-4 h-4 text-emerald-500" />
-                      ) : (
-                        <Copy className="w-4 h-4 text-muted-foreground" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                <p className="text-xs text-muted-foreground">
-                  {t(share.require_name
-                    ? "assistant.quiz.publicAnyoneName"
-                    : "assistant.quiz.publicAnyone")}
-                </p>
-
-                <Button onClick={handleCopy} className="w-full gap-2" variant="outline">
-                  {copied ? (
-                    <>
-                      <Check className="w-4 h-4" />
-                      {t("assistant.quiz.copied", "Copied!")}
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4" />
-                      {t("assistant.quiz.copyLink", "Copy Link")}
-                    </>
-                  )}
-                </Button>
-              </>
-            )}
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
+    <Dialog open={open} onOpenChange={(value) => { if (!value) onClose(); }}>
+      <DialogContent showCloseButton={false} className="max-w-md max-h-[90dvh] gap-0 p-0 sm:p-0 rounded-2xl"
+        onOpenAutoFocus={() => { returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }}
+        onCloseAutoFocus={(event) => { event.preventDefault(); returnFocus.current?.focus(); }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <div className="flex items-center gap-2"><Link2 className="w-4 h-4 text-primary" /><DialogTitle className="text-sm">{t("assistant.quiz.shareQuiz")}</DialogTitle></div>
+          <button type="button" onClick={onClose} className="p-1 rounded-lg hover:bg-muted" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          <DialogDescription>{t("assistant.shareVisitorPreview")}</DialogDescription>
+          {!share ? <>
+            {preview ? <div className="max-h-40 overflow-y-auto rounded-xl border p-3 space-y-2" aria-label={t("assistant.quiz.questionPreview")}>
+              <p className="text-sm font-medium">{preview.title} · {preview.question_count}</p>
+              {preview.questions.map((question) => <div key={question.id} className="text-xs break-words">
+                <p>{question.question_num}. {question.question_text}</p>
+                {question.options.map((option) => <p key={option.label}>{option.label}. {option.text}</p>)}
+              </div>)}
+            </div> : <p role="status">{t("assistant.shareChecking")}</p>}
+            <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={requireName} onChange={(event) => setRequireName(event.target.checked)} />{t("assistant.quiz.requireName")}</label>
+            <label className="flex items-center justify-between gap-2 text-sm">{t("assistant.shareExpiry")}
+              <select aria-label={t("assistant.shareExpiry")} value={expiresDays} onChange={(event) => setExpiresDays(Number(event.target.value))} className="rounded-md bg-background border px-2 py-1">
+                <option value={7}>{t("assistant.shareSevenDays")}</option><option value={30}>{t("assistant.shareThirtyDays")}</option><option value={0}>{t("assistant.shareNever")}</option>
+              </select>
+            </label>
+            <Button onClick={() => void handleGenerate()} disabled={loading || !preview} className="w-full gap-2">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2 className="w-4 h-4" />}{t("assistant.quiz.generateLink")}</Button>
+          </> : <>
+            <p className="text-xs">{t(share.require_name ? "assistant.quiz.publicAnyoneName" : "assistant.quiz.publicAnyone")}</p>
+            <a href={`/quiz/${share.share_code}`} target="_blank" rel="noreferrer" className="block text-sm break-all underline">{window.location.origin}/quiz/{share.share_code}</a>
+            <p className="text-xs">{t("assistant.shareExpiry")}: {share.expires_at ? new Date(share.expires_at).toLocaleString() : t("assistant.shareNever")}</p>
+            <Button onClick={() => void handleCopy()} variant="outline" className="w-full gap-2">{copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}{t(copied ? "assistant.quiz.copied" : "assistant.quiz.copyLink")}</Button>
+          </>}
+          {error && <p role="alert" className="text-xs text-red-500">{error}</p>}
+          {shares.length > 0 && <section aria-label={t("assistant.activeShareLinks")} className="border-t pt-3 space-y-2">
+            <h4 className="text-xs font-medium">{t("assistant.activeShareLinks")}</h4>
+            {shares.map((item) => <div key={item.share_id} className="flex items-center gap-2 text-xs">
+              <a href={`/quiz/${item.share_code}`} target="_blank" rel="noreferrer" className="min-w-0 truncate underline">{item.share_code}</a>
+              <span>{t(!item.is_active ? "assistant.shareRevoked" : item.expired ? "assistant.quiz.linkExpired" : "assistant.quiz.linkActive")}</span>
+              {item.is_active && <Button variant="ghost" size="sm" className="ml-auto" disabled={revoking !== null} onClick={() => void handleRevoke(item.share_id)}>{t("assistant.revokeShare")}</Button>}
+            </div>)}
+          </section>}
+          <p className="text-xs text-muted-foreground">{t("assistant.shareRevocationLimit")}</p>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

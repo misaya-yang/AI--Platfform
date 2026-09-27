@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -54,7 +55,9 @@ def _upload_name(ref: str, user: UserContext) -> str:
     return name
 
 
-async def _user_upload_bytes(ref: str, name: str, user: UserContext) -> bytes:
+async def _user_upload_bytes(
+    ref: str, name: str, user: UserContext, *, metadata: dict[str, str] | None = None,
+) -> bytes:
     try:
         storage = get_file_storage()
     except RuntimeError:
@@ -66,6 +69,7 @@ async def _user_upload_bytes(ref: str, name: str, user: UserContext) -> bytes:
         # The key is constructed only after the exact owner prefix and
         # filename grammar above have been checked.
         key = ref.removeprefix("/")
+        local_metadata_path: Path | None = None
         try:
             content = await storage.download_file(key)
         except FileNotFoundError:
@@ -79,6 +83,9 @@ async def _user_upload_bytes(ref: str, name: str, user: UserContext) -> bytes:
             path = (root / key).resolve()
             if path.is_relative_to(root) and path.is_file() and path.stat().st_size <= _MAX_BYTES:
                 content = await asyncio.to_thread(path.read_bytes)
+                candidate = path.with_suffix(path.suffix + ".meta").resolve()
+                if candidate.is_relative_to(root):
+                    local_metadata_path = candidate
             else:
                 legacy_root = get_user_uploads_path(user.user_id, user.tenant_id).resolve()
                 path = (legacy_root / name).resolve()
@@ -89,6 +96,28 @@ async def _user_upload_bytes(ref: str, name: str, user: UserContext) -> bytes:
                 ):
                     raise FileNotFoundError from None
                 content = await asyncio.to_thread(path.read_bytes)
+                candidate = path.with_suffix(path.suffix + ".meta").resolve()
+                if candidate.is_relative_to(legacy_root):
+                    local_metadata_path = candidate
+        if metadata is not None:
+            # Preserve upload display metadata once at binding, never HEAD on history.
+            # Metadata failure must not turn valid bytes into an unavailable upload.
+            try:
+                original: object = None
+                if local_metadata_path is not None and local_metadata_path.is_file() and local_metadata_path.stat().st_size <= 65536:
+                    value = json.loads(await asyncio.to_thread(local_metadata_path.read_text))
+                    if isinstance(value, dict):
+                        original = value.get("original_filename")
+                elif getattr(storage, "_backend", None) is not None:
+                    info = await storage._backend.head(key)
+                    if info is not None:
+                        original = info.metadata.get("original_filename")
+                if (isinstance(original, str) and 0 < len(original) <= 255
+                    and "/" not in original and "\\" not in original
+                    and original not in {".", ".."} and not any(ord(char) < 32 or ord(char) == 127 for char in original)):
+                    metadata["original_filename"] = original
+            except Exception:  # optional display metadata; validated bytes remain usable
+                pass
     except Exception as exc:
         logger.warning(
             "Assistant attachment rejected stage=storage_read error_type=%s ref_sha256=%s",
@@ -146,7 +175,8 @@ async def bind_assistant_attachment_refs(
             if is_image and not vision_checked:
                 await _require_vision_model(request, user, model_id)
                 vision_checked = True
-            content = await _user_upload_bytes(ref, name, user)
+            upload_metadata: dict[str, str] = {}
+            content = await _user_upload_bytes(ref, name, user, metadata=upload_metadata)
             content_hash = hashlib.sha256(content).hexdigest()
             identity = f"{user.tenant_id}:{user.user_id}:{session_id}:{ref}:{content_hash}"
             artifact_id = f"art_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
@@ -155,7 +185,7 @@ async def bind_assistant_attachment_refs(
                     session_id=session_id, tenant_id=user.tenant_id, user_id=user.user_id,
                     type="image" if is_image else "file", format=fmt,
                     title=name, filename=name, content=content, source="user",
-                    metadata={"content_sha256": content_hash, "upload_ref": ref},
+                    metadata={"content_sha256": content_hash, "upload_ref": ref, **upload_metadata},
                     artifact_id=artifact_id,
                 )
             except Exception:

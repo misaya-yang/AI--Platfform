@@ -322,7 +322,12 @@
       "viewHistory": "查看历史",
       "wrongCountChip": "错题",
       "wrongCountSep": "：",
-      "wrongDetail": "答错（你：{{user}}，答案：{{correct}}）"
+      "wrongDetail": "答错（你：{{user}}，答案：{{correct}}）",
+      "shareListFailed": "无法加载分享列表，请重新打开重试。",
+      "copyFailed": "复制失败，请选中链接手动复制。",
+      "questionPreview": "访客题目预览（不含答案）",
+      "linkExpired": "已过期",
+      "linkActive": "有效"
     },
     "ragChunksUsed": "使用了 {{used}}/{{total}} 个片段",
     "ragCitations": "引用",
@@ -485,7 +490,13 @@
       "currentRun": "本轮产物",
       "sessionArtifacts": "会话产物"
     },
-    "yesterday": "昨天"
+    "yesterday": "昨天",
+    "sharedFiles": "共享文件",
+    "sharedLinkUnavailable": "此链接已撤销或不存在",
+    "sharedLinkExpired": "此链接已过期或来源权限需要重新核验",
+    "sharedLinkLoadFailed": "无法加载此共享会话",
+    "sharedLinkLoading": "正在加载共享会话…",
+    "sharedLinkNextStep": "如仍需访问，请联系所有者获取新链接。"
   },
   "common": {
     "actions": "操作",

@@ -88,6 +88,26 @@ export async function createQuizShare(
   return result;
 }
 
+export interface QuizShareSummary {
+  share_id: string;
+  share_code: string;
+  is_active: boolean;
+  expired: boolean;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  require_name: boolean;
+}
+
+export async function listQuizShares(quizId: string): Promise<QuizShareSummary[]> {
+  const { data } = await api.get<QuizShareSummary[]>("/api/v1/artifact-shares", { params: { quiz_id: quizId, limit: 200 } });
+  return data;
+}
+
+export async function revokeQuizShare(shareId: string): Promise<void> {
+  await api.delete(`/api/v1/artifact-shares/${encodeURIComponent(shareId)}`);
+}
+
 export interface QuizAttemptSummary {
   attempt_id: string;
   user_id: string | null;

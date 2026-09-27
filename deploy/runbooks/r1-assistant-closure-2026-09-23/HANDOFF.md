@@ -53,3 +53,9 @@ Fixed immutable-ceiling read incorrectly checking terminal run's expired write f
 Python89, Node14, Docker Rust160 (2 optional PG ignored), source18, OpenAPI2, E2E2 and affected gates passed. Independent read-only review PASS after pending-terminal fix, no blocker/high. Reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md and receipts/R1-RP02.yml own evidence. IAB viewport reset, preserved final original session.
 
 Full R1 is not RELEASE_100: image CDN Fake-IP remains an external DNS prerequisite; vision/activity1000/extra sharing and PDF failure combinations remain unverified. No shared host network/security guard changes and no paid image replay. This increment stops; do not infer permission for further expansion or push.
+
+## 2026-09-27 R1-RP03 bounded closure
+
+Latest user authorizes prompt closure and local main integration, superseding this batch's earlier no-Git-mutation record; no push/delete. Base2a5b7d74, branch codex/r1-remaining-flow-acceptance. Selected-upload cold history, Send double-click guard, frozen-share PDF fallback/dedupe, original Dialog focus/ESC, Quiz owner list/expiry/revoke/preview, public narrow wrapping and localized expiry guidance are verified. Python83/Node8, real sharing E2E2, controlled activity E2E2 and real-HTTP controlled expiry locale E2E1; Docker3 source/184 index-JS+5 CSS identity and health pass. Independent final review PASS. No new Rust work, paid image replay, network mutation or accounts.
+
+DR01 and RP01/RP02 accepted evidence retained. Full R1 is incomplete: current CDN still Fake-IP and unverified required UI journeys are listed precisely in reports/product/r1-remaining-flows-2026-09-27.md. Do not reinterpret prior user integration authorization as push permission or full-release acceptance. Evidence/receipt owns actual Git integration facts; no automatic unknown action replay.

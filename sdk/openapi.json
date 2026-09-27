@@ -16943,6 +16943,64 @@
             }
           }
         }
+      },
+      "get": {
+        "tags": [
+          "artifact-shares"
+        ],
+        "summary": "List Artifact Shares",
+        "description": "Owner-only management metadata; never expose grading keys or payload.\n\nListing/revoking remains available when source rights prohibit publishing.",
+        "operationId": "list_artifact_shares_api_v1_artifact_shares_get",
+        "parameters": [
+          {
+            "name": "quiz_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Quiz Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArtifactShareSummary"
+                  },
+                  "title": "Response List Artifact Shares Api V1 Artifact Shares Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/artifact-shares/{share_id}": {
@@ -45180,6 +45238,72 @@
         ],
         "title": "TimeSeriesResponse",
         "description": "时间序列响应"
+      },
+      "ArtifactShareSummary": {
+        "properties": {
+          "share_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Share Id"
+          },
+          "share_code": {
+            "type": "string",
+            "title": "Share Code"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "expired": {
+            "type": "boolean",
+            "title": "Expired"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "require_name": {
+            "type": "boolean",
+            "title": "Require Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "share_id",
+          "share_code",
+          "is_active",
+          "expired",
+          "created_at",
+          "expires_at",
+          "revoked_at",
+          "require_name"
+        ],
+        "title": "ArtifactShareSummary"
       }
     }
   },

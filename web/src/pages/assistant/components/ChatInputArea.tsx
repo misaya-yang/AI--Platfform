@@ -380,7 +380,11 @@ export function ChatInputArea({
                 type="button"
                 size="icon"
                 className="h-9 w-9 shrink-0 rounded-md bg-[hsl(var(--destructive))]/90 hover:bg-[hsl(var(--destructive))] text-white transition-colors duration-150"
-                onClick={onStop}
+                onClick={(event) => {
+                  // The second click of Send can land on this replacement
+                  // button. It must not cancel the newly admitted turn.
+                  if (event.detail <= 1) onStop();
+                }}
                 aria-label={t("assistant.stopGenerating", "Stop generating")}
                 aria-keyshortcuts="Escape"
               >

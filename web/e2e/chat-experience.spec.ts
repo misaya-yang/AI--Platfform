@@ -31,6 +31,139 @@ const MOCK_PLAYGROUND_THREAD_ID = "e2e-mock-thread";
 const MOCK_PLAYGROUND_TOOL_ID = "pg-tool-1";
 const LAST_MODEL_STORAGE_KEY = "assistant.lastModelId.v1";
 
+// Controlled activity input, not a real provider/Worker throughput claim.
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  test(`R1 controlled 1000 activity events remain unique, scrollable and stoppable at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await seedClientPrefs(page, { locale: "en-US" });
+    await installClientAuth(page, {
+      user_id: "e2e-r1-activity-sample", email: "r1-activity@example.com", display_name: "R1 activity sample",
+    });
+    let starts = 0;
+    let interrupts = 0;
+    await installAssistantHarness(page, async route => {
+      await route.fulfill({ status: 500, body: "controlled stream override missing" });
+    });
+    await page.route("**/api/v2/agent/threads/*/turns", async route => {
+      starts += 1;
+      await route.fulfill(jsonResponse({ turn: {
+        id: "e2e-turn", events_url: "/api/v2/agent/threads/e2e-runtime-thread/events?turn_id=e2e-turn",
+      } }));
+    });
+    await page.route("**/api/v2/agent/threads/*/turns/*", async route => {
+      if (route.request().url().includes(":interrupt")) interrupts += 1;
+      await route.fulfill(jsonResponse({ status: "accepted" }));
+    });
+    const frames: Array<{ event_type: string; data: unknown }> = [
+      { event_type: "run_started", data: { run_id: "11111111-1111-4111-8111-111111111111", thread_id: "e2e-runtime-thread", timestamp: Date.now() } },
+      { event_type: "text_delta", data: Array.from({ length: 150 }, (_, i) => `R1 history paragraph ${i + 1}.\n\n`).join("") },
+    ];
+    for (let i = 1; i <= 100; i++) {
+      const id = `r1-sample-${String(i).padStart(3, "0")}`;
+      const name = `r1_sample_${String(i).padStart(3, "0")}`;
+      frames.push({ event_type: "tool_call_start", data: { tool_call_id: id, tool_name: name, arguments: {}, timestamp: Date.now() } });
+      for (let j = 1; j <= (i === 100 ? 7 : 8); j++) {
+        frames.push({ event_type: "queue_state", data: { tool_id: id, state: `sample-${i}-q${j}` } });
+      }
+      if (i !== 100) frames.push({ event_type: "tool_call_result", data: { tool_call_id: id, tool_name: name, status: "succeeded", success: true, result: { summary: `R1 result ${i}` }, timestamp: Date.now() } });
+    }
+    expect(frames).toHaveLength(1000);
+    await page.addInitScript(({ frames }) => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { r1ReleaseActivity?: () => void; r1ActivityFrames?: number };
+      let opened = false;
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+        if (!url.includes("/api/v2/agent/threads/") || !url.includes("/events")) return nativeFetch(input, init);
+        if (opened) throw new Error("controlled cursor must not reconnect before Stop");
+        opened = true;
+        const encoder = new TextEncoder();
+        let closed = false;
+        return new Response(new ReadableStream({
+          start(controller) {
+            const emit = (from: number, to: number) => {
+              if (closed) return;
+              for (let index = from; index < to; index++) {
+                const sequence = index + 1;
+                const event = frames[index];
+                const envelope = {
+                  schema_version: "agent-event/v2", thread_id: "e2e-runtime-thread", sequence,
+                  event: { id: `evt-${sequence}`, key: `evt-${sequence}`, type: event.event_type, item_id: null, turn_id: "e2e-turn", status: null, payload: event },
+                  timestamp: new Date().toISOString(),
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope)}\n\n`));
+              }
+              state.r1ActivityFrames = to;
+            };
+            emit(0, 500);
+            state.r1ReleaseActivity = () => { emit(500, 1000); state.r1ReleaseActivity = undefined; };
+            init?.signal?.addEventListener("abort", () => {
+              if (!closed) { closed = true; controller.close(); }
+            }, { once: true });
+          },
+          cancel() { closed = true; },
+        }), { headers: { "content-type": "text/event-stream" } });
+      };
+    }, { frames });
+    await ensureAuthenticatedPage(page, "/assistant");
+    const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+    await composer.fill("R1 controlled activity1000; no real provider or tool execution");
+    if (viewport.width === 1280) await page.getByRole("button", { name: "Send", exact: true }).dblclick();
+    else await composer.press("Enter");
+    const log = page.getByRole("log", { name: "Assistant conversation log" });
+    await expect(log.getByText("R1 history paragraph 150.", { exact: true })).toBeVisible();
+    const openActivity = () => log.getByRole("button", { name: /Activity|Thinking/ }).last().click();
+    await openActivity();
+    const rows = page.locator(".act-scroll .act-step-new").filter({ hasText: /r1_sample_/ });
+    await expect(rows).toHaveCount(50);
+    await expect(rows.last()).toContainText("Queue: sample-50-q7");
+    if (viewport.width === 390) await page.getByRole("button", { name: "Close", exact: true }).click();
+    await log.getByText("R1 history paragraph 150.", { exact: true }).click();
+    const mainScroll = page.locator(".assistant-v2 .overflow-y-auto").filter({ has: log }).first();
+    const beforeWheel = await mainScroll.evaluate(el => el.scrollTop);
+    const mainBox = await mainScroll.boundingBox();
+    expect(mainBox).toBeTruthy();
+    await page.mouse.move(mainBox!.x + mainBox!.width / 2, mainBox!.y + mainBox!.height / 2);
+    await page.mouse.wheel(0, -900);
+    await expect.poll(() => mainScroll.evaluate(el => el.scrollTop)).toBeLessThan(beforeWheel - 200);
+    if (viewport.width === 390) await openActivity();
+    const activityScroll = page.locator(".act-scroll");
+    await testInfo.attach("r1-activity-initial-geometry.json", { body: Buffer.from(JSON.stringify(await activityScroll.evaluate(el => ({ height: el.clientHeight, content: el.scrollHeight, box: el.getBoundingClientRect().toJSON() })))), contentType: "application/json" });
+    // Wait for the existing opening animation before targeting the wheel.
+    await expect.poll(() => activityScroll.evaluate(el => {
+      const box = el.getBoundingClientRect();
+      return box.top >= 0 && box.bottom <= window.innerHeight + 1;
+    })).toBe(true);
+    const activityBox = await activityScroll.boundingBox();
+    expect(activityBox).toBeTruthy();
+    await page.mouse.move(activityBox!.x + activityBox!.width / 2, activityBox!.y + activityBox!.height / 2);
+    await page.mouse.wheel(0, 600);
+    await expect.poll(() => activityScroll.evaluate(el => el.scrollTop)).toBeGreaterThan(200);
+    const mainPosition = await mainScroll.evaluate(el => el.scrollTop);
+    const activityPosition = await activityScroll.evaluate(el => el.scrollTop);
+    await page.evaluate(() => (window as typeof window & { r1ReleaseActivity?: () => void }).r1ReleaseActivity?.());
+    await expect(rows).toHaveCount(100);
+    await expect(rows.last()).toContainText("Queue: sample-100-q7");
+    for (let i = 1; i <= 100; i++) await expect(activityScroll.getByText(`r1_sample_${String(i).padStart(3, "0")}`, { exact: true })).toHaveCount(1);
+    await expect(activityScroll.locator(".act-running-dot")).toHaveCount(1);
+    expect(Math.abs(await mainScroll.evaluate(el => el.scrollTop) - mainPosition)).toBeLessThanOrEqual(2);
+    expect(Math.abs(await activityScroll.evaluate(el => el.scrollTop) - activityPosition)).toBeLessThanOrEqual(2);
+    if (viewport.width === 390) await page.getByRole("button", { name: "Close", exact: true }).click();
+    const stop = page.getByRole("button", { name: "Stop generating", exact: true });
+    if (viewport.width === 390) await stop.click();
+    else await stop.press("Enter");
+    await expect.poll(() => interrupts, { timeout: 15000 }).toBe(1);
+    await expect(page.getByRole("button", { name: "Stop generating", exact: true })).toBeHidden();
+    if (viewport.width === 390) await openActivity();
+    await expect(page.getByText(/^cancelled ·/)).toBeVisible();
+    await expect(activityScroll.locator(".act-running-dot")).toHaveCount(0);
+    await expect(rows.last()).toContainText("Result unknown");
+    expect(starts).toBe(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+    await testInfo.attach("r1-activity1000-facts.json", { body: Buffer.from(JSON.stringify({ controlled: true, viewport, frames: 1000, unique_tool_rows: 100, starts, interrupts, mainPosition, activityPosition })), contentType: "application/json" });
+  });
+}
+
 const translateDefault = (
   key: string,
   options?: Record<string, unknown>

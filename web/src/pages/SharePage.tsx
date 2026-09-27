@@ -11,6 +11,8 @@
  * an embedded <QuizCard scope="share"> carries the only gold moments.
  */
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { placeSharedArtifacts } from "@/pages/assistant/sharedArtifacts";
 import { useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -60,6 +62,7 @@ interface ConversationShareData {
 // ── Component ────────────────────────────────────────────────────────
 
 export function SharePage() {
+  const { t } = useTranslation();
   const { shareId } = useParams<{ shareId: string }>();
   const [convShare, setConvShare] = useState<ConversationShareData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +70,7 @@ export function SharePage() {
 
   useEffect(() => {
     if (!shareId) {
-      setError("Conversation link is invalid");
+      setError(t("assistant.sharedLinkUnavailable"));
       setLoading(false);
       return;
     }
@@ -81,10 +84,10 @@ export function SharePage() {
         if (!resp.ok) {
           throw new Error(
             resp.status === 404
-              ? "This share link was revoked or was not found"
+              ? t("assistant.sharedLinkUnavailable")
               : resp.status === 410
-                ? "This share link expired or needs the owner to review its source rights"
-              : "Failed to load shared conversation",
+                ? t("assistant.sharedLinkExpired")
+              : t("assistant.sharedLinkLoadFailed"),
           );
         }
         const data = (await resp.json()) as ConversationShareData;
@@ -95,7 +98,7 @@ export function SharePage() {
         setError(
           loadError instanceof Error
             ? loadError.message
-            : "Failed to load shared conversation",
+            : t("assistant.sharedLinkLoadFailed"),
         );
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -104,14 +107,14 @@ export function SharePage() {
 
     void loadShare();
     return () => controller.abort();
-  }, [shareId]);
+  }, [shareId, t]);
 
   if (loading) {
     return (
       <div className="assistant-v2 flex min-h-dvh items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
         <div className="flex items-center gap-3 text-[13px] text-[hsl(var(--assistant-text-secondary))]" role="status">
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-[hsl(var(--assistant-border))] border-t-[hsl(var(--assistant-accent))]" aria-hidden="true" />
-          <span>Loading shared conversation…</span>
+          <span>{t("assistant.sharedLinkLoading")}</span>
         </div>
       </div>
     );
@@ -122,10 +125,10 @@ export function SharePage() {
       <div className="assistant-v2 flex min-h-dvh items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
         <div className="max-w-md space-y-3 px-6 text-center" role="alert">
           <h1 className="text-[18px] font-semibold text-[hsl(var(--assistant-text-primary))]">
-            {error || "Conversation not found"}
+            {error || t("assistant.sharedLinkUnavailable")}
           </h1>
           <p className="text-[13px] text-[hsl(var(--assistant-text-secondary))]">
-            Ask the owner for a new link if you still need access.
+            {t("assistant.sharedLinkNextStep")}
           </p>
         </div>
       </div>
@@ -136,13 +139,7 @@ export function SharePage() {
 
   if (convShare) {
     const { snapshot, title, artifact_count, view_count, created_at } = convShare;
-    const artifactMap = new Map(snapshot.artifacts.map((a) => [a.artifact_id, a]));
-
-    // Find artifact_ids per message from metadata
-    const getMessageArtifacts = (msg: ShareMessage): ShareArtifact[] => {
-      const ids = (msg.metadata?.artifact_ids as string[]) || [];
-      return ids.map((id) => artifactMap.get(id)).filter(Boolean) as ShareArtifact[];
-    };
+    const placement = placeSharedArtifacts(snapshot.artifacts, snapshot.messages);
 
     return (
       <div className="assistant-v2 min-h-dvh bg-[hsl(var(--assistant-canvas-bg))] text-[hsl(var(--assistant-text-primary))]">
@@ -189,7 +186,7 @@ export function SharePage() {
         {/* Messages */}
         <div className="max-w-3xl mx-auto px-4 py-4 space-y-5">
           {snapshot.messages.map((msg, i) => {
-            const msgArtifacts = msg.role === "assistant" ? getMessageArtifacts(msg) : [];
+            const msgArtifacts = placement.byMessage[i];
             const isUser = msg.role === "user";
             return (
               <div
@@ -217,7 +214,7 @@ export function SharePage() {
                       {msg.content}
                     </div>
                   ) : (
-                    <div className="assistant-copy text-[14px] leading-relaxed prose prose-sm max-w-none">
+                    <div className="assistant-copy text-[14px] leading-relaxed prose prose-sm max-w-none [overflow-wrap:anywhere] [&_code]:[overflow-wrap:anywhere] [&_pre]:max-w-full [&_pre]:overflow-x-auto">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                     </div>
                   )}
@@ -250,6 +247,14 @@ export function SharePage() {
           })}
         </div>
 
+        {placement.remaining.length > 0 && (
+          <section className="max-w-3xl mx-auto px-4 space-y-2" aria-label={t("assistant.sharedFiles")}>
+            <h2 className="text-sm font-medium">{t("assistant.sharedFiles")}</h2>
+            {placement.remaining.map((artifact) => (
+              <ArtifactCard key={artifact.artifact_id} artifact={artifact} shareCode={convShare.share_code} />
+            ))}
+          </section>
+        )}
         {/* CTA + Footer */}
         <div className="max-w-3xl mx-auto px-4 py-6 flex justify-center">
           <a
@@ -280,6 +285,7 @@ export function SharePage() {
 // ── Inline Artifact Card ─────────────────────────────────────────────
 
 function ArtifactCard({ artifact, shareCode }: { artifact: ShareArtifact; shareCode: string }) {
+  const { t } = useTranslation();
   const downloadUrl = `/api/v1/assistant/shares/${shareCode}/artifact/${artifact.artifact_id}`;
   const isImage = artifact.type === "image" || artifact.mime_type?.startsWith("image/");
   const label = getFormatLabel(artifact.format, artifact.mime_type);
@@ -316,8 +322,8 @@ function ArtifactCard({ artifact, shareCode }: { artifact: ShareArtifact; shareC
           href={downloadUrl}
           download={artifact.filename}
           className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
-          title="Download"
-          aria-label="Download"
+          title={t("common.download")}
+          aria-label={t("common.download")}
         >
           <Download className="w-[14px] h-[14px]" />
         </a>
