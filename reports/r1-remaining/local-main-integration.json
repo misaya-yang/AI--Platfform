@@ -8,5 +8,6 @@
   "source_manifest_matches_merged_code": true,
   "push_performed": false,
   "branches_deleted": false,
-  "final_documentation_only_record_pending": true
+  "integration_record_commit": "e2d5ef2eb1d19f4f83b759fba95c731469d6dcf9",
+  "documentation_recorded": true
 }
