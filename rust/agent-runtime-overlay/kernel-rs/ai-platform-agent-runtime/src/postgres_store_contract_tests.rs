@@ -138,6 +138,27 @@ fn agent_thread_start_round_trips_through_postgres_store() {
         .await
         .expect("PostgreSQL history should be readable");
         assert!(!history.items.is_empty());
+        // A completed turn can leave an expired claim cached. Reading the
+        // immutable ceiling must not require that old owner's write fence.
+        let old_claim = crate::postgres_store::execution::ExecutionClaim {
+            run_id: Uuid::new_v4(),
+            thread_id: root_thread_id,
+            owner_id: Uuid::new_v4(),
+            fence: 1,
+            context: serde_json::json!({}),
+        };
+        store.execution_claims.lock().unwrap().insert(root_thread_id, old_claim);
+        store.resolve_tool_policy(root_thread_id, None).await
+            .expect("persisted ceiling remains readable with an obsolete claim");
+        // The early fixture has no execution-fence function: this rejects a
+        // write exactly where production rejects an expired owner. Do not
+        // remove or relax the write check to make the read pass.
+        let mut tx = pool.begin().await.expect("fence probe transaction");
+        assert!(store.check_execution_write(
+            &mut tx, Uuid::parse_str(&root_thread_id.to_string()).unwrap()
+        ).await.is_err());
+        tx.rollback().await.expect("rollback rejected write probe");
+        store.execution_claims.lock().unwrap().remove(&root_thread_id);
         let event_id = Uuid::now_v7();
         let v1_event = AssistantTurnEventV1 {
             schema_version: "assistant-turn-contract/v1".to_string(),

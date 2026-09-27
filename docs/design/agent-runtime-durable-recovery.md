@@ -115,3 +115,9 @@ duplicate stop repairs a missing receipt without advancing or replaying a run.
 Rust保留原run/turn/模型/lease与工具回执，Gateway在新轮、显式恢复与每个恢复模型请求前核验当前账号/来源权益。原线程含有前文知识时，本轮关闭知识库不移除Core上下文；累积来源从原owner的持久snapshot解析，权限复用KB可见目录。撤权或权限无法核验时拒绝推进，不重建run，不自动执行未知动作。
 
 历史、SSE、待审批预览、Quiz与认证下载使用同一来源规则。只读thread响应可携带restricted_source_run_ids，客户端轮询只遮蔽内容并保留公开终态；不是执行所有权或恢复引擎。匿名Quiz必须有可核验且无私有知识的原run来源，不能从dataset_ids为空推断可公开。证据见R1-RP01收据与2026-09-27收尾报告。
+
+## 2026-09-27 terminal-turn continuation correction
+
+A persisted thread tool ceiling is immutable. Reusing it during resume/cold startup is a read: check persistence health, member/root ownership and tombstones, and reject any requested expansion. It does not require the last terminal run's expired execution-owner fence. First ceiling binding still uses the original locked write transaction. Execution claims, sticky persistence errors, invocation admission and receipt-write fences are preserved; no expired lease is extended and no unknown action is replayed.
+
+The corrected path and original-thread followup acceptance are recorded in [R1-RP02](../../reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md). This does not enlarge the supported recovery boundary or replace the accepted DR-01 crash matrix.

@@ -311,7 +311,7 @@ class ImageGenerationProvider:
         if response.status_code != 200:
             return self._http_failure(response.status_code)
         output = response.json().get("output", {})
-        inline = output.get("images") or output.get("results")
+        inline = output.get("images") or output.get("results") or _dashscope_choice_images(output)
         if isinstance(inline, list) and inline:
             values = [
                 item.get("b64_json") or item.get("content_base64")
@@ -344,7 +344,7 @@ class ImageGenerationProvider:
             task_output = task_response.json().get("output", {})
             status = task_output.get("task_status")
             if status == "SUCCEEDED":
-                results = task_output.get("results") or task_output.get("images") or []
+                results = task_output.get("results") or task_output.get("images") or _dashscope_choice_images(task_output)
                 values = [
                     item.get("b64_json") or item.get("content_base64")
                     for item in results
@@ -512,6 +512,20 @@ class ImageGenerationProvider:
             blocked,
             outcome_unknown,
         )
+
+
+def _dashscope_choice_images(output: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Wan2.6 returns image URLs in choices, for sync and completed tasks."""
+    images: list[dict[str, str]] = []
+    choices = output.get("choices")
+    for choice in choices if isinstance(choices, list) else []:
+        message = choice.get("message") if isinstance(choice, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        for part in content if isinstance(content, list) else []:
+            url = part.get("image") if isinstance(part, Mapping) else None
+            if isinstance(url, str) and url:
+                images.append({"url": url})
+    return images[:_MAX_IMAGES]
 
 
 def _aspect_ratio(size: str) -> str:

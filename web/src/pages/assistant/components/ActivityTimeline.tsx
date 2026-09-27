@@ -72,9 +72,7 @@ export function ActivityTimeline({
               ? "running"
               : "completed";
         const isRunning = !!running && stepStatus === "running";
-        const isCompleted =
-          stepStatus === "completed" ||
-          (stepStatus === "running" && !isRunning);
+        const isCompleted = stepStatus === "completed";
         const isError = stepStatus === "error";
 
         return (

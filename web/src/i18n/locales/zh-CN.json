@@ -59,6 +59,7 @@
   "assistant": {
     "activity": {
       "approvalRequired": "需要审批",
+      "notExecuted": "未执行：待审批动作尚未获准。",
       "approvalChanged": "动作参数已变化或审批已过期。请重新核对当前请求后再批准。",
       "approvalDecisionFailed": "未能记录决定。请核对当前请求后再试。",
       "approvalDetailsUnavailable": "无法核验动作详情。",

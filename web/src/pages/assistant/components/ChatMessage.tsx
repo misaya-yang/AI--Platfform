@@ -38,6 +38,7 @@ import { ActivityPill } from "./ActivityPill";
 import { useRightPanel } from "./rightPanelContext";
 import { messageContainmentStyle } from "@/features/chat/messageRenderPerformance";
 import { assistantOutcome } from "../assistantOutcome";
+import { hasTerminalActivity } from "./activityTerminalState";
 import { downloadAssistantArtifact, openAssistantArtifact } from "@/lib/authenticatedDownload";
 import { toast } from "@/hooks/use-toast";
 
@@ -467,7 +468,7 @@ export const ChatMessage = memo(function ChatMessage({
             );
           })()}
 
-          {!isUser && onToolApproval && (
+          {!isUser && !hasTerminalActivity(message) && onToolApproval && (
             <Suspense fallback={null}>
               {(message.processSummary?.tools ?? [])
                 .filter((tool) => tool.status === "approval_required" && tool.approvalId)

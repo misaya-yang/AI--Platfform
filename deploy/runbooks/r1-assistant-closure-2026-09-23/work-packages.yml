@@ -25,6 +25,7 @@ packages:
       - web/src/api/agentThreads*
       - web/src/i18n/locales/**
       - deploy/agent-runtime-source/**
+    - docs/design/agent-runtime-durable-recovery.md
       - deploy/runbooks/r1-assistant-closure-2026-09-23/**
       - docs/design/agent-runtime-durable-recovery.md
       - docs/harness/architecture.md
@@ -126,3 +127,69 @@ packages:
     review: Independent read-only closure_review PASS after high/medium repairs; no remaining blocker/high.
     evidence: [reports/product/r1-remaining-acceptance-2026-09-27.md, reports/r1-remaining/independent-review.md, deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/R1-RP01.yml]
     stop_conditions: [Unknown write would be replayed, conflicting writer or Compose owner, unrelated scope expansion]
+  - id: R1-RP02
+    state: in_progress
+    result: Complete remaining R1 configured images/vision, PDF, long-task stop/resource
+      evidence, activity1000 and sharing/narrow flows without weakening DR01/RP01.
+    base_sha: 1107bd06082d214c29a61bb8f04e16df483c6fce
+    depends_on:
+    - DR-01:verified
+    - R1-RP01:verified
+    owned_paths:
+    - src/api/v1/**
+    - packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py
+    - packages/ai-gateway-core/tests/test_image_generation_provider.py
+    - src/services/images/**
+    - src/services/assistant_entry/**
+    - src/services/agent_runtime/**
+    - rust/agent-runtime-overlay/**
+    - deploy/agent-runtime-source/**
+    - docs/design/agent-runtime-durable-recovery.md
+    - web/src/components/artifacts/ArtifactsPanel.tsx
+    - web/src/pages/assistant/**
+    - web/src/api/**
+    - web/src/i18n/locales/**
+    - web/e2e/**
+    - tests/**
+    - docs/plans/product-feature-completion-2026-09-23/**
+    - deploy/runbooks/r1-assistant-closure-2026-09-23/**
+    - reports/product/r1-*.md
+    - reports/r1-artifacts/**
+    forbidden_paths:
+    - database/**
+    - apps/**
+    - billing/**
+    - sdk/src/**
+    integration_paths:
+    - src/main.py
+    must_preserve:
+    - Same original run and tool receipt reuse; unknown writes never replay
+    - RP01 current-source access across history/sharing/downloads
+    - Existing models/identity/permissions; no account creation or secret logging
+    - No new engine, dependency or architecture expansion; latest user permits necessary local commits and main integration; no push/delete
+    direct_gates:
+    - affected Python/Node tests and Ruff/TS/ESLint/i18n
+    - harness/architecture/source contracts as affected
+    integration_gates:
+    - real saved artifact content/identity/download checks
+    - worker task/result and process facts after stop
+    - sharing and repeated-operation rights checks
+    live_gates:
+    - current Docker identity and health
+    - IAB image/vision/PDF/stop/narrow flows
+    - controlled1000 event interaction distinctly labeled
+    - independent review and affected retest
+    skip_policy:
+      required: none
+      external_blockers: Configured provider failure must be diagnosed; report actual
+        unavailable prerequisite, continue independent flows.
+    rollback: Source-only compatible unless confirmed defect requires scoped Rust image;
+      no DB migration
+    review: Independent read-only reviewer after implementation/acceptance; repair blocker/high
+      and retest
+    evidence:
+    - reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md
+    stop_conditions:
+    - Unknown write would be replayed
+    - Conflicting writer/Compose owner
+    - Irrelevant scope or credential exposure

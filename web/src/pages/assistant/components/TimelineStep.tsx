@@ -55,7 +55,7 @@ export type TimelineStepData =
       body: string;
       sources?: TimelineSource[];
       durationMs?: number;
-      status: "running" | "completed" | "error";
+      status: "running" | "completed" | "error" | "unknown" | "not_executed";
       /** Original tool name — used for the monospace label (e.g. `web_search`). */
       toolName?: string;
       /** Original query / URL / path — rendered as a code block under the name. */

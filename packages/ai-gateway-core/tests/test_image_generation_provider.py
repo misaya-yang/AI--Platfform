@@ -200,3 +200,49 @@ async def test_owned_client_is_reused_and_closed():
     await provider.close()
     assert result.success is True
     assert requests == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('async_task', [False, True])
+async def test_wan26_choices_result_uses_guarded_image_download(monkeypatch, async_task):
+    from types import SimpleNamespace
+
+    from ai_gateway_core.media import image_generation as module
+
+    url = 'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/fixture.png'
+    output = {'choices': [{'message': {'content': [{'type': 'text', 'text': 'ignored'}, {'type': 'image', 'image': url}]}}]}
+    requests = []
+    downloads = []
+    async def handler(request):
+        requests.append(request.method)
+        if async_task and request.method == 'POST':
+            return httpx.Response(200, json={'output': {'task_id': 'original-task', 'task_status': 'PENDING'}})
+        return httpx.Response(200, json={'output': {**output, **({'task_status': 'SUCCEEDED'} if async_task else {})}})
+    async def fetch(image_url, **kwargs):
+        downloads.append(image_url)
+        assert kwargs['allowed_hosts'] == module._DEFAULT_RESULT_HOST_SUFFIXES
+        assert kwargs['max_redirects'] == 1 and kwargs['max_bytes'] == module._MAX_IMAGE_BYTES
+        return SimpleNamespace(content_type='image/png', body=b'\x89PNG\r\n\x1a\n')
+    monkeypatch.setattr(module, 'safe_fetch_with_response', fetch)
+    client = _client(handler)
+    provider = ImageGenerationProvider(ImageGenerationConfig('dashscope', 'fixture-key', 'https://dashscope.aliyuncs.com/api/v1', 'wan2.6-t2i'), client=client)
+    result = await provider.generate(prompt='fixture')
+    await client.aclose()
+    assert result.success and result.error_code is None
+    assert result.images[0]['mime_type'] == 'image/png' and result.images[0]['size_bytes'] == 8
+    assert requests == (['POST', 'GET'] if async_task else ['POST'])
+    assert downloads == [url]
+
+
+@pytest.mark.asyncio
+async def test_wan26_malformed_choices_remains_unknown_without_redispatch():
+    calls = []
+    async def handler(request):
+        calls.append(request.method)
+        return httpx.Response(200, json={'output': {'task_id': 'original-task', 'task_status': 'SUCCEEDED', 'choices': [None, {'message': {'content': [None, {'image': 12}]}}]}})
+    client = _client(handler)
+    provider = ImageGenerationProvider(ImageGenerationConfig('dashscope', 'fixture-key', 'https://dashscope.aliyuncs.com/api/v1', 'wan2.6-t2i'), client=client)
+    result = await provider.generate(prompt='fixture')
+    await client.aclose()
+    assert not result.success and result.outcome_unknown and result.error_code == 'no_image'
+    assert calls == ['POST', 'GET']

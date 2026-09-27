@@ -104,6 +104,7 @@ import {
 } from "@/features/chat/telemetry";
 import { loadDeadApprovalReconciliation } from "../deadApprovalReconciliation";
 import { redactRestrictedSourceMessages, redactSourceMessage } from "../sourceVisibility";
+import { cancelledReceiptFlags } from "../cancelledReceipt";
 import { getAgentRuntimeThread } from "@/api/agentThreads";
 
 function buildTextParts(messageId: string, content: string, createdAt: string) {
@@ -378,7 +379,8 @@ async function restoreLatestRun(
 const restoreMessageMetadata = (msg: any, index: number, sessionId: string): ChatMessageType => {
   const createdAt = msg.timestamp || new Date().toISOString();
   const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-  const messageId = `${sessionId}-${index}`;
+  const imageTurnId = nonEmptyString(msg.metadata?.image_turn_id);
+  const messageId = imageTurnId ? `${sessionId}-image-${imageTurnId}` : `${sessionId}-${index}`;
   const baseMessage: ChatMessageType = {
     id: messageId,
     role: msg.role as "user" | "assistant",
@@ -400,6 +402,10 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 
   // Restore assistant metadata
   if (msg.role === "assistant" && msg.metadata) {
+    baseMessage.imageTurnId = imageTurnId;
+    baseMessage.imageTaskId = nonEmptyString(msg.metadata.image_task_id);
+    baseMessage.isGeneratingImage = msg.metadata.image_generating === true;
+    baseMessage.imageGenerationPrompt = nonEmptyString(msg.metadata.image_generation_prompt);
     baseMessage.runtimeRunId = nonEmptyString(msg.metadata.runtime_run_id);
     baseMessage.sourceAccessRevoked = msg.metadata.source_access_revoked === true;
     // Initialize search status array
@@ -732,7 +738,7 @@ function finalizeProcessSummary(
     summary.totalDurationMs ??
     (summary.startedAt ? finishedAtMs - summary.startedAt : undefined);
 
-  if (summary.tools.some((tool) => tool.status === "approval_required")) {
+  if (finalStatus === "succeeded" && summary.tools.some((tool) => tool.status === "approval_required")) {
     return {
       ...summary,
       status: "blocked",
@@ -898,6 +904,39 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
   const sourceWatchThreadId = [...messages].reverse().find((m) => m.processSummary?.runtimeThreadId)?.processSummary?.runtimeThreadId;
   const hasKnowledgeHistory = messages.some((m) => Boolean(m.contexts?.length || m.sourceAccessRevoked));
+  const isRecoveringImage = messages.some((m) => m.imageTaskId && m.isGeneratingImage);
+  useEffect(() => {
+    if (!activeSessionId || !isRecoveringImage) return;
+    const sessionId = activeSessionId;
+    const restoreEpoch = restoreEpochRef.current;
+    let disposed = false;
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const [history, savedArtifacts] = await Promise.all([
+          getAssistantSessionHistory(sessionId, 200), getSessionArtifacts(sessionId),
+        ]);
+        if (disposed || restoreEpoch !== restoreEpochRef.current || activeSessionIdRef.current !== sessionId) return;
+        const restored = hydrateMessageArtifacts(
+          history.messages.map((m, index) => restoreMessageMetadata(m, index, sessionId)), savedArtifacts,
+        );
+        // This observer reads the existing image ledger. It never creates a
+        // Rust run or asks the image provider to repeat an earlier request.
+        setMessages((previous) => previous.map((message) => message.imageTaskId
+          ? restored.find((m) => m.imageTaskId === message.imageTaskId) ?? message : message));
+        setArtifacts(savedArtifacts.map(toArtifact));
+      } catch {
+        // Keep the last known status on read failure; no automatic retry of execution.
+      } finally {
+        checking = false;
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 2000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [activeSessionId, isRecoveringImage]);
   useEffect(() => {
     if (!activeSessionId || !sourceWatchThreadId || !hasKnowledgeHistory) return;
     let disposed = false;
@@ -1687,6 +1726,29 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         };
       });
       return true;
+    };
+
+    const reconcileCancellationReceipt = async () => {
+      const runId = messagesRef.current.find((m) => m.id === assistantMessage.id)?.processSummary?.runId;
+      if (!runId) return;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const history = await getAssistantSessionHistory(sessionId, 200);
+          if (!isCurrentStream()) return;
+          const facts = cancelledReceiptFlags(history.messages, runId);
+          if (facts.outcomeUncertain || facts.sourceAccessRevoked) {
+            updateAssistantMessage((message) => {
+              const next = { ...message, outcomeUncertain: message.outcomeUncertain || facts.outcomeUncertain };
+              return facts.sourceAccessRevoked ? redactSourceMessage(next) : next;
+            });
+            if (facts.sourceAccessRevoked) setSourceRecreateNeeded(true);
+          }
+          if (facts.outcomeUncertain) return;
+        } catch {
+          // A missing read receipt cannot change the execution outcome.
+        }
+        if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 350));
+      }
     };
 
     const activityQueue = createActivityFlushQueue({
@@ -3659,6 +3721,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       }
     } finally {
       activityQueue.flushNow();
+      if (terminalLatch.current() === "cancelled" && isCurrentStream()) {
+        await reconcileCancellationReceipt();
+      }
       if (isCurrentStream()) {
         refreshSessionsInBackground();
       }
@@ -3937,10 +4002,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     messages,
     setMessages,
     isStreaming,
+    isRecoveringImage,
     hasActiveRun: isStreaming || Boolean(observedRun),
     modelRecreateNeeded,
     sourceRecreateNeeded,
-    isComposerBlocked: isStreaming || serverRunBlocking,
+    isComposerBlocked: isStreaming || serverRunBlocking || isRecoveringImage,
     sessionsLoading,
     historyRestoreState,
     historyRestoreError,

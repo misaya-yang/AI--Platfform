@@ -25,6 +25,7 @@ from ....services.assistant_entry.source_access import (
     conversation_sources,
     visible_dataset_names,
 )
+from ....services.images.history import image_history
 from ...deps import get_user_context
 from .schemas import (
     SessionCreateRequest,
@@ -343,12 +344,18 @@ async def get_session_history(
                     restricted_run_ids=restricted_runs,
                 )
                 runtime_messages = [SessionHistoryMessage(**message) for message in projected]
-        messages = (legacy_messages + runtime_messages)[-limit:]
+        combined = await image_history(
+            request, user, session_id,
+            [m.model_dump() for m in legacy_messages + runtime_messages],
+            sources, visible_datasets, limit=limit,
+            identity_metadata=[m.metadata for m in session.history or []],
+        )
+        messages = [SessionHistoryMessage(**m) for m in combined[-limit:]]
 
         return SessionHistoryResponse(
             session_id=session_id,
             messages=messages,
-            total=len(legacy_messages) + runtime_total,
+            total=len(combined) + max(0, runtime_total - len(runtime_messages)),
         )
     except HTTPException:
         raise

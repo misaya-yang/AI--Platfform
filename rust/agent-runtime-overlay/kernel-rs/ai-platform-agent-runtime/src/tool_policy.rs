@@ -172,6 +172,11 @@ impl PostgresThreadStore {
         self.check_write_health(thread_id)?;
         let kernel_id = thread_uuid(thread_id)?;
         let scope = self.member_scope(kernel_id).await?;
+        // The persisted ceiling is immutable. Reusing it is a read, not a
+        // write by the previous turn's (possibly expired) execution owner.
+        if let Some(stored) = self.load_projection(thread_id, true).await?.0.tool_policy {
+            return resolve_policy(Some(stored), requested);
+        }
         let mut transaction = self.pool.begin().await.map_err(store_error)?;
         self.lock_root(&mut transaction, scope.root_thread_id)
             .await?;

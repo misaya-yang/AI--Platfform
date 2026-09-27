@@ -15,6 +15,7 @@ import type {
 } from "../types";
 import { safeSubAgentText } from "../subagentSafety";
 import { appendReasoningAfterActivity, buildReasoningStep } from "./activityTimelineOrder";
+import { hasTerminalActivity, terminalActivitySteps } from "./activityTerminalState";
 import type {
   TimelineIcon,
   TimelineSource,
@@ -699,5 +700,16 @@ export function buildTimeline(
   const totalDurationMs =
     asNumber(message.durationMs) ?? totalToolMs + thinkingMs;
 
-  return { steps, totalDurationMs };
+  const terminal = hasTerminalActivity(message);
+  const pendingApprovalIds = new Set((processSummary?.tools ?? [])
+    .filter((tool) => tool.status === "approval_required")
+    .map((tool) => tool.id));
+  return {
+    steps: terminalActivitySteps(
+      steps, terminal, pendingApprovalIds,
+      `${t("assistant.outcome.unknown.title")}\n\n${t("assistant.outcome.unknown.next")}`,
+      t("assistant.activity.notExecuted", { defaultValue: "Not executed: the pending action was not approved." }),
+    ),
+    totalDurationMs,
+  };
 }

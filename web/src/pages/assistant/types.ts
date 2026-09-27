@@ -274,6 +274,8 @@ export interface ChatMessage {
 
   // Image generation state (GPT-style)
   isGeneratingImage?: boolean;
+  imageTaskId?: string;
+  imageTurnId?: string;
   imageGenerationPrompt?: string;
 
   // Search status (for GPT-like "Searching..." display)

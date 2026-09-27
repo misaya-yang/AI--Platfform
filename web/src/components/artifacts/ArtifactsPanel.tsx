@@ -46,7 +46,7 @@ import type { ExecutionStatusType } from "./ExecutionStatus";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
-import { downloadAssistantArtifact } from "@/lib/authenticatedDownload";
+import { downloadAssistantArtifact, openAssistantArtifact } from "@/lib/authenticatedDownload";
 
 // ============================================================================
 // Types
@@ -246,6 +246,10 @@ function ArtifactCard({
     ? (artifact as OutputFile).mime_type
     : (artifact as Artifact).mimeType;
   const formatLabel = getFormatLabel(rawFormat, mimeType || undefined);
+  const previewUrl = isOutputFile
+    ? (artifact as OutputFile).download_url
+    : (artifact as Artifact).url;
+  const isPdf = rawFormat?.toLowerCase() === "pdf" || mimeType === "application/pdf";
   const size = isOutputFile
     ? (artifact as OutputFile).size_bytes
     : (artifact as Artifact).sizeBytes;
@@ -273,6 +277,21 @@ function ArtifactCard({
           {!isOutputFile && (artifact as Artifact).createdAt ? ` · ${(artifact as Artifact).createdAt.toLocaleString()}` : ""}
         </p>
       </div>
+      {isPdf && (
+        <button
+          type="button"
+          disabled={!ready || !previewUrl}
+          onClick={() => {
+            if (previewUrl) void openAssistantArtifact(previewUrl).catch(() => toast.error(t("artifact.noPreview")));
+          }}
+          className="act-btn act-hover inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[11.5px] text-[hsl(var(--assistant-text-secondary))]"
+          aria-label={t("artifact.openInNewTab")}
+          title={t("artifact.openInNewTab")}
+        >
+          <Eye className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">{t("artifact.preview")}</span>
+        </button>
+      )}
       <button
         type="button"
         onClick={onDownload}
@@ -281,13 +300,13 @@ function ArtifactCard({
           "act-btn act-hover inline-flex items-center gap-1.5 px-2 py-1.5 rounded-md",
           "text-[11.5px] text-[hsl(var(--assistant-text-secondary))]",
           "hover:text-[hsl(var(--assistant-text-primary))]",
-          "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+          "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-visible:opacity-100",
           "border-0 bg-transparent transition-opacity",
         )}
         aria-label={t("artifact.download", "Download")}
       >
         <Download className="h-3.5 w-3.5" />
-        <span>{t("artifact.download", "Download")}</span>
+        <span className="hidden sm:inline">{t("artifact.download", "Download")}</span>
       </button>
     </motion.div>
   );

@@ -59,6 +59,7 @@
   "assistant": {
     "activity": {
       "approvalRequired": "Approval required",
+      "notExecuted": "Not executed: the pending action was not approved.",
       "approvalChanged": "Action details changed or expired. Review the current request before approving.",
       "approvalDecisionFailed": "Decision could not be recorded. Check the current request before trying again.",
       "approvalDetailsUnavailable": "Action details cannot be verified.",

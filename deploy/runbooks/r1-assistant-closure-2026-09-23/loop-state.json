@@ -6,18 +6,23 @@
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "main",
+  "branch": "codex/r1-artifacts-long-tasks",
   "active_phase": "R1-1",
-  "active_feature": "Verified R1 source authorization closure; complete R1 remaining journeys explicitly unverified",
-  "active_package": null,
-  "next_action": "Current user-requested closure finished: verified RP01 locally merged; no further development in this round. Full-R1 unverified journeys remain explicit follow-up.",
-  "last_result": "RP01 source-access closure: Python199, Node10, E2E2, source18, OpenAPI2; real Qwen memory-off/390 selected attachment/private KB and idle/pending revocation verified. Current-source Docker hashes12 Python/187 assets and health passed. Independent reviewer PASS after high/medium repairs. DR01 remains accepted C4; complete R1 still unverified.",
+  "active_feature": "Remaining artifacts and long-task usability acceptance",
+  "active_package": "R1-RP02",
+  "next_action": "Perform authorized local main fast-forward; stop this increment. Remaining full-R1 acceptance stays explicit; no automatic scope expansion.",
+  "last_result": "RP02 safe increment verified: Python89/Node14/Rust160 (2 optional PG ignored)/source18/OpenAPI2/E2E2; actual expired cancelled+succeeded owners allow original-thread followups; original unknown execution/attempt unchanged. New a55739b4a6c5 release unit healthy. Independent review PASS. Full R1 still incomplete: image CDN Fake-IP/vision/activity1000/extra sharing unverified.",
   "updated_at": "2026-09-27",
   "blockers": [
     {
+      "id": "R1-image-cdn-dns",
+      "status": "external_prerequisite",
+      "reason": "DashScope OSS CDN resolves into Fake-IP 198.18/15; safe_fetch refuses; no shared network change or unknown replay."
+    },
+    {
       "id": "R1-unverified-journeys",
-      "reason": "Complete R1 still has explicitly unverified image success/vision, long-task resource reclamation, activity1000, PDF and remaining sharing/narrow flows. DR01 Runtime same-run recovery is verified, not blocked. See final RP01 report.",
-      "status": "unverified"
+      "status": "unverified",
+      "reason": "Vision, activity1000 and extra sharing/PDF failure combinations not newly verified; no complete R1 release claim."
     }
   ],
   "cycle": [
@@ -29,7 +34,7 @@
     "integrate",
     "decide"
   ],
-  "iteration": 5,
+  "iteration": 6,
   "max_iterations": 20,
   "phases": [
     {
@@ -95,9 +100,9 @@
     "reports/product/assistant-model-selection-2026-09-23.md"
   ],
   "execution_authorization": {
-    "scope": "Latest user authorizes prompt closure and local main integration of verified existing成果.",
-    "parallel_agents": "Primary sole writer; bounded read-only reviewer/evidence audit; live operations serialized.",
-    "round_status": "closed",
+    "scope": "Latest user authorizes prompt closure, necessary local commits and main integration; no remote push or branch deletion.",
+    "parallel_agents": "At most three bounded read-only investigators/reviewers; primary sole writer; live serialized.",
+    "round_status": "ready_for_local_integration",
     "commit_authorized": true,
     "local_merge_authorized": true,
     "push_authorized": false,
@@ -138,5 +143,14 @@
     "merged_head": "2919a587c6257f5dcd83e670b868e2a0edf1953f",
     "push_performed": false,
     "branch_deleted": false
+  },
+  "artifact_closure": {
+    "package": "R1-RP02",
+    "source_branch": "codex/r1-artifacts-long-tasks",
+    "state": "verified_safe_increment_ready_to_integrate",
+    "full_R1_complete": false,
+    "candidate": "a55739b4a6c5",
+    "report": "reports/product/r1-artifacts-long-task-acceptance-2026-09-27.md",
+    "review": "PASS"
   }
 }

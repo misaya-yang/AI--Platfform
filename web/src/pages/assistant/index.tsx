@@ -344,6 +344,7 @@ export function AssistantPage() {
     setMessages,
     isStreaming,
     hasActiveRun,
+    isRecoveringImage,
     modelRecreateNeeded,
     sourceRecreateNeeded,
     isComposerBlocked,
@@ -611,7 +612,7 @@ export function AssistantPage() {
 
   const {
     isImageMode,
-    isGeneratingImage,
+    isGeneratingImage: isImageRequestPending,
     handleImageGenerate,
     cancelImageMode,
     sendImageGeneration
@@ -626,6 +627,7 @@ export function AssistantPage() {
     setSessions,
     { selected_style: selectedStyle, web_search_enabled: webSearchEnabled }
   );
+  const isGeneratingImage = isImageRequestPending || isRecoveringImage;
 
   // Resolve browser state only after auth hydration identifies its owner.
   // Layout timing prevents an interactive frame from retaining the previous

@@ -184,12 +184,8 @@ async def require_conversation_source_access(
         )
 
 
-async def require_artifact_source_access(request: Request, user: UserContext, artifact: Any) -> None:
-    if getattr(artifact, "source", None) == "user":
-        return  # Uploaded originals do not inherit generated-answer provenance.
-    sources = await conversation_sources(request, user, artifact.session_id)
+def source_ids_at_creation(sources: ConversationSources, created_at: Any) -> frozenset[str]:
     ids = sources.dataset_ids
-    created_at = getattr(artifact, "created_at", None)
     if isinstance(created_at, datetime) and sources.dates_complete:
         # Server-owned creation times preserve an earlier ordinary artifact
         # when only a later turn selected the now-unavailable knowledge.
@@ -199,6 +195,14 @@ async def require_artifact_source_access(request: Request, user: UserContext, ar
             created_utc = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
             if admitted_utc <= created_utc:
                 ids = inherited
+    return ids
+
+
+async def require_artifact_source_access(request: Request, user: UserContext, artifact: Any) -> None:
+    if getattr(artifact, "source", None) == "user":
+        return  # Uploaded originals do not inherit generated-answer provenance.
+    sources = await conversation_sources(request, user, artifact.session_id)
+    ids = source_ids_at_creation(sources, getattr(artifact, "created_at", None))
     if ids and not ids <= (await visible_dataset_names(request, user)).keys():
         raise HTTPException(403, detail={"code": "ASSISTANT_SOURCE_ACCESS_REVOKED"})
 

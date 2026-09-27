@@ -16,6 +16,8 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatMessage as ChatMessageType } from "../types";
+import { assistantOutcome } from "../assistantOutcome";
+import { hasTerminalActivity } from "./activityTerminalState";
 import { ActivityTimeline } from "./ActivityTimeline";
 import { T, ui, ensureActivityStyles } from "./activityTheme";
 import { Icon } from "./activityIcons";
@@ -66,11 +68,13 @@ export function ActivityPanel({
 
   const cancelled =
     message?.status === "cancelled" || message?.processSummary?.status === "cancelled";
-  const blocked = message?.processSummary?.status === "blocked";
+  const terminal = Boolean(message && hasTerminalActivity(message));
+  const blocked = !terminal && message?.processSummary?.status === "blocked";
+  const unknown = Boolean(message && assistantOutcome(message).kind === "unknown");
   const failed =
-    !cancelled && !blocked &&
+    !cancelled && !blocked && !unknown &&
     (message?.status === "failed" || message?.processSummary?.status === "failed");
-  const running = !cancelled && !blocked && !failed &&
+  const running = !cancelled && !blocked && !failed && !unknown &&
     (!!message?.isStreaming || message?.processSummary?.status === "running");
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
@@ -78,11 +82,13 @@ export function ActivityPanel({
     ? `think:${message.processSummary.reasoning.effective_option}`
     : "";
   const pendingApprovals =
-    message?.processSummary?.tools.filter(
+    !terminal ? message?.processSummary?.tools.filter(
       (tool) => tool.status === "approval_required" && tool.approvalId,
-    ) ?? [];
+    ) ?? [] : [];
 
-  const statusWord = running
+  const statusWord = unknown
+    ? t("assistant.outcome.unknown.title", { defaultValue: "Result unknown" })
+    : running
     ? t("playground.activity.running", { defaultValue: "running" })
     : blocked
       ? t("assistant.activity.approvalRequired", { defaultValue: "Approval required" })
