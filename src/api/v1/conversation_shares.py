@@ -123,12 +123,12 @@ async def _collect_quiz_payloads(
         if dataset_ids:
             raise HTTPException(409, "Quiz content derived from private knowledge cannot be shared anonymously")
         try:
-            inherited_datasets, inherited_documents = await quiz_source_scope(
+            inherited_datasets, inherited_documents, inherited_versions = await quiz_source_scope(
                 request, quiz_uuid, tenant_id, require_origin=True,
             )
         except HTTPException as exc:
             raise HTTPException(409, "Quiz source rights cannot be verified for sharing") from exc
-        if inherited_datasets or inherited_documents:
+        if inherited_datasets or inherited_documents or inherited_versions:
             raise HTTPException(409, "Quiz content derived from knowledge cannot be shared anonymously")
         q_rows = await db.fetch(
             "SELECT id, question_num, question_type, question_text, options, correct_answer, explanation "
@@ -259,7 +259,7 @@ async def _build_share_snapshot(
                 raise HTTPException(409, "Older assistant messages have unverified source rights")
 
     sources = await conversation_sources(request, user, session_id)
-    if sources.dataset_ids or sources.document_ids:
+    if sources.dataset_ids or sources.document_ids or sources.source_versions:
         raise HTTPException(409, "Knowledge-derived content cannot be shared anonymously")
 
     store = getattr(request.app.state, "agent_thread_store", None) or AgentThreadStore(db)

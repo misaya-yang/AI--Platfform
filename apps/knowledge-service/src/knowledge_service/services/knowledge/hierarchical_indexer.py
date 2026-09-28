@@ -20,6 +20,7 @@ from qdrant_client.http import models as qmodels
 
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
+from ...persistence.database import SOURCE_OWNED_DOCUMENT_METADATA_KEYS
 from .chunking import MAX_CHUNK_OUTPUTS
 from .lexical_config import LexicalConfig
 
@@ -76,6 +77,29 @@ class IndexingResult:
         return len(self.errors) == 0 and self.total_vectors > 0
 
 
+@dataclass
+class HierarchicalCandidatePlan:
+    """Complete, unpublished hierarchy for one durable execution."""
+
+    generation_id: str
+    document_id: str
+    dataset_id: str
+    points_by_collection: dict[str, list[qmodels.PointStruct]]
+    segment_rows: list[dict[str, Any]]
+    object_manifest: list[dict[str, Any]]
+    content: str
+    source_hash: str
+    segment_ids: list[str]
+    summary_row: dict[str, Any] | None = None
+    l1_count: int = 0
+    l2_count: int = 0
+    l3_count: int = 0
+
+    @property
+    def total_vectors(self) -> int:
+        return sum(len(points) for points in self.points_by_collection.values())
+
+
 class HierarchicalIndexer:
     """
     Hierarchical document indexer.
@@ -98,6 +122,22 @@ class HierarchicalIndexer:
     # Collection name patterns
     SUMMARY_COLLECTION_SUFFIX = "_summary"
     SECTION_COLLECTION_SUFFIX = "_sections"
+
+    @staticmethod
+    def _candidate_segment_id(
+        dataset_id: str,
+        document_id: str,
+        generation_id: str,
+        level: IndexLevel,
+        position: int,
+    ) -> str:
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "ai-platform:kb-hierarchy:"
+                f"{dataset_id}:{document_id}:{generation_id}:{int(level)}:{position}",
+            )
+        )
 
     @classmethod
     def document_collection_names(cls, base_collection: str) -> dict[str, str]:
@@ -294,6 +334,241 @@ class HierarchicalIndexer:
 
         return result
 
+    async def prepare_document(
+        self,
+        document_id: str,
+        dataset_id: str,
+        text: str,
+        *,
+        generation_id: str,
+        metadata: dict[str, Any] | None = None,
+        chunking_config: Any | None = None,
+        levels_override: list[int] | None = None,
+    ) -> HierarchicalCandidatePlan:
+        """Embed a complete hierarchy without publishing any serving state.
+
+        The caller owns collection creation, durable manifest recording and the
+        cross-collection publication lease. Repeating a durable generation
+        produces the same point and segment IDs, including parent links.
+        """
+
+        try:
+            generation = str(uuid.UUID(str(generation_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("generation_id must be a durable UUID") from exc
+        if not document_id or not dataset_id:
+            raise ValueError("document_id and dataset_id are required")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("hierarchical candidate requires nonempty text")
+
+        levels = levels_override if levels_override is not None else self.levels
+        if not levels or len(set(levels)) != len(levels) or any(
+            level not in (IndexLevel.DOCUMENT, IndexLevel.SECTION, IndexLevel.PARAGRAPH)
+            for level in levels
+        ):
+            raise ValueError("hierarchical candidate levels are invalid")
+        # Carry public business labels only. Document lifecycle, object keys,
+        # and provenance belong to the publisher's exact generation receipt.
+        reserved_metadata = SOURCE_OWNED_DOCUMENT_METADATA_KEYS | {
+            "tenant_id", "dataset_id", "document_id", "segment_id",
+            "position", "level", "text", "content_type",
+            "parent_segment_id", "generation_id", "source_version", "source_hash",
+            "source_type", "source_reference", "source_url", "image_url",
+            "content_hash", "current_version", "version_count", "status",
+            "enabled", "archived", "progress",
+        }
+        source_metadata = {
+            key: value for key, value in dict(metadata or {}).items()
+            if isinstance(key, str) and not key.startswith("_")
+            and key not in reserved_metadata
+        }
+        dataset = await self.db.get_dataset(dataset_id)
+        if not dataset or str(dataset.get("dataset_id") or dataset_id) != dataset_id:
+            raise ValueError("hierarchical candidate dataset is unavailable")
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValueError("hierarchical candidate requires dataset tenant_id")
+        vector_dim = await self._get_vector_dimension(dataset_id)
+        base_collection = str(dataset.get("collection_name") or "").strip()
+        if not base_collection:
+            make_name = getattr(self.vector_store, "make_collection_name", None)
+            base_collection = (
+                make_name(dataset_id, vector_dim, None)
+                if callable(make_name)
+                else f"kb_{dataset_id}_{vector_dim}"
+            )
+        collections = self.document_collection_names(base_collection)
+        points_by_collection: dict[str, list[qmodels.PointStruct]] = {
+            collection: [] for collection in collections.values()
+        }
+        segment_rows: list[dict[str, Any]] = []
+        segment_ids: list[str] = []
+
+        l2_segments: list[HierarchicalSegment] = []
+        l3_segments: list[HierarchicalSegment] = []
+        if IndexLevel.SECTION in levels or IndexLevel.PARAGRAPH in levels:
+            l2_segments, l3_segments = await self._create_l2_l3_chunks(
+                document_id, dataset_id, text, source_metadata, chunking_config,
+                generation_id=generation,
+            )
+        if IndexLevel.SECTION in levels and self.summary_generator:
+            await self._summarize_sections(l2_segments)
+        l1_segment = None
+        if IndexLevel.DOCUMENT in levels and self.summary_generator:
+            l1_segment = await self._create_l1_summary(
+                document_id, dataset_id, text, source_metadata,
+                generation_id=generation,
+            )
+            if l1_segment is None:
+                raise RuntimeError("hierarchical candidate summary generation failed")
+
+        active_l3 = l3_segments if IndexLevel.PARAGRAPH in levels else []
+        active_l2 = l2_segments if IndexLevel.SECTION in levels else []
+        self._require_hierarchical_output_budget(
+            int(l1_segment is not None), len(active_l2), len(active_l3)
+        )
+
+        async def embed_all(values: list[str], layer: str) -> list[list[float]]:
+            if not values:
+                return []
+            vectors = await self._embed_texts(values, dataset_id=dataset_id)
+            if len(vectors) != len(values) or any(vector is None for vector in vectors):
+                raise RuntimeError(f"hierarchical candidate {layer} embedding is incomplete")
+            return vectors
+
+        l3_vectors = await embed_all([segment.text for segment in active_l3], "L3")
+        for segment, vector in zip(active_l3, l3_vectors, strict=True):
+            payload = {
+                **segment.metadata,
+                "tenant_id": tenant_id,
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "segment_id": segment.segment_id,
+                "position": segment.position,
+                "level": int(segment.level),
+                "text": segment.text,
+                "content_type": "text",
+                "parent_segment_id": segment.parent_id,
+            }
+            points_by_collection[collections["base"]].append(
+                qmodels.PointStruct(id=segment.segment_id, vector=vector, payload=payload)
+            )
+            segment_rows.append({
+                "segment_id": segment.segment_id,
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "position": segment.position,
+                "level": int(segment.level),
+                "parent_segment_id": segment.parent_id,
+                "text": segment.text,
+                "token_count": len(segment.text) // 4,
+                "vector_id": segment.segment_id,
+                "content_type": "text",
+                "metadata": segment.metadata,
+                "enabled": False,
+                "status": "indexing",
+            })
+            segment_ids.append(segment.segment_id)
+
+        l2_vectors = await embed_all(
+            [segment.summary or segment.text[:2000] for segment in active_l2], "L2"
+        )
+        for segment, vector in zip(active_l2, l2_vectors, strict=True):
+            payload = {
+                "tenant_id": tenant_id,
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "segment_id": segment.segment_id,
+                "position": segment.position,
+                "level": int(segment.level),
+                "text": segment.text[:500],
+                "summary": segment.summary,
+                "content_type": "section",
+            }
+            points_by_collection[collections["sections"]].append(
+                qmodels.PointStruct(id=segment.segment_id, vector=vector, payload=payload)
+            )
+            segment_rows.append({
+                "segment_id": segment.segment_id,
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "position": segment.position,
+                "level": int(segment.level),
+                "text": segment.text,
+                "summary": segment.summary,
+                "token_count": len(segment.text) // 4,
+                "vector_id": segment.segment_id,
+                "content_type": "section",
+                "metadata": segment.metadata,
+                "enabled": False,
+                "status": "indexing",
+            })
+            segment_ids.append(segment.segment_id)
+
+        summary_row = None
+        if l1_segment is not None:
+            summary_vectors = await embed_all(
+                [l1_segment.summary or l1_segment.text], "L1"
+            )
+            points_by_collection[collections["summary"]].append(
+                qmodels.PointStruct(
+                    id=l1_segment.segment_id,
+                    vector=summary_vectors[0],
+                    payload={
+                        "tenant_id": tenant_id,
+                        "dataset_id": dataset_id,
+                        "document_id": document_id,
+                        "segment_id": l1_segment.segment_id,
+                        "level": int(IndexLevel.DOCUMENT),
+                        "text": l1_segment.summary or l1_segment.text,
+                        "summary": l1_segment.summary,
+                        "keywords": l1_segment.keywords,
+                        "content_type": "document_summary",
+                    },
+                )
+            )
+            summary_row = {
+                "document_id": document_id,
+                "summary": l1_segment.summary,
+                "keywords": l1_segment.keywords,
+                "topics": l1_segment.metadata.get("topics", []),
+                "vector_id": l1_segment.segment_id,
+            }
+            segment_rows.append({
+                "segment_id": l1_segment.segment_id,
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "position": 0,
+                "level": int(IndexLevel.DOCUMENT),
+                "text": l1_segment.summary or l1_segment.text,
+                "summary": l1_segment.summary,
+                "token_count": len(l1_segment.text) // 4,
+                "vector_id": l1_segment.segment_id,
+                "content_type": "document_summary",
+                "metadata": l1_segment.metadata,
+                "enabled": False,
+                "status": "indexing",
+            })
+            segment_ids.append(l1_segment.segment_id)
+
+        if not segment_ids:
+            raise RuntimeError("hierarchical candidate contains no vectors")
+        return HierarchicalCandidatePlan(
+            generation_id=generation,
+            document_id=document_id,
+            dataset_id=dataset_id,
+            points_by_collection=points_by_collection,
+            segment_rows=segment_rows,
+            object_manifest=[],
+            content=text,
+            source_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            segment_ids=segment_ids,
+            summary_row=summary_row,
+            l1_count=int(l1_segment is not None),
+            l2_count=len(active_l2),
+            l3_count=len(active_l3),
+        )
+
     @staticmethod
     def _require_hierarchical_output_budget(
         l1_count: int,
@@ -323,6 +598,8 @@ class HierarchicalIndexer:
         text: str,
         metadata: dict[str, Any],
         chunking_config: Any | None = None,
+        *,
+        generation_id: str | None = None,
     ) -> tuple[list[HierarchicalSegment], list[HierarchicalSegment]]:
         """Create L2 section and L3 paragraph chunks with parent links."""
         from .chunking import ChunkingConfig, ChunkingMode, create_chunker
@@ -404,7 +681,14 @@ class HierarchicalIndexer:
         l3_position = 0
 
         for idx, parent in enumerate(parents):
-            segment_id = str(uuid.uuid4())
+            segment_id = (
+                self._candidate_segment_id(
+                    dataset_id, document_id, generation_id, IndexLevel.SECTION,
+                    self.L2_POSITION_OFFSET + idx,
+                )
+                if generation_id is not None
+                else str(uuid.uuid4())
+            )
             parent_map[parent.hash_id] = segment_id
 
             l2_segments.append(
@@ -426,9 +710,17 @@ class HierarchicalIndexer:
             )
 
             for child in parent.children:
+                child_id = (
+                    self._candidate_segment_id(
+                        dataset_id, document_id, generation_id,
+                        IndexLevel.PARAGRAPH, l3_position,
+                    )
+                    if generation_id is not None
+                    else str(uuid.uuid4())
+                )
                 l3_segments.append(
                     HierarchicalSegment(
-                        segment_id=str(uuid.uuid4()),
+                        segment_id=child_id,
                         document_id=document_id,
                         dataset_id=dataset_id,
                         level=IndexLevel.PARAGRAPH,
@@ -456,6 +748,8 @@ class HierarchicalIndexer:
         dataset_id: str,
         text: str,
         metadata: dict[str, Any],
+        *,
+        generation_id: str | None = None,
     ) -> HierarchicalSegment | None:
         """Create L1 document summary."""
         if not self.summary_generator:
@@ -466,7 +760,13 @@ class HierarchicalIndexer:
             summary_result = await self.summary_generator.summarize_document(text)
 
             segment = HierarchicalSegment(
-                segment_id=str(uuid.uuid4()),
+                segment_id=(
+                    self._candidate_segment_id(
+                        dataset_id, document_id, generation_id, IndexLevel.DOCUMENT, 0,
+                    )
+                    if generation_id is not None
+                    else str(uuid.uuid4())
+                ),
                 document_id=document_id,
                 dataset_id=dataset_id,
                 level=IndexLevel.DOCUMENT,
@@ -522,6 +822,7 @@ class HierarchicalIndexer:
                 continue
 
             payload = {
+                **segment.metadata,
                 "tenant_id": tenant_id,
                 "dataset_id": segment.dataset_id,
                 "document_id": segment.document_id,
@@ -531,7 +832,6 @@ class HierarchicalIndexer:
                 "text": segment.text,
                 "content_type": "text",
                 "parent_segment_id": segment.parent_id,
-                **segment.metadata,
             }
 
             points.append(

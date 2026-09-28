@@ -116,7 +116,10 @@ class UpdateSegmentDatabase:
     ):
         assert connection is self
         # Hot-update must never rewrite the vector identity or shape columns.
-        assert token_count is None and metadata is None and vector_id is None
+        assert token_count is None and vector_id is None
+        assert isinstance(metadata, dict)
+        assert metadata.get("manual_source_override") is True
+        assert "source_version" not in metadata and "source_hash" not in metadata
         self.update_calls.append(
             {
                 "segment_id": segment_id,
@@ -128,6 +131,7 @@ class UpdateSegmentDatabase:
         )
         row = self.rows[segment_id]
         row["text"] = text
+        row["metadata"] = metadata
         # Mirror the SQL contract: None leaves the column untouched.
         if answer is not None:
             row["answer"] = answer

@@ -25,7 +25,7 @@ USER = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True
 THREAD = SimpleNamespace(session_id="session-a", runtime_thread_id="00000000-0000-0000-0000-000000000001")
 
 
-def request(*, visible=(), snapshots=None, legacy=None, kb_error=False, contexts=None, visible_docs=None):
+def request(*, visible=(), snapshots=None, legacy=None, kb_error=False, contexts=None, visible_docs=None, visible_versions=None):
     if snapshots is None:
         snapshots = [snapshot("run-a", ["private-a"]), snapshot("run-b", [])]
     async def fetch(query, *args):
@@ -49,9 +49,22 @@ def request(*, visible=(), snapshots=None, legacy=None, kb_error=False, contexts
             raise RuntimeError("internal secret must not appear")
         permitted = visible_docs if visible_docs is not None else document_ids
         return set(document_ids) & set(permitted)
+    async def authorize_document_sources(user, dataset_id, references):
+        assert user.user_id == "user-a"
+        if kb_error:
+            raise RuntimeError("internal secret must not appear")
+        requested = {
+            (item["document_id"], item["source_version"], item["source_hash"])
+            for item in references
+        }
+        permitted = visible_versions if visible_versions is not None else requested
+        return requested & set(permitted)
     state = SimpleNamespace(
         database=SimpleNamespace(fetch=fetch, fetchrow=fetchrow),
-        kb_proxy=SimpleNamespace(list_datasets=list_datasets, authorize_documents=authorize_documents),
+        kb_proxy=SimpleNamespace(
+            list_datasets=list_datasets, authorize_documents=authorize_documents,
+            authorize_document_sources=authorize_document_sources,
+        ),
         agent_runtime_control=SimpleNamespace(
             stream_thread_events=AsyncMock(), start_turn=AsyncMock(),
             get_approval=AsyncMock(), decide_approval=AsyncMock(return_value={"status": "rejected"}),
@@ -101,6 +114,79 @@ def document_context(run_id="run-a", document_id="doc-a"):
         "dataset_id": "private-a", "document_id": document_id,
         "content": "Private source text",
     }]}
+
+
+SOURCE_HASH = "a" * 64
+
+
+def versioned_context(run_id="run-a", document_id="doc-a", *, source_version=1, source_hash=SOURCE_HASH):
+    context = document_context(run_id, document_id)
+    context["chunks"][0]["source_version"] = source_version
+    context["chunks"][0]["source_hash"] = source_hash
+    return context
+
+
+@pytest.mark.asyncio
+async def test_versioned_source_requires_exact_historical_identity_in_addition_to_live_document_acl():
+    context = versioned_context()
+    req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[context])
+    sources = await conversation_sources(req, USER, "session-a")
+    expected = frozenset({("private-a", "doc-a", 1, SOURCE_HASH)})
+    assert sources.source_versions == expected
+    assert sources.versions_by_run == {"run-a": expected, "run-b": expected}
+    await require_conversation_source_access(req, USER, "session-a")
+    req.app.state.kb_proxy.authorize_document_sources = AsyncMock(return_value=set())
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_partial_version_identity_fails_closed_while_legacy_event_uses_document_acl():
+    legacy = request(
+        visible=["private-a"], visible_docs=["doc-a"],
+        contexts=[document_context()],
+    )
+    await require_conversation_source_access(legacy, USER, "session-a")
+    partial = versioned_context(source_hash=None)
+    req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[partial])
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_null_top_level_identity_uses_metadata_and_null_pair_remains_legacy():
+    exact = document_context()
+    exact["chunks"][0].update({
+        "document_id": None, "source_version": None, "source_hash": None,
+        "metadata": {
+            "document_id": "doc-a", "source_version": 2, "source_hash": SOURCE_HASH,
+        },
+    })
+    req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[exact])
+    assert (await conversation_sources(req, USER, "session-a")).source_versions == frozenset({
+        ("private-a", "doc-a", 2, SOURCE_HASH),
+    })
+    await require_conversation_source_access(req, USER, "session-a")
+
+    legacy = document_context()
+    legacy["chunks"][0]["metadata"] = {
+        "source_version": None, "source_hash": None,
+    }
+    legacy_req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[legacy])
+    assert not (await conversation_sources(legacy_req, USER, "session-a")).source_versions
+    await require_conversation_source_access(legacy_req, USER, "session-a")
+
+
+@pytest.mark.asyncio
+async def test_partial_metadata_identity_cannot_hide_behind_complete_top_level_identity():
+    context = versioned_context()
+    context["chunks"][0]["metadata"] = {"source_version": 1, "source_hash": None}
+    req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[context])
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
 
 
 @pytest.mark.asyncio

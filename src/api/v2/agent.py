@@ -38,6 +38,7 @@ from ...services.assistant_entry.source_access import (
     require_conversation_source_access,
     visible_dataset_names,
     visible_document_keys,
+    visible_source_version_keys,
 )
 from ..deps import get_user_context
 from ..v1._assistant_routes.attachment_refs import (
@@ -341,10 +342,12 @@ async def get_thread(thread_id: str, request: Request, user: UserContext = Depen
     sources = await conversation_sources(request, user, thread.session_id)
     visible = await visible_dataset_names(request, user) if sources.dataset_ids else {}
     visible_documents = await visible_document_keys(request, user, sources.document_ids)
+    visible_versions = await visible_source_version_keys(request, user, sources.source_versions)
     restricted = [
         run_id for run_id, ids in sources.inherited_by_run.items()
         if not ids <= visible.keys()
         or not (sources.documents_by_run or {}).get(run_id, frozenset()) <= visible_documents
+        or not (sources.versions_by_run or {}).get(run_id, frozenset()) <= visible_versions
     ]
     return {"thread": {**_thread_payload(thread), "restricted_source_run_ids": restricted}}
 

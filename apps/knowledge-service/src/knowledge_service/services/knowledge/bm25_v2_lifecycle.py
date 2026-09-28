@@ -248,8 +248,14 @@ class Bm25V2LifecycleService:
         context: dict[str, Any],
         *,
         publication_revision: int,
+        connection: Any,
     ) -> dict[str, Any]:
-        """Full-scroll and publish a fresh receipt after PG authority commits."""
+        """Full-scroll the publisher's uncommitted PG authority before its commit.
+
+        The Qdrant scope already carries candidate points. Certification must
+        compare it with candidate PostgreSQL rows on this same connection;
+        opening another connection would see only the prior serving generation.
+        """
 
         dataset_id = str(context["dataset_id"])
         tenant_id = str(context["tenant_id"])
@@ -264,6 +270,7 @@ class Bm25V2LifecycleService:
             collection_name=collection,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
+            connection=connection,
         )
         # Segment/document statement triggers may increment the reserved
         # negative seqlock while PostgreSQL authority is committed. The shared

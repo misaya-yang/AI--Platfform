@@ -25,6 +25,7 @@ from ....services.assistant_entry.source_access import (
     conversation_sources,
     visible_dataset_names,
     visible_document_keys,
+    visible_source_version_keys,
 )
 from ....services.images.history import image_history
 from ...deps import get_user_context
@@ -278,14 +279,17 @@ async def get_session_history(
         database = getattr(request.app.state, "database", None)
         sources = await conversation_sources(request, user, session_id) if database is not None else None
         visible_documents = await visible_document_keys(request, user, sources.document_ids) if sources else set()
+        visible_versions = await visible_source_version_keys(request, user, sources.source_versions) if sources else set()
         restricted_runs = {
             run_id for run_id, dataset_ids in sources.inherited_by_run.items()
             if not dataset_ids <= visible_datasets.keys()
             or not (sources.documents_by_run or {}).get(run_id, frozenset()) <= visible_documents
+            or not (sources.versions_by_run or {}).get(run_id, frozenset()) <= visible_versions
         } if sources else set()
         legacy_restricted = bool(sources and (
             not sources.legacy_dataset_ids <= visible_datasets.keys()
             or not sources.legacy_document_ids <= visible_documents
+            or not sources.legacy_source_versions <= visible_versions
         ))
 
         def safe_history_metadata(raw: dict | None) -> dict | None:

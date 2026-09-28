@@ -155,8 +155,10 @@ def _get_quiz_service(request: Request) -> QuizAccessService:
 
 async def _require_quiz_source_access(quiz_id: uuid.UUID, request: Request, user: UserContext) -> None:
     """Check both direct bindings and knowledge inherited by the creating run."""
-    sources, documents = await quiz_source_scope(request, quiz_id, user.tenant_id)
-    if not await source_scope_allowed(request, user, sources, documents):
+    sources, documents, versions = await quiz_source_scope(request, quiz_id, user.tenant_id)
+    if not await source_scope_allowed(
+        request, user, sources, documents, versioned_refs=versions,
+    ):
         raise HTTPException(403, detail={"code": "ASSISTANT_SOURCE_ACCESS_REVOKED"})
 
 

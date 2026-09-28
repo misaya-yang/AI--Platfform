@@ -14,7 +14,9 @@ from ..assistant_entry.source_access import (
     ConversationSources,
     source_documents_at_creation,
     source_ids_at_creation,
+    source_versions_at_creation,
     visible_document_keys,
+    visible_source_version_keys,
 )
 
 
@@ -53,6 +55,7 @@ def merge_image_history(
     visible: dict[str, str],
     identity_metadata: list[dict | None] | None = None,
     visible_documents: set[tuple[str, str]] | None = None,
+    visible_versions: set[tuple[str, str, int, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Replace a matching legacy result, or insert one stable outcome by time."""
     merged = list(history)
@@ -108,6 +111,7 @@ def merge_image_history(
             and (
                 not source_ids_at_creation(sources, turn.get("created_at")) <= visible.keys()
                 or not source_documents_at_creation(sources, turn.get("created_at")) <= (visible_documents or set())
+                or not source_versions_at_creation(sources, turn.get("created_at")) <= (visible_versions or set())
             )
         )
         process_status = (
@@ -228,4 +232,5 @@ async def image_history(
         visible,
         identity_metadata,
         await visible_document_keys(request, user, sources.document_ids) if sources else set(),
+        await visible_source_version_keys(request, user, sources.source_versions) if sources else set(),
     )

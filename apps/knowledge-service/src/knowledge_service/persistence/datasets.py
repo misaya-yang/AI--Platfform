@@ -37,6 +37,15 @@ CONFLUENCE_SYNC_GENERATION_KEY = "_confluence_sync_generation"
 DOCUMENT_INGEST_ACTION_KEY = "_document_ingest_action"
 DOCUMENT_RECOVER_STAGE_KEY = "_document_recover_stage"
 DOCUMENT_PIPELINE_EXECUTION_KEY = "_document_pipeline_execution_id"
+DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY = "_special_publication_generation_id"
+SPECIAL_PUBLICATION_MANIFEST_KEY = "special_publication"
+SPECIAL_PUBLICATION_PHASES = (
+    "preparing",
+    "prepared",
+    "points_written",
+    "committed",
+    "aborted",
+)
 # The candidate text for a restore lives in document_versions until its
 # segment generation publishes; the document marker stores only its number.
 DOCUMENT_PENDING_RESTORE_VERSION_KEY = "_document_pending_restore_version"
@@ -73,6 +82,65 @@ def _json_object(value: Any) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
     return {}
+
+
+def _special_publication_plan(
+    collections: dict[str, dict[str, list[str]]] | None,
+    objects: dict[str, str] | None,
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, str]]:
+    """Canonicalize the immutable cross-store deletion/publication plan."""
+
+    normalized_collections: dict[str, dict[str, list[str]]] = {}
+    for raw_name, raw_points in (collections or {}).items():
+        name = str(raw_name or "").strip()
+        if not name or name in normalized_collections or not isinstance(raw_points, dict):
+            raise ValueError("special publication collection plan is invalid")
+        if set(raw_points) != {"candidate_point_ids", "old_point_ids"}:
+            raise ValueError("special publication point sets are incomplete")
+        normalized_points: dict[str, list[str]] = {}
+        for key in ("candidate_point_ids", "old_point_ids"):
+            values = raw_points[key]
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError("special publication point ids are invalid")
+            normalized_points[key] = sorted(set(values))
+        if set(normalized_points["candidate_point_ids"]) & set(
+            normalized_points["old_point_ids"]
+        ):
+            raise ValueError("candidate and old point ids must be disjoint")
+        normalized_collections[name] = normalized_points
+    normalized_objects: dict[str, str] = {}
+    for raw_key, raw_hash in (objects or {}).items():
+        key = str(raw_key or "").strip()
+        content_hash = str(raw_hash or "").strip().lower()
+        if (
+            not key or key in normalized_objects or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+        ):
+            raise ValueError("special publication object receipt is incomplete")
+        normalized_objects[key] = content_hash
+    return dict(sorted(normalized_collections.items())), dict(sorted(normalized_objects.items()))
+
+
+def _special_source_hash(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise ValueError("special publication source_hash must be a SHA-256 hex digest")
+    return normalized
+
+
+def _special_object_keys(value: list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError("special publication planned object keys are invalid")
+    normalized = [item.strip() for item in value]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("special publication planned object keys are duplicated")
+    return sorted(normalized)
 
 
 def make_dataset_index_deletion_fence(
@@ -1362,6 +1430,664 @@ class DatasetPersistenceMixin:
             return await _close(connection)
         async with self._pool.acquire() as conn:
             return await _close(conn)
+
+    async def record_special_publication_manifest(
+        self,
+        execution_id: str,
+        document_id: str,
+        dataset_id: str,
+        generation_id: str,
+        *,
+        source_hash: str,
+        plan_hash: str | None = None,
+        planned_object_keys: list[str] | None = None,
+        collections: dict[str, dict[str, list[str]]] | None = None,
+        objects: dict[str, str] | None = None,
+        phase: str = "preparing",
+        connection: Any | None = None,
+    ) -> dict[str, Any]:
+        """Pin a special generation before its first Qdrant/object-store write.
+
+        ``preparing`` may have no point/object plan yet. The complete immutable
+        plan is supplied by ``advance_special_publication_manifest`` before
+        candidate points are published. A repeated call for the same generation
+        is read-only; a different generation never takes over a running owner.
+        """
+
+        if phase not in {"preparing", "prepared"}:
+            raise ValueError("special publication must begin in preparing or prepared")
+        if not all(str(value or "").strip() for value in (
+            execution_id, document_id, dataset_id, generation_id
+        )):
+            raise ValueError("special publication identity is incomplete")
+        normalized_collections, normalized_objects = _special_publication_plan(
+            collections, objects
+        )
+        normalized_source_hash = _special_source_hash(source_hash)
+        normalized_plan_hash = _special_source_hash(plan_hash) if plan_hash is not None else None
+        normalized_object_keys = _special_object_keys(planned_object_keys)
+        if phase == "prepared" and not (normalized_collections or normalized_objects):
+            raise ValueError("prepared special publication requires a complete plan")
+        if phase == "prepared" and normalized_plan_hash is None:
+            raise ValueError("prepared special publication requires plan_hash")
+        if phase == "preparing" and normalized_plan_hash is not None:
+            raise ValueError("preparing special publication cannot freeze plan_hash")
+        if phase == "prepared" and sorted(normalized_objects) != normalized_object_keys:
+            raise ValueError("prepared object receipts do not cover planned keys")
+
+        async def _record(conn: Any) -> dict[str, Any]:
+            document = await conn.fetchrow(
+                """SELECT status, metadata FROM documents
+                   WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE""",
+                document_id, dataset_id,
+            )
+            execution = await conn.fetchrow(
+                """SELECT status, manifest FROM document_pipeline_executions
+                   WHERE execution_id = $1 AND document_id = $2 AND dataset_id = $3
+                   FOR UPDATE""",
+                execution_id, document_id, dataset_id,
+            )
+            if document is None or execution is None or execution["status"] != "running":
+                raise RuntimeError("special publication execution is not the running owner")
+            document_metadata = _json_object(document["metadata"])
+            existing_generation = str(
+                document_metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) or ""
+            )
+            if existing_generation and existing_generation != generation_id:
+                raise RuntimeError("another special publication generation owns the document")
+            manifest = _json_object(execution["manifest"])
+            existing = _json_object(manifest.get(SPECIAL_PUBLICATION_MANIFEST_KEY))
+            if existing:
+                if existing.get("generation_id") != generation_id:
+                    raise RuntimeError("special publication manifest belongs to another generation")
+                if existing_generation != generation_id:
+                    raise RuntimeError("special publication lost its document generation owner")
+                if (
+                    existing.get("phase") not in {"committed", "aborted"}
+                    and document_metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY)
+                    != execution_id
+                ):
+                    raise RuntimeError("special publication lost its document execution owner")
+                if existing.get("source_hash") != normalized_source_hash:
+                    raise RuntimeError("special publication source hash changed")
+                if normalized_plan_hash and existing.get("plan_hash") != normalized_plan_hash:
+                    raise RuntimeError("special publication candidate plan hash changed")
+                if (
+                    planned_object_keys is not None
+                    and existing.get("planned_object_keys") != normalized_object_keys
+                ):
+                    raise RuntimeError("special publication planned object keys changed")
+                if normalized_collections and existing.get("collections") != normalized_collections:
+                    raise RuntimeError("special publication collection plan changed")
+                if normalized_objects and existing.get("objects") != normalized_objects:
+                    raise RuntimeError("special publication object plan changed")
+                if phase == "prepared" and existing.get("phase") == "preparing":
+                    raise RuntimeError("preparing publication requires a plan CAS")
+                return existing
+            if document_metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) != execution_id:
+                raise RuntimeError("special publication lost its document execution owner")
+            if document["status"] in {"completed", "error"}:
+                raise RuntimeError("special publication cannot begin on a terminal document")
+            special = {
+                "schema_version": 1,
+                "generation_id": generation_id,
+                "source_hash": normalized_source_hash,
+                "plan_hash": normalized_plan_hash,
+                "planned_object_keys": normalized_object_keys,
+                "phase": phase,
+                "collections": normalized_collections,
+                "objects": normalized_objects,
+            }
+            await conn.execute(
+                """UPDATE document_pipeline_executions
+                   SET manifest = jsonb_set(COALESCE(manifest, '{}'::jsonb),
+                       '{special_publication}', $2::jsonb, TRUE)
+                   WHERE execution_id = $1 AND status = 'running'""",
+                execution_id, json.dumps(special),
+            )
+            await conn.execute(
+                """UPDATE documents
+                   SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb),
+                       '{_special_publication_generation_id}', to_jsonb($3::text), TRUE)
+                   WHERE document_id = $1 AND dataset_id = $2""",
+                document_id, dataset_id, generation_id,
+            )
+            return special
+
+        if connection is not None:
+            return await _record(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await _record(conn)
+
+    async def advance_special_publication_manifest(
+        self,
+        execution_id: str,
+        document_id: str,
+        dataset_id: str,
+        generation_id: str,
+        *,
+        source_hash: str,
+        plan_hash: str | None = None,
+        planned_object_keys: list[str] | None = None,
+        expected_phase: str,
+        next_phase: str,
+        collections: dict[str, dict[str, list[str]]] | None = None,
+        objects: dict[str, str] | None = None,
+        connection: Any | None = None,
+    ) -> dict[str, Any]:
+        """CAS the generation phase and freeze its point/object plan.
+
+        Only ``preparing`` permits additive plan entries. ``committed`` is a
+        PostgreSQL publication proof and must be written in the same caller
+        transaction as the document's completed state and source-version flip.
+        """
+
+        transitions = {
+            "preparing": {"preparing", "prepared", "aborted"},
+            "prepared": {"points_written", "aborted"},
+            "points_written": {"committed", "aborted"},
+        }
+        if next_phase not in transitions.get(expected_phase, set()):
+            raise ValueError("unsupported special publication phase transition")
+        additions, new_objects = _special_publication_plan(collections, objects)
+        normalized_source_hash = _special_source_hash(source_hash)
+        normalized_plan_hash = _special_source_hash(plan_hash) if plan_hash is not None else None
+        normalized_object_keys = _special_object_keys(planned_object_keys)
+        if next_phase in {"prepared", "points_written", "committed"} and not normalized_plan_hash:
+            raise ValueError("prepared special publication requires plan_hash")
+        if next_phase == "preparing" and normalized_plan_hash is not None:
+            raise ValueError("preparing special publication cannot freeze plan_hash")
+
+        async def _advance(conn: Any) -> dict[str, Any]:
+            document = await conn.fetchrow(
+                """SELECT status, metadata FROM documents
+                   WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE""",
+                document_id, dataset_id,
+            )
+            execution = await conn.fetchrow(
+                """SELECT status, manifest FROM document_pipeline_executions
+                   WHERE execution_id = $1 AND document_id = $2 AND dataset_id = $3
+                   FOR UPDATE""",
+                execution_id, document_id, dataset_id,
+            )
+            if document is None or execution is None or execution["status"] != "running":
+                raise RuntimeError("special publication execution is not the running owner")
+            document_metadata = _json_object(document["metadata"])
+            if document_metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id:
+                raise RuntimeError("special publication lost its document generation owner")
+            manifest = _json_object(execution["manifest"])
+            special = _json_object(manifest.get(SPECIAL_PUBLICATION_MANIFEST_KEY))
+            if special.get("generation_id") != generation_id:
+                raise RuntimeError("special publication manifest generation differs")
+            if special.get("source_hash") != normalized_source_hash:
+                raise RuntimeError("special publication source hash changed")
+            if normalized_plan_hash and special.get("plan_hash") not in {
+                None, normalized_plan_hash
+            }:
+                raise RuntimeError("special publication candidate plan hash changed")
+            frozen_object_keys = special.get("planned_object_keys")
+            if not isinstance(frozen_object_keys, list):
+                raise RuntimeError("special publication object key plan is missing")
+            if (
+                planned_object_keys is not None
+                and frozen_object_keys != normalized_object_keys
+            ):
+                raise RuntimeError("special publication planned object keys changed")
+            frozen_collections = dict(_json_object(special.get("collections")))
+            frozen_objects = dict(_json_object(special.get("objects")))
+            if special.get("phase") == next_phase and expected_phase != next_phase:
+                if (
+                    normalized_plan_hash is not None
+                    and special.get("plan_hash") != normalized_plan_hash
+                ):
+                    raise RuntimeError("special publication candidate plan hash changed")
+                if additions and additions != frozen_collections:
+                    raise RuntimeError("special publication collection plan changed")
+                if new_objects and new_objects != frozen_objects:
+                    raise RuntimeError("special publication object plan changed")
+                return special
+            if special.get("phase") != expected_phase:
+                raise RuntimeError("special publication phase CAS failed")
+            if expected_phase == "preparing":
+                for name, points in additions.items():
+                    if name in frozen_collections and frozen_collections[name] != points:
+                        raise RuntimeError("special publication collection plan changed")
+                    frozen_collections[name] = points
+                for key, digest in new_objects.items():
+                    if key in frozen_objects and frozen_objects[key] != digest:
+                        raise RuntimeError("special publication object plan changed")
+                    frozen_objects[key] = digest
+                if next_phase == "prepared" and not (frozen_collections or frozen_objects):
+                    raise RuntimeError("special publication plan is incomplete")
+                if next_phase == "prepared" and sorted(frozen_objects) != frozen_object_keys:
+                    raise RuntimeError("prepared object receipts do not cover planned keys")
+                if next_phase == "prepared" and special.get("plan_hash") not in {
+                    None, normalized_plan_hash
+                }:
+                    raise RuntimeError("special publication candidate plan hash changed")
+            elif additions or new_objects:
+                if additions != frozen_collections or new_objects != frozen_objects:
+                    raise RuntimeError("prepared special publication plan is immutable")
+            committed_revision = special.get("publication_revision")
+            if next_phase == "committed" and document["status"] != "completed":
+                raise RuntimeError("special publication document is not completed")
+            if next_phase == "committed":
+                if type(committed_revision) is not int or committed_revision <= 0:
+                    raise RuntimeError("special publication has no bound lease revision")
+                # Migration 076 advances the negative revision for segment and
+                # document writes. Freeze its final value with the PG authority
+                # commit so a crash can still find this exact generation.
+                dataset = await conn.fetchrow(
+                    """SELECT content_revision FROM datasets
+                       WHERE dataset_id = $1 AND is_deleted = FALSE FOR UPDATE""",
+                    dataset_id,
+                )
+                if dataset is None or int(dataset["content_revision"]) >= 0:
+                    raise RuntimeError("special publication lost its negative revision")
+                current_revision = abs(int(dataset["content_revision"]))
+                if current_revision > committed_revision:
+                    raise RuntimeError("special publication negative revision changed owner")
+                committed_revision = current_revision
+            updated = {
+                **special,
+                "phase": next_phase,
+                "plan_hash": normalized_plan_hash or special.get("plan_hash"),
+                "collections": dict(sorted(frozen_collections.items())),
+                "objects": dict(sorted(frozen_objects.items())),
+            }
+            if next_phase == "committed":
+                updated["publication_revision"] = committed_revision
+            await conn.execute(
+                """UPDATE document_pipeline_executions
+                   SET manifest = jsonb_set(COALESCE(manifest, '{}'::jsonb),
+                       '{special_publication}', $2::jsonb, TRUE)
+                   WHERE execution_id = $1 AND status = 'running'""",
+                execution_id, json.dumps(updated),
+            )
+            return updated
+
+        if connection is not None:
+            return await _advance(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await _advance(conn)
+
+    async def get_special_publication_manifest(
+        self,
+        execution_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one durable special-generation owner without guessing from rows."""
+
+        async def _read(conn: Any) -> dict[str, Any] | None:
+            row = await conn.fetchrow(
+                """SELECT execution_id, document_id, dataset_id, status, manifest
+                   FROM document_pipeline_executions WHERE execution_id = $1""",
+                execution_id,
+            )
+            if row is None:
+                return None
+            special = _json_object(
+                _json_object(row["manifest"]).get(SPECIAL_PUBLICATION_MANIFEST_KEY)
+            )
+            if not special:
+                return None
+            return {
+                "execution_id": str(row["execution_id"]),
+                "document_id": str(row["document_id"]),
+                "dataset_id": str(row["dataset_id"]),
+                "execution_status": str(row["status"]),
+                **special,
+            }
+
+        if connection is not None:
+            return await _read(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            return await _read(conn)
+
+    async def bind_special_publication_revision(
+        self,
+        execution_id: str,
+        dataset_id: str,
+        revision: int,
+        *,
+        connection: Any,
+    ) -> dict[str, Any]:
+        """Bind one preparing generation to this lease's negative revision.
+
+        The caller owns the connection and transaction that wrote the negative
+        dataset revision. No second connection may observe or bind the lease.
+        """
+
+        publication_revision = int(revision)
+        if publication_revision >= 0 or connection is None:
+            raise ValueError("special publication binding needs a negative lease revision")
+        in_transaction = getattr(connection, "is_in_transaction", None)
+        if not callable(in_transaction) or not in_transaction():
+            raise RuntimeError("special publication binding requires the lease transaction")
+        dataset = await connection.fetchrow(
+            """SELECT content_revision FROM datasets
+               WHERE dataset_id = $1 AND is_deleted = FALSE FOR UPDATE""",
+            dataset_id,
+        )
+        if dataset is None or int(dataset["content_revision"]) != publication_revision:
+            raise RuntimeError("special publication lease revision changed before binding")
+        identity = await connection.fetchrow(
+            """SELECT document_id FROM document_pipeline_executions
+               WHERE execution_id = $1 AND dataset_id = $2""",
+            execution_id, dataset_id,
+        )
+        if identity is None:
+            raise RuntimeError("special publication execution owner is missing")
+        document_id = str(identity["document_id"])
+        document = await connection.fetchrow(
+            """SELECT metadata FROM documents
+               WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE""",
+            document_id, dataset_id,
+        )
+        execution = await connection.fetchrow(
+            """SELECT status, manifest FROM document_pipeline_executions
+               WHERE execution_id = $1 AND document_id = $2 AND dataset_id = $3
+               FOR UPDATE""",
+            execution_id, document_id, dataset_id,
+        )
+        if document is None or execution is None or execution["status"] != "running":
+            raise RuntimeError("special publication execution is not the running owner")
+        metadata = _json_object(document["metadata"])
+        special = _json_object(
+            _json_object(execution["manifest"]).get(SPECIAL_PUBLICATION_MANIFEST_KEY)
+        )
+        generation_id = str(special.get("generation_id") or "")
+        if (
+            special.get("phase") != "preparing"
+            or not generation_id
+            or metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id
+            or metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) != execution_id
+        ):
+            raise RuntimeError("special publication preparing owner changed")
+        bound_revision = special.get("publication_revision")
+        if bound_revision is not None and bound_revision != abs(publication_revision):
+            raise RuntimeError("special publication is bound to another revision")
+        conflicting = await connection.fetchval(
+            """SELECT execution_id FROM document_pipeline_executions
+               WHERE dataset_id = $1 AND execution_id <> $2
+                 AND status = 'running'
+                 AND manifest #>> '{special_publication,publication_revision}' = $3
+                 AND manifest #>> '{special_publication,phase}'
+                     IN ('preparing', 'prepared', 'points_written', 'committed')
+               LIMIT 1""",
+            dataset_id, execution_id, str(abs(publication_revision)),
+        )
+        if conflicting is not None:
+            raise RuntimeError("another special publication owns this revision")
+        if bound_revision is not None:
+            return special
+        bound = {**special, "publication_revision": abs(publication_revision)}
+        await connection.execute(
+            """UPDATE document_pipeline_executions
+               SET manifest = jsonb_set(COALESCE(manifest, '{}'::jsonb),
+                   '{special_publication}', $2::jsonb, TRUE)
+               WHERE execution_id = $1 AND status = 'running'""",
+            execution_id, json.dumps(bound),
+        )
+        return bound
+
+    async def get_active_special_publication_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any]:
+        """Return the unique running owner of a recovered negative fence.
+
+        Only one running nonterminal generation may own this dataset's negative
+        fence. Statement triggers can advance the negative revision after the
+        bind, so its absolute value must remain no greater than the frozen
+        binding. Other unbound preparations and terminal executions are not
+        owners. Zero or multiple bound owners leave the revision untouched.
+        """
+
+        async def _read(conn: Any) -> dict[str, Any]:
+            rows = await conn.fetch(
+                """SELECT e.execution_id, e.document_id, e.dataset_id,
+                          e.status, e.manifest, d.metadata AS document_metadata,
+                          ds.content_revision, ds.tenant_id
+                   FROM document_pipeline_executions AS e
+                   JOIN documents AS d
+                     ON d.document_id = e.document_id
+                    AND d.dataset_id = e.dataset_id
+                   JOIN datasets AS ds ON ds.dataset_id = e.dataset_id
+                   WHERE e.dataset_id = $1 AND e.status = 'running'
+                     AND ds.content_revision < 0 AND ds.is_deleted = FALSE
+                     AND COALESCE(e.manifest, '{}'::jsonb) ? 'special_publication'
+                     AND (e.manifest -> 'special_publication')
+                         ? 'publication_revision'
+                     AND e.manifest #>> '{special_publication,phase}'
+                         IN ('preparing', 'prepared', 'points_written', 'committed')
+                   ORDER BY e.created_at DESC, e.execution_id DESC
+                   LIMIT 2""",
+                dataset_id,
+            )
+            if len(rows) != 1:
+                raise RuntimeError("negative publication has no unique running owner")
+            row = rows[0]
+            special = _json_object(
+                _json_object(row["manifest"]).get(SPECIAL_PUBLICATION_MANIFEST_KEY)
+            )
+            metadata = _json_object(row["document_metadata"])
+            generation_id = str(special.get("generation_id") or "")
+            source_hash = str(special.get("source_hash") or "")
+            plan_hash = special.get("plan_hash")
+            planned_object_keys = special.get("planned_object_keys")
+            publication_revision = special.get("publication_revision")
+            if (
+                not generation_id
+                or not str(row["tenant_id"] or "").strip()
+                or type(publication_revision) is not int
+                or publication_revision <= 0
+                or abs(int(row["content_revision"])) > publication_revision
+                or len(source_hash) != 64
+                or any(character not in "0123456789abcdef" for character in source_hash)
+                or (
+                    special.get("phase") != "preparing"
+                    and (
+                        not isinstance(plan_hash, str)
+                        or len(plan_hash) != 64
+                        or any(character not in "0123456789abcdef" for character in plan_hash)
+                    )
+                )
+                or special.get("phase") not in {
+                    "preparing", "prepared", "points_written", "committed"
+                }
+                or not isinstance(planned_object_keys, list)
+                or planned_object_keys != _special_object_keys(planned_object_keys)
+                or metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id
+                or metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) != row["execution_id"]
+            ):
+                raise RuntimeError("negative publication owner manifest is invalid")
+            return {
+                "execution_id": str(row["execution_id"]),
+                "document_id": str(row["document_id"]),
+                "dataset_id": str(row["dataset_id"]),
+                "tenant_id": str(row["tenant_id"]),
+                "execution_status": str(row["status"]),
+                **special,
+            }
+
+        if connection is not None:
+            return await _read(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            return await _read(conn)
+
+    async def link_special_publication_recovery(
+        self,
+        original_execution_id: str,
+        recovery_execution_id: str,
+        document_id: str,
+        dataset_id: str,
+        generation_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any]:
+        """Carry the exact partial plan onto a newly claimed recover execution.
+
+        The ordinary queue already creates an immutable recovery execution and
+        marks its predecessor ``error``. This method only transfers its special
+        plan and links both rows; it never decides that external writes succeeded.
+        """
+
+        async def _link(conn: Any) -> dict[str, Any]:
+            document = await conn.fetchrow(
+                """SELECT metadata FROM documents
+                   WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE""",
+                document_id, dataset_id,
+            )
+            rows = await conn.fetch(
+                """SELECT execution_id, status, manifest
+                   FROM document_pipeline_executions
+                   WHERE execution_id = ANY($1::text[])
+                     AND document_id = $2 AND dataset_id = $3
+                   ORDER BY execution_id FOR UPDATE""",
+                [original_execution_id, recovery_execution_id], document_id, dataset_id,
+            )
+            by_id = {str(row["execution_id"]): row for row in rows}
+            original = by_id.get(original_execution_id)
+            recovered = by_id.get(recovery_execution_id)
+            if document is None or original is None or recovered is None:
+                raise RuntimeError("special publication recovery lineage is incomplete")
+            metadata = _json_object(document["metadata"])
+            if (
+                metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id
+                or metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) != recovery_execution_id
+                or original["status"] != "error"
+                or recovered["status"] != "running"
+            ):
+                raise RuntimeError("special publication recovery changed owner")
+            old_manifest = _json_object(original["manifest"])
+            new_manifest = _json_object(recovered["manifest"])
+            special = _json_object(old_manifest.get(SPECIAL_PUBLICATION_MANIFEST_KEY))
+            if (
+                special.get("generation_id") != generation_id
+                or special.get("phase") in {"committed", "aborted"}
+                or new_manifest.get("recovered_from_execution_id") not in {
+                    None, original_execution_id
+                }
+                or old_manifest.get("recovered_by_execution_id") not in {
+                    None, recovery_execution_id
+                }
+            ):
+                raise RuntimeError("special publication recovery manifest conflicts")
+            existing = _json_object(new_manifest.get(SPECIAL_PUBLICATION_MANIFEST_KEY))
+            if existing and existing != special:
+                raise RuntimeError("recover execution already owns another generation")
+            if not existing:
+                new_manifest[SPECIAL_PUBLICATION_MANIFEST_KEY] = special
+                new_manifest["recovered_from_execution_id"] = original_execution_id
+                await conn.execute(
+                    """UPDATE document_pipeline_executions
+                       SET manifest = $2::jsonb
+                       WHERE execution_id = $1 AND status = 'running'""",
+                    recovery_execution_id, json.dumps(new_manifest),
+                )
+            if old_manifest.get("recovered_by_execution_id") is None:
+                old_manifest["recovered_by_execution_id"] = recovery_execution_id
+                await conn.execute(
+                    """UPDATE document_pipeline_executions
+                       SET manifest = $2::jsonb
+                       WHERE execution_id = $1 AND status = 'error'""",
+                    original_execution_id, json.dumps(old_manifest),
+                )
+            return special
+
+        if connection is not None:
+            return await _link(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await _link(conn)
+
+    async def reconcile_special_publication_execution(
+        self,
+        execution_id: str,
+        document_id: str,
+        dataset_id: str,
+        generation_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> str:
+        """Idempotently close only an evidenced committed/aborted execution.
+
+        A completed document by itself is not proof: old running ledger rows
+        without this generation's committed manifest remain ``unproven``.
+        """
+
+        async def _reconcile(conn: Any) -> str:
+            document = await conn.fetchrow(
+                """SELECT status, metadata FROM documents
+                   WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE""",
+                document_id, dataset_id,
+            )
+            execution = await conn.fetchrow(
+                """SELECT status, manifest FROM document_pipeline_executions
+                   WHERE execution_id = $1 AND document_id = $2 AND dataset_id = $3
+                   FOR UPDATE""",
+                execution_id, document_id, dataset_id,
+            )
+            if document is None or execution is None:
+                return "unproven"
+            metadata = _json_object(document["metadata"])
+            special = _json_object(
+                _json_object(execution["manifest"]).get(SPECIAL_PUBLICATION_MANIFEST_KEY)
+            )
+            if (
+                special.get("generation_id") != generation_id
+            ):
+                return "unproven"
+            phase = special.get("phase")
+            if phase == "committed" and document["status"] == "completed":
+                terminal, error = "completed", None
+            elif phase == "aborted" and document["status"] == "error":
+                terminal, error = "error", "special publication aborted after cleanup"
+            else:
+                return "unproven"
+            if execution["status"] == terminal:
+                return "already_terminal"
+            if execution["status"] != "running":
+                return "unproven"
+            if metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id:
+                return "unproven"
+            closed = await self.complete_pipeline_execution(
+                execution_id,
+                status=terminal,
+                error=error,
+                connection=conn,
+            )
+            if not closed:
+                raise RuntimeError("special publication execution close lost its CAS")
+            await conn.execute(
+                """UPDATE documents
+                   SET metadata = COALESCE(metadata, '{}'::jsonb)
+                       - '_special_publication_generation_id'
+                   WHERE document_id = $1 AND dataset_id = $2
+                     AND metadata ->> '_special_publication_generation_id' = $3""",
+                document_id, dataset_id, generation_id,
+            )
+            return "reconciled"
+
+        if connection is not None:
+            return await _reconcile(connection)
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await _reconcile(conn)
 
     # ------------------------------------------------------------------
     # Process-rule snapshots (PRD T1 item 7). A rule row is an immutable,

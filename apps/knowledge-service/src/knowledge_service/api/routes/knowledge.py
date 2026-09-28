@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import json
 import logging
 import math
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +52,7 @@ from ...services.knowledge.document_service import (
 )
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.query_observability import QueryObservationConflictError
+from ...services.knowledge.special_publication import SOURCE_MANIFEST_KEY
 from ...services.knowledge.upload_budget import require_parser_budget
 from ...services.knowledge.worker import KnowledgeIngestTask, KnowledgeWorker
 from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
@@ -2339,6 +2342,63 @@ async def _run_hierarchical_retrieval(
     return hierarchical_results, hierarchical_meta
 
 
+async def _published_source_identity_map(
+    svc: KnowledgeService,
+    user: UserContext,
+    dataset_id: str,
+    document_ids: list[str],
+    expected_generation: Any,
+) -> dict[str, tuple[int, str]]:
+    if not document_ids:
+        return {}
+    lookup = getattr(getattr(svc, "db", None), "published_source_identities", None)
+    if not callable(lookup):
+        return {}
+    if expected_generation is None:
+        return {}
+    await _require_unchanged_dataset_content(
+        svc, user, dataset_id, expected_generation,
+    )
+    identities = await lookup(dataset_id, user.tenant_id, document_ids)
+    if not isinstance(identities, dict) or not set(identities) <= set(document_ids):
+        raise RuntimeError("published source identity lookup is invalid")
+    await _require_unchanged_dataset_content(
+        svc, user, dataset_id, expected_generation,
+    )
+    return identities
+
+
+def _source_identity(
+    metadata: dict[str, Any] | None,
+    document_id: str,
+    identities: dict[str, tuple[int, str]],
+) -> tuple[int, str] | None:
+    payload = metadata if isinstance(metadata, dict) else {}
+    nested = payload.get("metadata")
+    nested = nested if isinstance(nested, dict) else {}
+    if (
+        payload.get("source_type") == "manual"
+        or payload.get("manual_source_override") is True
+        or nested.get("manual_source_override") is True
+    ):
+        return None
+    return identities.get(document_id)
+
+
+def _source_metadata(
+    metadata: dict[str, Any] | None,
+    document_id: str,
+    identities: dict[str, tuple[int, str]],
+) -> dict[str, Any]:
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.pop("source_version", None)
+    result.pop("source_hash", None)
+    identity = _source_identity(result, document_id, identities)
+    if identity:
+        result["source_version"], result["source_hash"] = identity
+    return result
+
+
 @router.post("/knowledge/{dataset_id}/retrieve")
 async def retrieve(
     dataset_id: str,
@@ -2348,6 +2408,11 @@ async def retrieve(
 ):
     try:
         _require_authenticated_user(user)
+        source_generation = None
+        require_access = getattr(svc, "require_dataset_access", None)
+        if callable(require_access):
+            source_dataset = await require_access(user, dataset_id, required="viewer")
+            source_generation = _dataset_content_generation(source_dataset)
         # Use hierarchical retrieval if enabled
         if payload.hierarchical:
             hierarchical_results, hierarchical_meta = await _run_hierarchical_retrieval(
@@ -2381,6 +2446,10 @@ async def retrieve(
                 },
                 source="hierarchical",
             )
+            identities = await _published_source_identity_map(
+                svc, user, dataset_id, [r.document_id for r in hierarchical_results],
+                source_generation,
+            )
             return {
                 "results": [
                     {
@@ -2389,7 +2458,9 @@ async def retrieve(
                         "score": r.score,
                         "text": r.text,
                         "level": r.level,
-                        "metadata": r.metadata,
+                        "metadata": _source_metadata(r.metadata, r.document_id, identities),
+                        "source_version": (_source_identity(r.metadata, r.document_id, identities) or (None, None))[0],
+                        "source_hash": (_source_identity(r.metadata, r.document_id, identities) or (None, None))[1],
                         "parent_context": r.parent_context,
                         "document_summary": r.document_summary,
                     }
@@ -2471,6 +2542,10 @@ async def retrieve(
                 metadata_filter=payload.metadata_filter,
             )
 
+        identities = await _published_source_identity_map(
+            svc, user, dataset_id, [r.document_id for r in retrieval_results],
+            source_generation,
+        )
         # Build response with multimodal and source traceability fields.
         return {
             "results": [
@@ -2479,7 +2554,9 @@ async def retrieve(
                     "document_id": r.document_id,
                     "score": r.score,
                     "text": r.text,
-                    "metadata": r.metadata,
+                    "metadata": _source_metadata(r.metadata, r.document_id, identities),
+                    "source_version": (_source_identity(r.metadata, r.document_id, identities) or (None, None))[0],
+                    "source_hash": (_source_identity(r.metadata, r.document_id, identities) or (None, None))[1],
                     # P3: Multimodal fields
                     "content_type": getattr(r, "content_type", "text"),
                     "image_url": getattr(r, "image_url", None),
@@ -4515,6 +4592,51 @@ async def get_document_version(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/{version_number:int}/source")
+async def get_historical_document_source(
+    dataset_id: str,
+    document_id: str,
+    version_number: int,
+    source_hash: str = Query(..., alias="hash", min_length=64, max_length=64),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+) -> dict[str, Any]:
+    """Return only an exact saved source version under current document rights."""
+
+    normalized_hash = source_hash.strip().lower()
+    if version_number <= 0 or not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+        raise HTTPException(status_code=404, detail={"code": "SOURCE_VERSION_UNAVAILABLE"})
+    try:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        await _require_active_document(
+            svc, dataset=dataset, dataset_id=dataset_id, document_id=document_id,
+        )
+        version = await svc.db.get_document_version(document_id, version_number)
+        content = (version or {}).get("content")
+        if (
+            not version
+            or str(version.get("change_type") or "").startswith("pending_")
+            or not isinstance(content, str)
+            or str(version.get("content_hash") or "").lower() != normalized_hash
+            or hashlib.sha256(content.encode("utf-8")).hexdigest() != normalized_hash
+        ):
+            raise ValidationFailedError("source version is unavailable")
+        await _require_unchanged_dataset_content(svc, user, dataset_id, generation)
+        await _require_active_document(
+            svc, dataset=dataset, dataset_id=dataset_id, document_id=document_id,
+        )
+        return {
+            "document_id": document_id,
+            "version_number": version_number,
+            "source_hash": normalized_hash,
+            "title": str(version.get("title") or ""),
+            "content": content,
+        }
+    except (PermissionDeniedError, ValidationFailedError):
+        raise HTTPException(status_code=404, detail={"code": "SOURCE_VERSION_UNAVAILABLE"}) from None
+
+
 @router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/compare")
 async def compare_document_versions(
     dataset_id: str,
@@ -4672,12 +4794,6 @@ async def restore_document_version(
                 ):
                     raise ValidationFailedError("Document is not active and restore-ready")
 
-                await worker.require_safe_restore_admission(
-                    KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id),
-                    authoritative_dataset,
-                    connection=lease_connection,
-                )
-
                 # Read version content only after exact dataset/tenant/lifecycle
                 # ownership has been revalidated under the document lease.
                 version_to_restore = await svc.db.get_document_version(
@@ -4686,6 +4802,48 @@ async def restore_document_version(
                 )
                 if not version_to_restore:
                     raise ValidationFailedError(f"Version {version_number} not found")
+
+                target_metadata = version_to_restore.get("metadata")
+                target_metadata = target_metadata if isinstance(target_metadata, dict) else {}
+                target_source = target_metadata.get(SOURCE_MANIFEST_KEY)
+                source_kind = (
+                    str(target_source.get("source_kind") or "")
+                    if isinstance(target_source, dict) else ""
+                )
+                special_target = target_source is not None or (
+                    target_metadata.get("processing_mode") == "scanned"
+                    or bool(target_metadata.get("l1_segments"))
+                )
+                if special_target:
+                    restored_text = str(version_to_restore.get("content") or "")
+                    digest = hashlib.sha256(restored_text.encode("utf-8")).hexdigest()
+                    if (
+                        not isinstance(target_source, dict)
+                        or source_kind not in {"hierarchy", "vision"}
+                        or str(version_to_restore.get("content_hash") or "") != digest
+                        or target_source.get("content_hash") != digest
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(target_source.get("source_hash") or ""))
+                        or not isinstance(target_source.get("index_config"), dict)
+                        or (source_kind == "hierarchy" and target_source["source_hash"] != digest)
+                        or (source_kind == "vision" and (
+                            not str(target_source.get("original_source_key") or "").startswith(
+                                f"knowledge/documents/{authoritative_dataset['tenant_id']}/{document_id}/original/"
+                            )
+                            or not isinstance(target_source.get("page_texts"), list)
+                            or not target_source["page_texts"]
+                        ))
+                    ):
+                        raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+                    if target_source["index_config"] != (
+                        authoritative_dataset.get("index_config") or {}
+                    ):
+                        raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+                else:
+                    await worker.require_safe_restore_admission(
+                        KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id),
+                        authoritative_dataset,
+                        connection=lease_connection,
+                    )
 
                 current_content = str(doc.get("content") or "")
                 current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
@@ -4743,7 +4901,10 @@ async def restore_document_version(
                     raise RuntimeError("restore candidate version could not be saved")
                 if candidate_version <= previous_version:
                     raise RuntimeError("restore candidate version order is invalid")
-                index_config = copy.deepcopy(authoritative_dataset.get("index_config") or {})
+                index_config = copy.deepcopy(
+                    target_source["index_config"] if special_target
+                    else authoritative_dataset.get("index_config") or {}
+                )
                 if not isinstance(index_config, dict):
                     raise ValidationFailedError("Restore index configuration is invalid")
                 chunking = index_config.get("chunking") or {}
@@ -4753,9 +4914,12 @@ async def restore_document_version(
                 replay_snapshot = {
                     "index_config": index_config,
                     "chunking": copy.deepcopy(chunking),
-                    "processing_mode": "text_only",
+                    "processing_mode": "scanned" if source_kind == "vision" else "text_only",
                     "restore_source_version": version_number,
                 }
+                if special_target:
+                    replay_snapshot["restore_source_kind"] = source_kind
+                    replay_snapshot["restore_source_hash"] = target_source["source_hash"]
                 rule_id = await svc.db.record_process_rule(
                     dataset_id,
                     mode=str(chunking.get("mode") or "automatic"),
@@ -4897,6 +5061,21 @@ class DocumentAuthorizeResponse(BaseModel):
     allowed_document_ids: list[str]
 
 
+class DocumentSourceReference(BaseModel):
+    document_id: str
+    source_version: int = Field(gt=0)
+    source_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class DocumentSourceAuthorizeRequest(BaseModel):
+    dataset_id: str
+    references: list[DocumentSourceReference] = Field(default_factory=list, max_length=500)
+
+
+class DocumentSourceAuthorizeResponse(BaseModel):
+    allowed_references: list[DocumentSourceReference]
+
+
 @router.post(
     "/internal/knowledge/datasets/authorize",
     response_model=DatasetAuthorizeResponse,
@@ -4989,3 +5168,48 @@ async def authorize_gateway_documents(
         body.dataset_id, tenant_id, requested,
     )
     return DocumentAuthorizeResponse(allowed_document_ids=sorted(allowed))
+
+
+@router.post(
+    "/internal/knowledge/document-sources/authorize",
+    response_model=DocumentSourceAuthorizeResponse,
+    dependencies=[Depends(require_verified_gateway)],
+)
+async def authorize_gateway_document_sources(
+    request: Request,
+    body: DocumentSourceAuthorizeRequest = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+) -> DocumentSourceAuthorizeResponse:
+    """Authorize exact immutable source versions under current viewer rights."""
+
+    user_id = request.headers.get("X-User-Id", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id", "").strip()
+    if not user_id or not tenant_id:
+        raise HTTPException(status_code=401, detail={"code": "AUTH_DENIED"})
+    roles_raw = request.headers.get("X-User-Roles", "").strip()
+    user = UserContext(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        user_tier=request.headers.get("X-User-Tier", "normal").strip(),
+        user_type=request.headers.get("X-User-Type", "user").strip(),
+        roles=[role.strip() for role in roles_raw.split(",") if role.strip()] or ["user"],
+    )
+    try:
+        await svc.require_dataset_access(user, body.dataset_id, required="viewer")
+    except (PermissionDeniedError, ValidationFailedError):
+        return DocumentSourceAuthorizeResponse(allowed_references=[])
+    requested = [
+        (item.document_id, item.source_version, item.source_hash.lower())
+        for item in body.references
+    ]
+    allowed = await svc.db.authorize_document_source_versions(
+        body.dataset_id, tenant_id, requested,
+    )
+    return DocumentSourceAuthorizeResponse(allowed_references=[
+        DocumentSourceReference(
+            document_id=document_id,
+            source_version=version,
+            source_hash=source_hash,
+        )
+        for document_id, version, source_hash in sorted(allowed)
+    ])

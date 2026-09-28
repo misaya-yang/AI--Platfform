@@ -262,6 +262,7 @@ class HierarchicalRetriever:
 
         Each level filters candidates for the next level.
         """
+        del vector_dim
         import time
 
         # Step 1: L1 Document-level search
@@ -286,6 +287,7 @@ class HierarchicalRetriever:
             dataset_id=dataset_id,
             tenant_id=tenant_id,
             require_segments=False,
+            require_summary=True,
         )
         metadata.l1_candidates = len(l1_results)
         metadata.filtered_documents = [r["document_id"] for r in l1_results]
@@ -389,6 +391,7 @@ class HierarchicalRetriever:
         """
         Parallel retrieval: Search all levels at once, RRF fusion.
         """
+        del vector_dim
         import time
 
         # Define collections
@@ -439,6 +442,7 @@ class HierarchicalRetriever:
                 dataset_id=dataset_id,
                 tenant_id=tenant_id,
                 require_segments=False,
+                require_summary=True,
             ),
             self._filter_active_layer(
                 l2_results,
@@ -569,6 +573,7 @@ class HierarchicalRetriever:
         dataset_id: str,
         tenant_id: str,
         require_segments: bool,
+        require_summary: bool = False,
     ) -> list[dict[str, Any]]:
         """Apply PostgreSQL document/segment lifecycle authority to one layer."""
 
@@ -618,6 +623,27 @@ class HierarchicalRetriever:
             for item in results
             if str(item.get("document_id") or "").strip() in normalized_documents
         ]
+        if require_summary and filtered:
+            filter_summaries = getattr(self.db, "filter_active_summary_vector_ids", None)
+            if not callable(filter_summaries):
+                raise HierarchicalAuthorityError("hierarchical summary authority is unavailable")
+            summary_ids = [
+                str(item.get("segment_id") or item.get("id") or "").strip()
+                for item in filtered
+            ]
+            try:
+                active_summaries = await filter_summaries(
+                    dataset_id, tenant_id, summary_ids,
+                )
+            except Exception as exc:
+                raise HierarchicalAuthorityError("hierarchical summary authority failed") from exc
+            if not set(active_summaries).issubset(set(summary_ids)):
+                raise HierarchicalAuthorityError("hierarchical summary authority returned an unexpected point")
+            filtered = [
+                item for item in filtered
+                if str(item.get("segment_id") or item.get("id") or "").strip()
+                in active_summaries
+            ]
         if not require_segments or not filtered:
             return filtered
 
@@ -665,6 +691,7 @@ class HierarchicalRetriever:
         tenant_id: str,
     ) -> list[HierarchicalResult]:
         """Add parent context to L3 results."""
+        del vector_dim
         if not self.db:
             return results
 

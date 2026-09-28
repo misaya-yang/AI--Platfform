@@ -79,13 +79,24 @@ def _project_knowledge_contexts(events: list[Any], allowed_datasets: dict[str, s
             if not isinstance(content, str):
                 continue
             score = raw.get("score")
+            raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            source_version = raw.get("source_version")
+            if source_version is None:
+                source_version = raw_metadata.get("source_version")
+            source_hash = raw.get("source_hash")
+            if source_hash is None:
+                source_hash = raw_metadata.get("source_hash")
+            citation_metadata = {
+                "document_id": raw.get("document_id") if isinstance(raw.get("document_id"), str) else raw_metadata.get("document_id"),
+                "segment_id": raw.get("segment_id") if isinstance(raw.get("segment_id"), str) else raw_metadata.get("segment_id"),
+            }
+            if source_version is not None or source_hash is not None:
+                citation_metadata["source_version"] = source_version
+                citation_metadata["source_hash"] = source_hash
             grouped.setdefault(dataset_id, []).append({
                 "content": content[:2000],
                 "score": float(score) if isinstance(score, (int, float)) else 0.0,
-                "metadata": {
-                    "document_id": raw.get("document_id") if isinstance(raw.get("document_id"), str) else None,
-                    "segment_id": raw.get("segment_id") if isinstance(raw.get("segment_id"), str) else None,
-                },
+                "metadata": citation_metadata,
             })
     return [
         {"dataset_id": dataset_id, "dataset_name": allowed_datasets[dataset_id],

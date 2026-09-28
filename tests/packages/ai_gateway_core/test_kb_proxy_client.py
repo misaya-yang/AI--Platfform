@@ -111,6 +111,33 @@ async def test_document_authorization_uses_signed_identity_and_rejects_unrequest
 
 
 @pytest.mark.asyncio
+async def test_source_version_authorization_rejects_unrequested_identity() -> None:
+    source_hash = "a" * 64
+    requested = {"document_id": "document-a", "source_version": 2, "source_hash": source_hash}
+    responses = [[requested], [{**requested, "source_version": 3}]]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/internal/knowledge/document-sources/authorize"
+        assert request.headers["x-user-id"] == "u1"
+        assert json.loads(request.content)["references"] == [requested]
+        return httpx.Response(200, json={"allowed_references": responses.pop(0)})
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(handler),
+    )
+    actor = SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal", roles=["user"])
+    try:
+        assert await client.authorize_document_sources(
+            actor, "dataset-a", [requested],
+        ) == {("document-a", 2, source_hash)}
+        with pytest.raises(ValueError, match="unknown identity"):
+            await client.authorize_document_sources(actor, "dataset-a", [requested])
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_kb_proxy_client_forwards_supported_retrieval_options() -> None:
     seen_payload: dict[str, object] = {}
 

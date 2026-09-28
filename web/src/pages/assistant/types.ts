@@ -191,6 +191,10 @@ export interface MessageAttachment {
 export interface RetrievedChunk {
   content: string;
   score: number;
+  dataset_id?: string;
+  document_id?: string;
+  source_version?: number;
+  source_hash?: string;
   metadata?: Record<string, unknown>;
   source_url?: string;
   image_url?: string;

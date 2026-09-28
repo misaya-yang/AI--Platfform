@@ -2294,7 +2294,6 @@ class IngestionService:
                 snapshots: dict[str, Any] = {}
                 backups_ready = False
                 mutation_started = False
-                authority_committed = False
                 active_context: dict[str, Any] | None = None
                 if lifecycle_service is not None:
                     active_context = await lifecycle_service.active_publication_context(
@@ -2345,18 +2344,12 @@ class IngestionService:
                             lifecycle_lease_held=True,
                             affects_bm25_scope=affects_bm25_scope,
                         )
-                    result = await commit(
-                        publication_connection,
-                        finish_publication=active_context is None,
-                    )
-                    authority_committed = True
-                    if active_context is not None:
-                        certification = (
-                            await lifecycle_service.recertify_active_publication(
-                                active_context,
-                                publication_revision=publication_revision,
-                            )
+                    if active_context is None:
+                        result = await commit(
+                            publication_connection,
+                            finish_publication=True,
                         )
+                    else:
                         finish_publication = getattr(
                             self.db,
                             "finish_index_publication",
@@ -2367,6 +2360,15 @@ class IngestionService:
                                 "deferred index publication finalization is unavailable"
                             )
                         async with publication_connection.transaction():
+                            result = await commit(
+                                publication_connection,
+                                finish_publication=False,
+                            )
+                            certification = await lifecycle_service.recertify_active_publication(
+                                active_context,
+                                publication_revision=publication_revision,
+                                connection=publication_connection,
+                            )
                             final_revision = await finish_publication(
                                 dataset_id,
                                 connection=publication_connection,
@@ -2383,7 +2385,7 @@ class IngestionService:
                                 certification,
                                 connection=publication_connection,
                             )
-                except BaseException as publication_error:
+                except BaseException:
                     if not backups_ready and publication.recovered:
                         raise RuntimeError(
                             "unfinished index publication could not recover its durable backups; "
@@ -2406,30 +2408,49 @@ class IngestionService:
                                 "index publication rollback was incomplete; retrieval remains "
                                 "fenced"
                             ) from rollback_error
-                    if authority_committed and active_context is not None:
-                        raise RuntimeError(
-                            "active BM25 v2 publication failed after PostgreSQL authority "
-                            "committed; old vectors were restored and the negative revision "
-                            "remains fail-closed for recovery"
-                        ) from publication_error
                     try:
-                        if backup_point_ids:
-                            await self.vector_store.delete_points(
-                                collection,
-                                backup_point_ids,
-                                tenant_id=tenant_id,
-                                dataset_id=dataset_id,
-                                lifecycle_lease_held=True,
-                                affects_bm25_scope=False,
+                        if active_context is None:
+                            await abort(
+                                dataset_id,
+                                connection=publication_connection,
                             )
-                        await abort(
-                            dataset_id,
-                            connection=publication_connection,
-                        )
+                        else:
+                            finish_publication = getattr(
+                                self.db, "finish_index_publication", None,
+                            )
+                            if not callable(finish_publication):
+                                raise RuntimeError("active publication finalizer is unavailable")
+                            async with publication_connection.transaction():
+                                restored = await lifecycle_service.recertify_active_publication(
+                                    active_context,
+                                    publication_revision=publication_revision,
+                                    connection=publication_connection,
+                                )
+                                final_revision = await finish_publication(
+                                    dataset_id, connection=publication_connection,
+                                )
+                                if int(final_revision) != int(restored["target_revision"]):
+                                    raise RuntimeError("restored BM25 v2 revision disagrees")
+                                await lifecycle_service.settle_active_publication(
+                                    active_context, restored,
+                                    connection=publication_connection,
+                                )
                     except BaseException as rollback_error:
                         raise RuntimeError(
                             "index publication rollback was incomplete; retrieval remains fenced"
                         ) from rollback_error
+                    if backup_point_ids:
+                        try:
+                            await self.vector_store.delete_points(
+                                collection, backup_point_ids,
+                                tenant_id=tenant_id, dataset_id=dataset_id,
+                                lifecycle_lease_held=True, affects_bm25_scope=False,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Coherent rollback retained disabled point backups",
+                                exc_info=True,
+                            )
                     raise
 
                 if backup_point_ids:

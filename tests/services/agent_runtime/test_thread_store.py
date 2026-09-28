@@ -5,7 +5,25 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.services.agent_runtime.thread_store import AgentThreadStore, ThreadStoreError
+from src.services.agent_runtime.thread_store import (
+    AgentThreadStore,
+    ThreadStoreError,
+    _project_knowledge_contexts,
+)
+
+
+def test_context_projection_preserves_exact_version_and_old_excerpt() -> None:
+    source_hash = "a" * 64
+    events = [{"event_type": "context_retrieved", "data": {"chunks": [
+        {"dataset_id": "visible", "document_id": "doc-a", "content": "new excerpt",
+         "source_version": None, "metadata": {"source_version": 2, "source_hash": source_hash}},
+        {"dataset_id": "visible", "document_id": "doc-b", "content": "old excerpt"},
+    ]}}]
+    contexts = _project_knowledge_contexts(events, {"visible": "Visible KB"})
+    new_meta, old_meta = [chunk["metadata"] for chunk in contexts[0]["chunks"]]
+    assert (new_meta["source_version"], new_meta["source_hash"]) == (2, source_hash)
+    assert new_meta["document_id"] == "doc-a"
+    assert "source_version" not in old_meta and "source_hash" not in old_meta
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,7 @@ class FakeLifecycleStore:
         self.busy_documents = 0
         self.dispatchable_documents = 0
         self.authority_points = list(POINTS)
+        self.last_authority_connection: Any | None = None
         self.flip_fails = False
         self._held = False
 
@@ -359,8 +360,14 @@ class FakeLifecycleStore:
         return dict(self.dataset)
 
     async def authority_snapshot(
-        self, *, collection_name: str, tenant_id: str, dataset_id: str
+        self,
+        *,
+        collection_name: str,
+        tenant_id: str,
+        dataset_id: str,
+        connection: Any | None = None,
     ) -> AuthoritySnapshot:
+        self.last_authority_connection = connection
         ids_sha, source_sha = _digest_pair(self.authority_points)
         return AuthoritySnapshot(
             collection_name=collection_name,
@@ -592,10 +599,13 @@ async def test_active_runtime_publication_recertifies_receipt_and_epoch() -> Non
 
     context = await service.active_publication_context("dataset-a")
     assert context is not None
+    publication_connection = object()
     certification = await service.recertify_active_publication(
         context,
         publication_revision=-1007,
+        connection=publication_connection,
     )
+    assert lifecycle.last_authority_connection is publication_connection
     assert certification["target_revision"] == 1006
     assert store.receipt is not None
     assert store.receipt["authority_content_revision"] == 1006

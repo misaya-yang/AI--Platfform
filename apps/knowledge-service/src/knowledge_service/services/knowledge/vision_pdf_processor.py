@@ -7,11 +7,14 @@ Page-as-image processing for scanned PDFs using multimodal embedding.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
+from qdrant_client.http import models as qmodels
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,25 @@ class ProcessingResult:
     error: str | None = None
     extracted_texts: dict[int, str] | None = None  # page_number -> OCR text
     segment_ids: list[str] | None = None
+
+
+@dataclass
+class VisionCandidatePlan:
+    """Unpublished page images and vectors for one durable execution."""
+
+    generation_id: str
+    document_id: str
+    dataset_id: str
+    points_by_collection: dict[str, list[qmodels.PointStruct]]
+    segment_rows: list[dict[str, Any]]
+    object_manifest: list[dict[str, Any]]
+    content: str
+    source_hash: str
+    segment_ids: list[str]
+    total_pages: int
+    processed_pages: int
+    failed_pages: int
+    extracted_texts: dict[int, str]
 
 
 class VisionPDFProcessor:
@@ -58,6 +80,50 @@ class VisionPDFProcessor:
         except ImportError:
             import fitz  # type: ignore
         return fitz
+
+    @staticmethod
+    def _candidate_generation_id(generation_id: str) -> str:
+        try:
+            return str(uuid.UUID(str(generation_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("generation_id must be a durable UUID") from exc
+
+    @staticmethod
+    def _candidate_attachment_id(page_number: int, generation_id: str) -> str:
+        return f"page_{page_number}_g{uuid.UUID(generation_id).hex}"
+
+    async def planned_object_keys(
+        self,
+        pdf_bytes: bytes,
+        document_id: str,
+        *,
+        generation_id: str,
+        tenant_id: str,
+        storage_service: Any,
+        page_offset: int = 0,
+    ) -> list[str]:
+        """Enumerate every candidate page key before any image is uploaded."""
+
+        generation = self._candidate_generation_id(generation_id)
+        if not document_id or not tenant_id or page_offset < 0:
+            raise ValueError("document, tenant and nonnegative page_offset are required")
+        generate_key = getattr(storage_service, "_generate_key", None)
+        if not callable(generate_key):
+            raise RuntimeError("candidate image storage keys are unavailable")
+        total_pages = await asyncio.to_thread(self._pdf_page_count, pdf_bytes)
+        if total_pages <= 0:
+            raise ValueError("scanned candidate has no pages")
+        keys = [
+            str(generate_key(
+                tenant_id, document_id,
+                self._candidate_attachment_id(page_offset + page_index + 1, generation),
+                f"page_{page_offset + page_index + 1}.png",
+            ))
+            for page_index in range(total_pages)
+        ]
+        if any(not key.strip() for key in keys) or len(set(keys)) != total_pages:
+            raise RuntimeError("candidate image storage keys are invalid")
+        return keys
 
     def _render_page(self, page: Any) -> tuple[bytes | None, tuple[int, int] | None]:
         """Render a PDF page to PNG bytes, shrinking if needed to fit size limits."""
@@ -423,3 +489,245 @@ class VisionPDFProcessor:
                 failed_pages=0,
                 error=f"{exc}{suffix}",
             )
+
+    async def prepare_document(
+        self,
+        pdf_bytes: bytes,
+        document_id: str,
+        dataset_id: str,
+        collection: str,
+        *,
+        generation_id: str,
+        tenant_id: str,
+        storage_service: Any,
+        text_extractor: Callable[[bytes], Awaitable[str]] | None = None,
+        pinned_page_texts: dict[int, str] | None = None,
+        page_offset: int = 0,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> VisionCandidatePlan:
+        """Prepare a complete page generation without publishing old point IDs.
+
+        Image objects use the durable execution ID in their storage key, so a
+        failed or interrupted candidate cannot replace the serving image bytes.
+        The caller persists the returned manifest and publishes the points and
+        rows under one cross-store index publication fence.
+        """
+
+        generation = self._candidate_generation_id(generation_id)
+        if not all((document_id, dataset_id, collection, tenant_id)) or page_offset < 0:
+            raise ValueError("document, dataset, collection, tenant and nonnegative page_offset are required")
+        upload_image = getattr(storage_service, "upload_image", None)
+        if not callable(upload_image):
+            raise RuntimeError("candidate image object storage is unavailable")
+        image_exists = getattr(storage_service, "image_exists", None)
+        download_image = getattr(storage_service, "download_image", None)
+        if not callable(image_exists) or not callable(download_image):
+            raise RuntimeError("candidate image object storage must support read-back")
+        from .ingestion_service import _require_extracted_text_budget
+
+        total_pages = await asyncio.to_thread(self._pdf_page_count, pdf_bytes)
+        if total_pages <= 0:
+            raise ValueError("scanned candidate has no pages")
+        if pinned_page_texts is not None:
+            expected_numbers = set(range(page_offset + 1, page_offset + total_pages + 1))
+            if (
+                not isinstance(pinned_page_texts, dict)
+                or any(type(number) is not int or not isinstance(value, str)
+                       for number, value in pinned_page_texts.items())
+                or set(pinned_page_texts) != expected_numbers
+            ):
+                raise ValueError("pinned page texts must cover exactly the rendered pages")
+            _require_extracted_text_budget("\n\n".join(
+                f"[Page {number}]\n{pinned_page_texts[number]}"
+                for number in sorted(pinned_page_texts) if pinned_page_texts[number]
+            ))
+        points: list[qmodels.PointStruct] = []
+        segment_rows: list[dict[str, Any]] = []
+        object_manifest: list[dict[str, Any]] = []
+        extracted_texts: dict[int, str] = {}
+        processed_pages = 0
+
+        try:
+            for batch_start in range(0, total_pages, self.batch_size):
+                rendered = await asyncio.to_thread(
+                    self._render_page_batch,
+                    pdf_bytes,
+                    batch_start,
+                    min(batch_start + self.batch_size, total_pages),
+                )
+                expected_pages = range(batch_start, min(batch_start + self.batch_size, total_pages))
+                if [page_index for page_index, _image, _dims in rendered] != list(expected_pages):
+                    raise RuntimeError("scanned candidate render batch is incomplete")
+                batch_images: list[bytes] = []
+                batch_meta: list[dict[str, Any]] = []
+                for page_index, image_bytes, dimensions in rendered:
+                    if not image_bytes or not dimensions:
+                        raise RuntimeError(f"scanned candidate page {page_index + 1} could not render")
+                    page_number = page_offset + page_index + 1
+                    if pinned_page_texts is not None:
+                        page_text = pinned_page_texts[page_number]
+                        if page_text:
+                            extracted_texts[page_number] = page_text
+                    elif text_extractor is not None:
+                        page_text = await text_extractor(image_bytes)
+                        if page_text:
+                            extracted_texts[page_number] = _require_extracted_text_budget(page_text)
+
+                    attachment_id = self._candidate_attachment_id(page_number, generation)
+                    filename = f"page_{page_number}.png"
+                    object_identity = {
+                        "tenant_id": tenant_id,
+                        "document_id": document_id,
+                        "attachment_id": attachment_id,
+                        "filename": filename,
+                    }
+                    image_hash = hashlib.sha256(image_bytes).hexdigest()
+                    already_exists = await image_exists(**object_identity)
+                    if already_exists:
+                        existing_bytes = await download_image(**object_identity)
+                        if hashlib.sha256(existing_bytes).hexdigest() != image_hash:
+                            raise RuntimeError(
+                                f"scanned candidate page {page_number} generation object differs"
+                            )
+                        get_image_url = getattr(storage_service, "get_image_url", None)
+                        image_url = (
+                            get_image_url(**object_identity)
+                            if callable(get_image_url) else None
+                        )
+                    else:
+                        image_url = None
+                    if not image_url:
+                        image_url = await upload_image(
+                            **object_identity,
+                            content=image_bytes,
+                            content_type="image/png",
+                            metadata={
+                                "width": str(dimensions[0]),
+                                "height": str(dimensions[1]),
+                                "page_number": str(page_number),
+                                "generation_id": generation,
+                            },
+                        )
+                    if not str(image_url or "").strip():
+                        raise RuntimeError(f"scanned candidate page {page_number} upload returned no URL")
+                    stored_bytes = await download_image(**object_identity)
+                    if hashlib.sha256(stored_bytes).hexdigest() != image_hash:
+                        raise RuntimeError(
+                            f"scanned candidate page {page_number} stored object differs"
+                        )
+                    object_receipt = {
+                        "tenant_id": tenant_id,
+                        "document_id": document_id,
+                        "attachment_id": attachment_id,
+                        "filename": filename,
+                        "storage_url": image_url,
+                        "generation_id": generation,
+                        "sha256": image_hash,
+                    }
+                    generate_key = getattr(storage_service, "_generate_key", None)
+                    if callable(generate_key):
+                        object_receipt["storage_key"] = generate_key(
+                            tenant_id, document_id, attachment_id, filename
+                        )
+                    object_manifest.append(object_receipt)
+                    position = self.position_offset + page_offset + page_index
+                    segment_id = str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            "ai-platform:kb-image-candidate:"
+                            f"{dataset_id}:{document_id}:{generation}:{position}",
+                        )
+                    )
+                    batch_images.append(image_bytes)
+                    batch_meta.append({
+                        "segment_id": segment_id,
+                        "position": position,
+                        "page_number": page_number,
+                        "width": dimensions[0],
+                        "height": dimensions[1],
+                        "image_url": image_url,
+                        "attachment_id": attachment_id,
+                        "filename": filename,
+                        "image_file_size": len(image_bytes),
+                        "text": (
+                            f"[Page {page_number}]\n{extracted_texts[page_number]}"
+                            if page_number in extracted_texts else f"[Page {page_number}]"
+                        ),
+                    })
+                    processed_pages += 1
+                    if on_progress is not None:
+                        await on_progress(processed_pages, total_pages)
+
+                vectors = await self.embedder.embed_images(batch_images)
+                if len(vectors) != len(batch_meta) or any(vector is None for vector in vectors):
+                    raise RuntimeError("scanned candidate image embedding is incomplete")
+                for meta, vector in zip(batch_meta, vectors, strict=True):
+                    segment_id = meta["segment_id"]
+                    page_number = meta["page_number"]
+                    points.append(qmodels.PointStruct(
+                        id=segment_id,
+                        vector=vector,
+                        payload={
+                            "tenant_id": tenant_id,
+                            "dataset_id": dataset_id,
+                            "document_id": document_id,
+                            "segment_id": segment_id,
+                            "position": meta["position"],
+                            "text": meta["text"],
+                            "content_type": "image",
+                            "image_id": f"{document_id}_page_{page_number}",
+                            "image_mime_type": "image/png",
+                            "image_width": meta["width"],
+                            "image_height": meta["height"],
+                            "image_page": page_number,
+                            "generation_id": generation,
+                        },
+                    ))
+                    segment_rows.append({
+                        "segment_id": segment_id,
+                        "document_id": document_id,
+                        "dataset_id": dataset_id,
+                        "position": meta["position"],
+                        "text": meta["text"],
+                        "content_type": "image",
+                        "image_url": meta["image_url"],
+                        "image_attachment_id": meta["attachment_id"],
+                        "image_filename": meta["filename"],
+                        "image_media_type": "image/png",
+                        "image_file_size": meta["image_file_size"],
+                        "vector_id": segment_id,
+                        "enabled": False,
+                        "status": "indexing",
+                        "metadata": {
+                            "page_number": page_number,
+                            "width": meta["width"],
+                            "height": meta["height"],
+                            "source_position": meta["position"] - self.position_offset,
+                            "generation_id": generation,
+                        },
+                    })
+        except Exception:
+            # A prior attempt may have durably recorded this generation. The
+            # publisher/GC owns orphan cleanup after checking its manifest.
+            raise
+
+        content = "\n\n".join(
+            f"[Page {page_number}]\n{extracted_texts[page_number]}"
+            for page_number in sorted(extracted_texts)
+        )
+        _require_extracted_text_budget(content)
+        return VisionCandidatePlan(
+            generation_id=generation,
+            document_id=document_id,
+            dataset_id=dataset_id,
+            points_by_collection={collection: points},
+            segment_rows=segment_rows,
+            object_manifest=object_manifest,
+            content=content,
+            source_hash=hashlib.sha256(pdf_bytes).hexdigest(),
+            segment_ids=[str(point.id) for point in points],
+            total_pages=total_pages,
+            processed_pages=processed_pages,
+            failed_pages=0,
+            extracted_texts=extracted_texts,
+        )

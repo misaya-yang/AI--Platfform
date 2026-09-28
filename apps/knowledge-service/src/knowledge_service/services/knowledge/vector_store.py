@@ -3300,6 +3300,68 @@ class VectorStore:
                 return True
         return False
 
+    async def document_point_ids_by_collection(
+        self, *, tenant_id: str, dataset_id: str, document_id: str,
+    ) -> dict[str, list[str]]:
+        """Enumerate the exact old point manifest before a document generation switch."""
+
+        if not all(str(value or "").strip() for value in (tenant_id, dataset_id, document_id)):
+            raise VectorStoreError("tenant_id, dataset_id, and document_id are required")
+        scope_filter = self._payload_scope_filter(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            allow_missing_tenant=True,
+        )
+        response = await self._call(lambda: self._client.get_collections())
+        result: dict[str, list[str]] = {}
+        for item in getattr(response, "collections", None) or []:
+            collection = str(getattr(item, "name", "") or "").strip()
+            if not collection:
+                continue
+            info = await self._call(lambda name=collection: self._client.get_collection(name))
+            metadata = self._collection_metadata(info)
+            owner = self._scope_from_metadata(metadata)
+            if owner is not None and owner != {
+                "tenant_id": tenant_id, "dataset_id": dataset_id,
+            }:
+                continue
+            if owner is None and COLLECTION_SCOPE_METADATA_KEY in metadata:
+                raise VectorStoreError(f"collection '{collection}' has malformed scope metadata")
+            offset: Any = None
+            seen: set[str] = set()
+            while True:
+                points, next_offset = await self._call(
+                    lambda name=collection, page=offset: self._client.scroll(
+                        collection_name=name,
+                        scroll_filter=scope_filter,
+                        limit=256,
+                        offset=page,
+                        with_payload=["tenant_id", "dataset_id", "document_id"],
+                        with_vectors=False,
+                    )
+                )
+                for point in points or []:
+                    payload = getattr(point, "payload", None)
+                    if not isinstance(payload, dict) or (
+                        str(payload.get("dataset_id") or "") != dataset_id
+                        or str(payload.get("document_id") or "") != document_id
+                        or str(payload.get("tenant_id") or tenant_id) != tenant_id
+                    ):
+                        raise VectorStoreError("document point scope changed during enumeration")
+                    point_id = str(getattr(point, "id", "") or "").strip()
+                    if not point_id or point_id in seen:
+                        raise VectorStoreError("document point enumeration is incomplete")
+                    seen.add(point_id)
+                if next_offset is None:
+                    break
+                if next_offset == offset:
+                    raise VectorStoreError("document point scroll did not advance")
+                offset = next_offset
+            if seen:
+                result[collection] = sorted(seen)
+        return result
+
     async def document_has_specialized_points(
         self, *, tenant_id: str, dataset_id: str, document_id: str,
     ) -> bool:
@@ -3851,6 +3913,69 @@ class VectorStore:
             dataset_id=dataset_id,
             affects_bm25_scope=affects_bm25_scope,
         )
+
+    async def delete_document_points_by_ids(
+        self,
+        collection_name: str,
+        point_ids: Sequence[str],
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        document_id: str,
+        lifecycle_lease_held: bool = False,
+    ) -> None:
+        """Delete a special generation's exact IDs, including legacy tenantless points.
+
+        A prepared manifest can name a collection that was never created before
+        a crash.  The caller must hold the dataset publication lease; document
+        and dataset filters prevent an ID collision from deleting another owner.
+        """
+
+        ids = sorted({str(point_id).strip() for point_id in point_ids if point_id})
+        if not ids:
+            return
+        if not lifecycle_lease_held or not all(
+            str(value or "").strip() for value in (tenant_id, dataset_id, document_id)
+        ):
+            raise VectorStoreError("special point cleanup requires its dataset lease and owner")
+        if not await self.collection_exists(collection_name):
+            return
+        info = await self._call(lambda: self._client.get_collection(collection_name))
+        metadata = self._collection_metadata(info)
+        owner = self._scope_from_metadata(metadata)
+        if owner is not None and owner != {
+            "tenant_id": tenant_id, "dataset_id": dataset_id,
+        }:
+            raise VectorStoreError("special point collection owner differs")
+        if owner is None and COLLECTION_SCOPE_METADATA_KEY in metadata:
+            raise VectorStoreError("special point collection owner is malformed")
+        try:
+            stored = LexicalConfig.from_collection_metadata(metadata)
+        except LexicalConfigError as exc:
+            raise VectorStoreError(str(exc)) from exc
+        if stored is not None:
+            await self._invalidate_remote_bm25_v2_receipt(
+                collection_name, metadata, reason="special_generation_cleanup",
+            )
+        selector = qmodels.Filter(must=[
+            self._payload_scope_filter(
+                tenant_id=tenant_id, dataset_id=dataset_id,
+                document_id=document_id, allow_missing_tenant=True,
+            ),
+            qmodels.HasIdCondition(has_id=ids),
+        ])
+        result = await self._call(lambda: self._client.delete(
+            collection_name=collection_name,
+            points_selector=qmodels.FilterSelector(filter=selector),
+            wait=True,
+        ))
+        self._require_completed_write(result, operation="special document point cleanup")
+        remaining = await self._count_collection_points(
+            collection_name, count_filter=selector,
+        )
+        if remaining:
+            raise VectorStoreError("special document point cleanup is incomplete")
+        self._sparse_readiness.pop(collection_name, None)
 
     async def _delete_points_unfenced(
         self,

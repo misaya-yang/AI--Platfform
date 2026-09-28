@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +12,7 @@ from knowledge_service.api.routes import knowledge as knowledge_routes
 from knowledge_service.api.routes.knowledge import (
     DocumentAuthorizeRequest,
     VersionRestoreRequest,
+    _source_metadata,
     authorize_gateway_documents,
     batch_create_documents,
     batch_reindex_documents,
@@ -20,6 +22,7 @@ from knowledge_service.api.routes.knowledge import (
     get_active_document_source,
     get_document_pipeline_execution,
     get_document_version,
+    get_historical_document_source,
     get_image_segment,
     hit_test,
     list_document_versions,
@@ -45,6 +48,17 @@ from knowledge_service.core.auth.user_resolver import UserContext
 from knowledge_service.core.exceptions import PermissionDeniedError, ValidationFailedError
 from knowledge_service.persistence.database import IndexLeaseUnavailableError
 from starlette.requests import Request
+
+
+def test_manual_segment_is_not_attributed_to_immutable_document_version() -> None:
+    identities = {"document-a": (2, "a" * 64)}
+    assert "source_version" not in _source_metadata(
+        {"source_type": "manual"}, "document-a", identities,
+    )
+    assert "source_hash" not in _source_metadata(
+        {"metadata": {"manual_source_override": True}},
+        "document-a", identities,
+    )
 
 USER = UserContext(user_id="user-a", tenant_id="tenant-a")
 ADMIN = UserContext(user_id="admin-a", tenant_id="tenant-a", user_tier="admin")
@@ -609,6 +623,39 @@ async def test_full_version_content_fails_closed_for_nonactive_document(
 
     assert exc_info.value.status_code == 404
     assert database.version_reads == 0
+
+
+@pytest.mark.asyncio
+async def test_historical_source_requires_exact_saved_content_hash() -> None:
+    content = "Saved source text"
+    source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    class _ExactVersionDatabase(_VersionDatabase):
+        async def get_document_version(
+            self, document_id: str, version_number: int,
+        ) -> dict[str, Any]:
+            self.version_reads += 1
+            return {
+                "document_id": document_id, "version_number": version_number,
+                "content": content, "content_hash": source_hash,
+                "change_type": "updated", "title": "saved.txt",
+            }
+
+    database = _ExactVersionDatabase(active=True)
+    service = _BaseService(database)
+    result = await get_historical_document_source(
+        "dataset-a", "document-a", 2, source_hash=source_hash,
+        svc=service, user=USER,  # type: ignore[arg-type]
+    )
+    assert result["content"] == content
+    assert result["version_number"] == 2
+
+    with pytest.raises(HTTPException) as denied:
+        await get_historical_document_source(
+            "dataset-a", "document-a", 2, source_hash="0" * 64,
+            svc=service, user=USER,  # type: ignore[arg-type]
+        )
+    assert denied.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -1398,6 +1445,7 @@ class _RestoreDatabase:
         self.events: list[str] = []
         self.version_reads = 0
         self.created_versions: list[dict[str, Any]] = []
+        self.restore_version_override: dict[str, Any] | None = None
 
     @asynccontextmanager
     async def document_index_update_lease(self, dataset_id: str, document_id: str):
@@ -1438,6 +1486,8 @@ class _RestoreDatabase:
         assert (document_id, version_number) == ("document-a", 1)
         self.version_reads += 1
         self.events.append("version-read")
+        if self.restore_version_override is not None:
+            return dict(self.restore_version_override)
         return {
             "document_id": document_id,
             "version_number": version_number,
@@ -1582,8 +1632,8 @@ async def test_version_restore_queues_hidden_candidate_without_changing_serving_
         "dataset-read",
         "transaction-enter",
         "document-read",
-        "specialized-check",
         "version-read",
+        "specialized-check",
         "version-create:pending_before_restore",
         "status:waiting",
         "version-create:pending_restore",
@@ -1610,9 +1660,60 @@ async def test_version_restore_refuses_specialized_points_before_candidate_or_ex
         )
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "specialized_rebuild_unavailable"
-    assert database.version_reads == 0
+    assert database.version_reads == 1
     assert database.created_versions == []
     assert database.document["content"] == "current content"
+    assert worker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_version_restore_queues_verified_hierarchy_source_without_text_fallback() -> None:
+    database = _RestoreDatabase()
+    restored_content = "restored hierarchy content"
+    digest = hashlib.sha256(restored_content.encode()).hexdigest()
+    index_config = {"chunking": {"mode": "automatic"}}
+    database.restore_version_override = {
+        "document_id": "document-a", "version_number": 1,
+        "content": restored_content, "content_hash": digest,
+        "metadata": {"_special_source_manifest": {
+            "source_kind": "hierarchy", "source_hash": digest,
+            "content_hash": digest, "index_config": index_config,
+            "original_source_key": "", "page_texts": [], "objects": {},
+        }},
+    }
+    service = _BaseService(database)
+    worker = _RestoreWorker(database, reject_special=True)
+
+    result = await restore_document_version(
+        "dataset-a", "document-a", 1, payload=VersionRestoreRequest(),
+        svc=service, worker=worker, user=USER,  # type: ignore[arg-type]
+    )
+
+    assert result["status"] == "pending"
+    assert "specialized-check" not in database.events
+    assert database.created_versions[1]["metadata"] == database.restore_version_override["metadata"]
+    assert worker.calls == [("dataset-a", "document-a")]
+
+
+@pytest.mark.asyncio
+async def test_version_restore_rejects_unverifiable_historical_special_source() -> None:
+    database = _RestoreDatabase()
+    database.restore_version_override = {
+        "document_id": "document-a", "version_number": 1,
+        "content": "restored content", "metadata": {
+            "_special_source_manifest": {"source_kind": "vision"},
+        },
+    }
+    worker = _RestoreWorker(database)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_document_version(
+            "dataset-a", "document-a", 1, payload=VersionRestoreRequest(),
+            svc=_BaseService(database), worker=worker, user=USER,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 409
+    assert database.created_versions == []
     assert worker.calls == []
 
 

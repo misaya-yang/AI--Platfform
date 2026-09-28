@@ -1081,6 +1081,11 @@ class DocumentService:
             if not document or str(document.get("dataset_id") or "") != dataset_id:
                 raise ValidationFailedError("segment document not found")
             _require_document_active_for_manual_index_write(document)
+            segment_metadata = _ensure_dict(seg.get("metadata"))
+            segment_metadata.pop("source_version", None)
+            segment_metadata.pop("source_hash", None)
+            segment_metadata["manual_source_override"] = True
+            seg = {**seg, "metadata": segment_metadata}
 
             # Autocommit the hidden state before either authoritative text or
             # Qdrant changes. A crash or stale payload remains non-retrievable.
@@ -1096,6 +1101,7 @@ class DocumentService:
                     answer=clean_answer,
                     keywords=new_keywords,
                     content_hash=content_hash,
+                    metadata=segment_metadata,
                     connection=lease_connection,
                 )
                 embedder: BaseEmbedding | None = None

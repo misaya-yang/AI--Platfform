@@ -741,6 +741,19 @@ async def test_generic_metadata_cannot_replace_source_owned_receipts() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key", ["_special_publication_generation_id", "_special_source_manifest"],
+)
+async def test_generic_metadata_rejects_special_publication_owner_injection(key: str) -> None:
+    database, connection, _pool = make_database()
+
+    with pytest.raises(ValueError, match="reserved"):
+        await database.update_document_fields("document-a", {"metadata": {key: "forged"}})
+
+    assert connection.execute_calls == []
+
+
+@pytest.mark.asyncio
 async def test_confluence_owner_supersession_requires_stale_ttl_and_exact_abort() -> None:
     database, connection, _pool = make_database()
     connection.fetchrow_behaviors = [

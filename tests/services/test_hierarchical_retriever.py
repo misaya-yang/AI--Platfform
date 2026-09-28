@@ -25,6 +25,7 @@ class StubVectorStore:
         score_threshold=None,
         **kwargs,
     ):
+        del query_vector, score_threshold
         self.calls.append(
             {
                 "collection": collection_name,
@@ -99,6 +100,12 @@ class StubDb:
         assert (dataset_id, tenant_id) == ("ds", "tenant-a")
         return set(segment_ids)
 
+    async def filter_active_summary_vector_ids(
+        self, dataset_id, tenant_id, vector_ids,
+    ):
+        assert (dataset_id, tenant_id) == ("ds", "tenant-a")
+        return set(vector_ids)
+
     async def get_document_summary_scoped(
         self,
         *,
@@ -142,6 +149,47 @@ async def test_retriever_uses_wrapper_and_enriches_context():
     assert l3_call["query_filter"] is not None
     assert l3_call["tenant_id"] == "tenant-a"
     assert l3_call["dataset_id"] == "ds"
+
+
+@pytest.mark.asyncio
+async def test_unpublished_l1_candidate_is_not_used_as_document_filter():
+    class CurrentSummaryDb(StubDb):
+        async def filter_active_summary_vector_ids(
+            self, dataset_id, tenant_id, vector_ids,
+        ):
+            assert (dataset_id, tenant_id, vector_ids) == ("ds", "tenant-a", ["sum1"])
+            return set()
+
+    retriever = HierarchicalRetriever(StubVectorStore(), StubEmbedder(), CurrentSummaryDb())
+    filtered = await retriever._filter_active_layer(
+        [{"document_id": "doc1", "segment_id": "sum1"}],
+        dataset_id="ds", tenant_id="tenant-a",
+        require_segments=False, require_summary=True,
+    )
+    assert filtered == []
+
+
+@pytest.mark.asyncio
+async def test_parallel_retrieval_hides_unpublished_l1_candidate():
+    class CurrentSummaryDb(LifecycleDb):
+        async def filter_active_summary_vector_ids(
+            self, _dataset_id, _tenant_id, _vector_ids,
+        ):
+            return set()
+
+    store = LayeredVectorStore(
+        summary=[{"id": "summary-candidate", "document_id": "doc-live", "text": "new summary", "level": 1}],
+        paragraphs=[{"id": "segment-live", "segment_id": "segment-live", "document_id": "doc-live", "text": "old paragraph", "level": 3}],
+    )
+    db = CurrentSummaryDb(active_documents={"doc-live"}, active_segments={"segment-live"})
+    retriever = HierarchicalRetriever(store, StubEmbedder(), db)
+
+    results, _metadata = await retriever.retrieve(
+        query="test", dataset_id="ds", tenant_id="tenant-a",
+        base_collection="kb_ds_3", strategy=RetrievalStrategy.PARALLEL,
+        include_context=False, top_k=10,
+    )
+    assert {result.segment_id for result in results} == {"segment-live"}
 
 
 class LayeredVectorStore:
@@ -205,6 +253,11 @@ class LifecycleDb:
     async def filter_active_segment_ids(self, *, segment_ids, **_scope):
         self.segment_calls.append(list(segment_ids))
         return set(segment_ids) & self.active_segments
+
+    async def filter_active_summary_vector_ids(
+        self, _dataset_id, _tenant_id, vector_ids,
+    ):
+        return set(vector_ids)
 
 
 @pytest.mark.asyncio

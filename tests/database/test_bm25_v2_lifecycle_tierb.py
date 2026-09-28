@@ -60,6 +60,8 @@ MIGRATION_105 = ROOT / "database" / "migrations" / "105_kb_bm25_v2_lifecycle.sql
 TENANT = "tenant-a"
 DATASET = "dataset-a"
 COLLECTION = "collection-a"
+SPECIAL_SOURCE_HASH = "a" * 64
+SPECIAL_PLAN_HASH = "b" * 64
 
 
 def _postgres_config() -> dict[str, Any]:
@@ -162,6 +164,21 @@ async def world() -> AsyncIterator[tuple[Bm25V2LifecycleStore, DatabaseStorage, 
                     level INTEGER DEFAULT 3,
                     enabled BOOLEAN NOT NULL DEFAULT TRUE,
                     status VARCHAR(50) DEFAULT 'completed'
+                );
+                CREATE TABLE document_pipeline_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    document_id VARCHAR(255) NOT NULL,
+                    dataset_id VARCHAR(255) NOT NULL,
+                    action TEXT NOT NULL DEFAULT 'process',
+                    trigger_source TEXT,
+                    triggered_by TEXT,
+                    process_rule_id TEXT,
+                    input_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ
                 );
                 """
             )
@@ -662,7 +679,9 @@ async def test_authority_snapshot_predicate_and_digests(
     await _put_document(pool, "doc-archived", archived=True)
     await _put_segment(pool, "seg-arch", "doc-archived", vector_id="vec-arch")
     await _put_document(pool, "doc-pending", status="indexing")
-    await _put_segment(pool, "seg-pend", "doc-pending", vector_id="vec-pend")
+    await _put_segment(
+        pool, "seg-pend", "doc-pending", vector_id="vec-pend", status="indexing"
+    )
     await _put_document(
         pool, "doc-reindex", metadata={"_document_lifecycle_reindex": {"status": "pending"}}
     )
@@ -694,7 +713,7 @@ async def test_authority_snapshot_predicate_and_digests(
 
 
 @pytest.mark.asyncio
-async def test_negative_publication_includes_committed_indexing_document(
+async def test_document_status_does_not_hide_completed_serving_segment(
     world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
 ) -> None:
     store, _database, pool = world
@@ -711,7 +730,8 @@ async def test_negative_publication_includes_committed_indexing_document(
         tenant_id=TENANT,
         dataset_id=DATASET,
     )
-    assert positive.point_count == 0
+    assert positive.point_count == 1
+    assert positive.point_ids_sha256 == point_ids_sha256(["vec-indexing"])
 
     await _set_dataset(pool, content_revision=-1007)
     publishing = await store.authority_snapshot(
@@ -721,6 +741,410 @@ async def test_negative_publication_includes_committed_indexing_document(
     )
     assert publishing.point_count == 1
     assert publishing.point_ids_sha256 == point_ids_sha256(["vec-indexing"])
+
+
+@pytest.mark.asyncio
+async def test_error_document_retains_only_old_completed_serving_segment(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    store, _database, pool = world
+    await _put_document(pool, "doc-error-old", status="error")
+    await _put_segment(
+        pool, "seg-error-old", "doc-error-old",
+        vector_id="vec-error-old", text="old serving text",
+    )
+    await _put_document(pool, "doc-error-empty", status="error")
+    await _put_segment(
+        pool, "seg-error-staged", "doc-error-empty",
+        vector_id="vec-error-staged", status="indexing",
+    )
+
+    authority = await store.authority_snapshot(
+        collection_name=COLLECTION, tenant_id=TENANT, dataset_id=DATASET,
+    )
+    assert authority.point_count == 1
+    assert authority.point_ids_sha256 == point_ids_sha256(["vec-error-old"])
+    assert authority.source_text_sha256 == source_text_sha256(
+        [("vec-error-old", "old serving text")]
+    )
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE segments SET status = 'error' WHERE segment_id = 'seg-error-old'"
+        )
+    no_serving_segments = await store.authority_snapshot(
+        collection_name=COLLECTION, tenant_id=TENANT, dataset_id=DATASET,
+    )
+    assert no_serving_segments.point_count == 0
+    assert no_serving_segments.point_ids_sha256 == point_ids_sha256([])
+
+
+@pytest.mark.asyncio
+async def test_authority_on_publisher_connection_sees_uncommitted_candidate(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    store, _database, pool = world
+    await _put_document(pool, "doc-candidate", status="indexing")
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE datasets SET content_revision = -1007 WHERE dataset_id = $1",
+            DATASET,
+        )
+        await conn.execute(
+            """INSERT INTO segments (
+                   segment_id, dataset_id, document_id, text, vector_id, status
+               ) VALUES ('seg-candidate', $1, 'doc-candidate', 'new candidate',
+                         'vec-candidate', 'completed')""",
+            DATASET,
+        )
+        uncommitted = await store.authority_snapshot(
+            collection_name=COLLECTION,
+            tenant_id=TENANT,
+            dataset_id=DATASET,
+            connection=conn,
+        )
+        assert uncommitted.content_revision == -1007
+        assert uncommitted.point_ids_sha256 == point_ids_sha256(["vec-candidate"])
+        assert uncommitted.source_text_sha256 == source_text_sha256(
+            [("vec-candidate", "new candidate")]
+        )
+        # The old pool-owned read must not certify a candidate it cannot see.
+        committed_only = await store.authority_snapshot(
+            collection_name=COLLECTION, tenant_id=TENANT, dataset_id=DATASET
+        )
+        assert committed_only.point_count == 0
+
+
+@pytest.mark.asyncio
+async def test_special_manifest_freezes_plan_and_reconciles_only_committed_owner(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    _store, database, pool = world
+    await _put_document(
+        pool, "doc-special", status="indexing",
+        metadata={"_document_pipeline_execution_id": "execution-special"},
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id)
+               VALUES ('execution-special', 'doc-special', $1)""",
+            DATASET,
+        )
+    preparing = await database.record_special_publication_manifest(
+        "execution-special", "doc-special", DATASET, "generation-special",
+        source_hash=SPECIAL_SOURCE_HASH,
+        planned_object_keys=["object/generation-special"],
+    )
+    assert preparing["phase"] == "preparing"
+    assert preparing["planned_object_keys"] == ["object/generation-special"]
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE datasets SET content_revision = -1007 WHERE dataset_id = $1",
+            DATASET,
+        )
+        bound = await database.bind_special_publication_revision(
+            "execution-special", DATASET, -1007, connection=conn,
+        )
+        assert bound["publication_revision"] == 1007
+    active = await database.get_active_special_publication_for_dataset(DATASET)
+    assert active["generation_id"] == "generation-special"
+    assert active["planned_object_keys"] == ["object/generation-special"]
+    assert await database.reconcile_special_publication_execution(
+        "execution-special", "doc-special", DATASET, "generation-special"
+    ) == "unproven"
+    plan = {COLLECTION: {
+        "candidate_point_ids": ["candidate-2", "candidate-1"],
+        "old_point_ids": ["old-1"],
+    }}
+    prepared = await database.advance_special_publication_manifest(
+        "execution-special", "doc-special", DATASET, "generation-special",
+        source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+        expected_phase="preparing", next_phase="prepared",
+        collections=plan, objects={"object/generation-special": "d" * 64},
+        planned_object_keys=["object/generation-special"],
+    )
+    assert prepared["collections"][COLLECTION]["candidate_point_ids"] == [
+        "candidate-1", "candidate-2"
+    ]
+    assert await database.record_special_publication_manifest(
+        "execution-special", "doc-special", DATASET, "generation-special",
+        source_hash=SPECIAL_SOURCE_HASH,
+    ) == prepared
+    with pytest.raises(RuntimeError, match="immutable"):
+        await database.advance_special_publication_manifest(
+            "execution-special", "doc-special", DATASET, "generation-special",
+            source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+            expected_phase="prepared", next_phase="points_written",
+            collections={COLLECTION: {
+                "candidate_point_ids": ["different"], "old_point_ids": ["old-1"],
+            }},
+        )
+    await database.advance_special_publication_manifest(
+        "execution-special", "doc-special", DATASET, "generation-special",
+        source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+        expected_phase="prepared", next_phase="points_written",
+    )
+    with pytest.raises(RuntimeError, match="not completed"):
+        await database.advance_special_publication_manifest(
+            "execution-special", "doc-special", DATASET, "generation-special",
+            source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+            expected_phase="points_written", next_phase="committed",
+        )
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE documents SET status = 'completed' WHERE document_id = 'doc-special'"
+        )
+        await database.advance_special_publication_manifest(
+            "execution-special", "doc-special", DATASET, "generation-special",
+            source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+            expected_phase="points_written", next_phase="committed", connection=conn,
+        )
+        assert await database.reconcile_special_publication_execution(
+            "execution-special", "doc-special", DATASET, "generation-special",
+            connection=conn,
+        ) == "reconciled"
+    assert await database.reconcile_special_publication_execution(
+        "execution-special", "doc-special", DATASET, "generation-special"
+    ) == "already_terminal"
+    with pytest.raises(RuntimeError, match="no unique running owner"):
+        await database.get_active_special_publication_for_dataset(DATASET)
+
+
+@pytest.mark.asyncio
+async def test_negative_revision_selects_only_its_bound_special_owner(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    _store, database, pool = world
+    for suffix in ("a", "b"):
+        await _put_document(
+            pool, f"doc-owner-{suffix}", status="indexing",
+            metadata={"_document_pipeline_execution_id": f"execution-owner-{suffix}"},
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO document_pipeline_executions
+                   (execution_id, document_id, dataset_id) VALUES ($1, $2, $3)""",
+                f"execution-owner-{suffix}", f"doc-owner-{suffix}", DATASET,
+            )
+        await database.record_special_publication_manifest(
+            f"execution-owner-{suffix}", f"doc-owner-{suffix}", DATASET,
+            f"generation-owner-{suffix}", source_hash=SPECIAL_SOURCE_HASH,
+            planned_object_keys=[],
+        )
+    await _put_document(pool, "doc-owner-terminal", status="completed")
+    terminal_manifest = {
+        "special_publication": {
+            "generation_id": "generation-terminal",
+            "source_hash": SPECIAL_SOURCE_HASH,
+            "plan_hash": SPECIAL_PLAN_HASH,
+            "planned_object_keys": [],
+            "publication_revision": 1007,
+            "phase": "committed",
+            "collections": {},
+            "objects": {},
+        },
+    }
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id, status, manifest)
+               VALUES ('execution-owner-terminal', 'doc-owner-terminal', $1,
+                       'completed', $2::jsonb)""",
+            DATASET, json.dumps(terminal_manifest),
+        )
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE datasets SET content_revision = -1007 WHERE dataset_id = $1",
+            DATASET,
+        )
+        with pytest.raises(RuntimeError, match="no unique running owner"):
+            await database.get_active_special_publication_for_dataset(
+                DATASET, connection=conn,
+            )
+        bound = await database.bind_special_publication_revision(
+            "execution-owner-a", DATASET, -1007, connection=conn,
+        )
+        assert bound["publication_revision"] == 1007
+        assert await database.bind_special_publication_revision(
+            "execution-owner-a", DATASET, -1007, connection=conn,
+        ) == bound
+        active = await database.get_active_special_publication_for_dataset(
+            DATASET, connection=conn,
+        )
+        assert active["execution_id"] == "execution-owner-a"
+        with pytest.raises(RuntimeError, match="another special publication owns"):
+            await database.bind_special_publication_revision(
+                "execution-owner-b", DATASET, -1007, connection=conn,
+            )
+
+
+@pytest.mark.asyncio
+async def test_committed_special_manifest_tracks_negative_revision_trigger_drift(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    _store, database, pool = world
+    await _put_document(
+        pool, "doc-trigger", status="indexing",
+        metadata={"_document_pipeline_execution_id": "execution-trigger"},
+    )
+    await _put_document(pool, "doc-unrelated")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id)
+               VALUES ('execution-trigger', 'doc-trigger', $1)""",
+            DATASET,
+        )
+    await database.record_special_publication_manifest(
+        "execution-trigger", "doc-trigger", DATASET, "generation-trigger",
+        source_hash=SPECIAL_SOURCE_HASH, planned_object_keys=[],
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """CREATE FUNCTION test_bump_negative_revision() RETURNS trigger AS $$
+               BEGIN
+                   UPDATE datasets SET content_revision = content_revision + 1
+                   WHERE dataset_id = 'dataset-a';
+                   RETURN NULL;
+               END;
+               $$ LANGUAGE plpgsql;
+               CREATE TRIGGER test_segment_revision AFTER INSERT ON segments
+               FOR EACH STATEMENT EXECUTE FUNCTION test_bump_negative_revision();
+               CREATE TRIGGER test_document_revision AFTER UPDATE ON documents
+               FOR EACH STATEMENT EXECUTE FUNCTION test_bump_negative_revision();"""
+        )
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE datasets SET content_revision = -1007 WHERE dataset_id = $1",
+                DATASET,
+            )
+            await database.bind_special_publication_revision(
+                "execution-trigger", DATASET, -1007, connection=conn,
+            )
+            plan = {COLLECTION: {
+                "candidate_point_ids": ["vec-trigger"], "old_point_ids": [],
+            }}
+            await database.advance_special_publication_manifest(
+                "execution-trigger", "doc-trigger", DATASET, "generation-trigger",
+                source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+                expected_phase="preparing", next_phase="prepared",
+                collections=plan, connection=conn,
+            )
+            await database.advance_special_publication_manifest(
+                "execution-trigger", "doc-trigger", DATASET, "generation-trigger",
+                source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+                expected_phase="prepared", next_phase="points_written", connection=conn,
+            )
+            await conn.execute(
+                """INSERT INTO segments
+                   (segment_id, dataset_id, document_id, text, vector_id)
+                   VALUES ('seg-trigger', $1, 'doc-trigger', 'candidate', 'vec-trigger')""",
+                DATASET,
+            )
+            await conn.execute(
+                "UPDATE documents SET status = 'completed' WHERE document_id = 'doc-trigger'"
+            )
+            manifest = await database.advance_special_publication_manifest(
+                "execution-trigger", "doc-trigger", DATASET, "generation-trigger",
+                source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+                expected_phase="points_written", next_phase="committed", connection=conn,
+            )
+            assert manifest["publication_revision"] == 1005
+            assert await conn.fetchval(
+                "SELECT content_revision FROM datasets WHERE dataset_id = $1", DATASET,
+            ) == -1005
+    owner = await database.get_active_special_publication_for_dataset(DATASET)
+    assert owner["execution_id"] == "execution-trigger"
+    assert owner["publication_revision"] == 1005
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE documents SET status = 'waiting' WHERE document_id = 'doc-unrelated'"
+        )
+    drifted_owner = await database.get_active_special_publication_for_dataset(DATASET)
+    assert drifted_owner["execution_id"] == "execution-trigger"
+    assert drifted_owner["publication_revision"] == 1005
+
+
+@pytest.mark.asyncio
+async def test_aborted_special_manifest_and_recovery_link_do_not_infer_success(
+    world: tuple[Bm25V2LifecycleStore, DatabaseStorage, asyncpg.Pool],
+) -> None:
+    _store, database, pool = world
+    await _put_document(
+        pool, "doc-abort", status="indexing",
+        metadata={"_document_pipeline_execution_id": "execution-abort"},
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id)
+               VALUES ('execution-abort', 'doc-abort', $1)""",
+            DATASET,
+        )
+    await database.record_special_publication_manifest(
+        "execution-abort", "doc-abort", DATASET, "generation-abort",
+        source_hash=SPECIAL_SOURCE_HASH,
+    )
+    await database.advance_special_publication_manifest(
+        "execution-abort", "doc-abort", DATASET, "generation-abort",
+        source_hash=SPECIAL_SOURCE_HASH, plan_hash=SPECIAL_PLAN_HASH,
+        expected_phase="preparing", next_phase="prepared",
+        collections={COLLECTION: {
+            "candidate_point_ids": ["candidate"], "old_point_ids": ["old"],
+        }},
+    )
+    assert await database.reconcile_special_publication_execution(
+        "execution-abort", "doc-abort", DATASET, "generation-abort"
+    ) == "unproven"
+    await database.advance_special_publication_manifest(
+        "execution-abort", "doc-abort", DATASET, "generation-abort",
+        source_hash=SPECIAL_SOURCE_HASH,
+        expected_phase="prepared", next_phase="aborted",
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE documents SET status = 'error' WHERE document_id = 'doc-abort'"
+        )
+    assert await database.reconcile_special_publication_execution(
+        "execution-abort", "doc-abort", DATASET, "generation-abort"
+    ) == "reconciled"
+    execution = await database.get_pipeline_execution("execution-abort")
+    assert execution is not None and execution["status"] == "error"
+
+    await _put_document(
+        pool, "doc-recover", status="indexing",
+        metadata={
+            "_document_pipeline_execution_id": "execution-recover",
+            "_special_publication_generation_id": "generation-recover",
+        },
+    )
+    special = {
+        "schema_version": 1, "generation_id": "generation-recover",
+        "source_hash": SPECIAL_SOURCE_HASH, "plan_hash": SPECIAL_PLAN_HASH,
+        "planned_object_keys": [],
+        "phase": "prepared", "collections": {COLLECTION: {
+            "candidate_point_ids": ["candidate"], "old_point_ids": ["old"],
+        }}, "objects": {},
+    }
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id, status, manifest)
+               VALUES ('execution-original', 'doc-recover', $1, 'error', $2::jsonb),
+                      ('execution-recover', 'doc-recover', $1, 'running',
+                       '{"recovered_from_execution_id":"execution-original"}'::jsonb)""",
+            DATASET, json.dumps({"special_publication": special}),
+        )
+    assert await database.link_special_publication_recovery(
+        "execution-original", "execution-recover", "doc-recover", DATASET,
+        "generation-recover",
+    ) == special
+    linked = await database.get_special_publication_manifest("execution-recover")
+    assert linked is not None and linked["phase"] == "prepared"
+    assert await database.reconcile_special_publication_execution(
+        "execution-recover", "doc-recover", DATASET, "generation-recover"
+    ) == "unproven"
 
 
 @pytest.mark.asyncio

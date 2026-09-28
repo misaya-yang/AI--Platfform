@@ -186,3 +186,47 @@ async def _run_smoke() -> None:
 
 def test_qdrant_integration_smoke() -> None:
     asyncio.run(_run_smoke())
+
+
+@pytest.mark.asyncio
+async def test_special_cleanup_deletes_legacy_tenantless_point_and_skips_missing_collection() -> None:
+    store = VectorStore(url=QDRANT_URL, timeout_seconds=10.0)
+    dataset_id = f"kb-special-cleanup-{uuid.uuid4().hex[:8]}"
+    collection = ""
+    try:
+        collection = await store.ensure_collection(
+            dataset_id=dataset_id, dimension=DIMENSION,
+            tenant_id=TENANT_ID, bootstrap_unbound_dataset=True,
+        )
+        old_id, other_id = str(uuid.uuid4()), str(uuid.uuid4())
+        await store._client.upsert(
+            collection_name=collection,
+            points=[
+                qmodels.PointStruct(id=old_id, vector=[1.0] + [0.0] * 7,
+                                    payload={"dataset_id": dataset_id, "document_id": "doc-old"}),
+                qmodels.PointStruct(id=other_id, vector=[0.0, 1.0] + [0.0] * 6,
+                                    payload={"dataset_id": dataset_id, "document_id": "doc-other"}),
+            ],
+            wait=True,
+        )
+        frozen = await store.document_point_ids_by_collection(
+            tenant_id=TENANT_ID, dataset_id=dataset_id, document_id="doc-old",
+        )
+        assert frozen[collection] == [old_id]
+
+        await store.delete_document_points_by_ids(
+            collection, [old_id, other_id], tenant_id=TENANT_ID,
+            dataset_id=dataset_id, document_id="doc-old", lifecycle_lease_held=True,
+        )
+        remaining = await store._client.retrieve(
+            collection_name=collection, ids=[old_id, other_id], with_payload=True,
+        )
+        assert [str(point.id) for point in remaining] == [other_id]
+        await store.delete_document_points_by_ids(
+            f"{collection}_not_created", [old_id], tenant_id=TENANT_ID,
+            dataset_id=dataset_id, document_id="doc-old", lifecycle_lease_held=True,
+        )
+    finally:
+        if collection:
+            await store.delete_collection(collection)
+        await store.close()

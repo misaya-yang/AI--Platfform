@@ -77,9 +77,9 @@ _SAFE_COLUMN_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
 CONFLUENCE_SYNC_STALE_SECONDS = 3600
 # One publication can execute up to MAX_CHUNK_OUTPUTS (10k) ON CONFLICT
 # statements, and migration 076 advances content_revision from a statement
-# trigger.  Keep the negative seqlock far enough below zero that those
-# increments cannot accidentally make an in-flight revision readable.
-INDEX_PUBLICATION_REVISION_RESERVE = 100_000
+# trigger, including unrelated document changes during a stalled generation.
+# Leave headroom for a prolonged recovery window without reaching zero.
+INDEX_PUBLICATION_REVISION_RESERVE = 1_000_000_000
 SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
     {
         DOCUMENT_LIFECYCLE_REINDEX_KEY,
@@ -93,6 +93,8 @@ SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
         DOCUMENT_PIPELINE_EXECUTION_KEY,
         DOCUMENT_PENDING_RESTORE_VERSION_KEY,
         DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
+        "_special_publication_generation_id",
+        "_special_source_manifest",
         "_confluence_image_source_generation",
         "_confluence_attachment_manifest",
         "skipped_confluence_attachments",
@@ -2535,6 +2537,11 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                         COALESCE(d.metadata, '{{}}'::jsonb)
                         ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
                   )
+                  AND NOT (
+                        ds.content_revision < 0
+                        AND COALESCE(d.metadata, '{{}}'::jsonb)
+                            ? '_special_publication_generation_id'
+                  )
                   AND dataset_gate.dataset_locked
                   AND document_gate.document_locked
                   AND ds.is_deleted = FALSE
@@ -3194,6 +3201,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             or DOCUMENT_PIPELINE_EXECUTION_KEY in incoming_metadata
             or DOCUMENT_PENDING_RESTORE_VERSION_KEY in incoming_metadata
             or DOCUMENT_RESTORED_SOURCE_VERSION_KEY in incoming_metadata
+            or "_special_publication_generation_id" in incoming_metadata
+            or "_special_source_manifest" in incoming_metadata
         ):
             raise ValueError("document internal metadata keys are reserved")
         if (
@@ -3316,6 +3325,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         dataset_id: str,
         *,
         expected_ingestion_identity: str,
+        special_execution_id: str | None = None,
+        document_shared_lease_held: bool = False,
     ):
         """Serialize a short cross-store publish and mark reads retryable.
 
@@ -3338,24 +3349,31 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             raise ValueError("dataset_id is required for index publication")
         if not self._pool:
             raise RuntimeError("database is not connected")
+        if document_shared_lease_held and self._pool_max_size < 3:
+            raise RuntimeError("special publication requires at least three database connections")
         dataset_lock_name = self._dataset_index_lock_name(normalized_dataset)
         publication_lock_name = f"knowledge-dataset-publication:{normalized_dataset}"
         async with self._pool.acquire() as conn:
-            dataset_acquired = await conn.fetchval(
-                "SELECT pg_try_advisory_lock_shared(hashtextextended($1, 0))",
-                dataset_lock_name,
-            )
-            if dataset_acquired is not True:
-                raise IndexLeaseUnavailableError(
-                    "dataset index transition is in progress; refusing publication"
+            dataset_acquired = False
+            if not document_shared_lease_held:
+                dataset_acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock_shared(hashtextextended($1, 0))",
+                    dataset_lock_name,
                 )
+                if dataset_acquired is not True:
+                    raise IndexLeaseUnavailableError(
+                        "dataset index transition is in progress; refusing publication"
+                    )
             publication_acquired = False
             try:
-                await conn.fetchval(
-                    "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                publication_acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
                     publication_lock_name,
                 )
-                publication_acquired = True
+                if publication_acquired is not True:
+                    raise IndexLeaseUnavailableError(
+                        "dataset publication is already in progress"
+                    )
                 async with conn.transaction():
                     await self._require_dataset_ingestion_identity(
                         conn,
@@ -3391,6 +3409,28 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                             normalized_dataset,
                             INDEX_PUBLICATION_REVISION_RESERVE,
                         )
+                    if special_execution_id:
+                        if recovered:
+                            active_owner = getattr(
+                                self, "get_active_special_publication_for_dataset", None,
+                            )
+                            if not callable(active_owner):
+                                raise RuntimeError("special publication owner lookup is unavailable")
+                            owner = await active_owner(
+                                normalized_dataset, connection=conn,
+                            )
+                            if str(owner.get("execution_id") or "") != special_execution_id:
+                                raise RuntimeError("negative index revision belongs to another owner")
+                        else:
+                            bind = getattr(self, "bind_special_publication_revision", None)
+                            if not callable(bind):
+                                raise RuntimeError("special publication owner binding is unavailable")
+                            await bind(
+                                special_execution_id,
+                                normalized_dataset,
+                                int(publication_revision),
+                                connection=conn,
+                            )
                 yield IndexPublicationLease(
                     connection=conn,
                     revision=int(publication_revision),
@@ -3415,21 +3455,22 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                                 "dataset index publication lease was not released"
                             )
                 finally:
-                    shared_unlock = asyncio.create_task(
-                        conn.fetchval(
-                            "SELECT pg_advisory_unlock_shared(hashtextextended($1, 0))",
-                            dataset_lock_name,
+                    if dataset_acquired:
+                        shared_unlock = asyncio.create_task(
+                            conn.fetchval(
+                                "SELECT pg_advisory_unlock_shared(hashtextextended($1, 0))",
+                                dataset_lock_name,
+                            )
                         )
-                    )
-                    try:
-                        dataset_released = await asyncio.shield(shared_unlock)
-                    except asyncio.CancelledError:
-                        dataset_released = await shared_unlock
-                        raise
-                    if dataset_released is not True:
-                        raise RuntimeError(
-                            "dataset shared publication lease was not released"
-                        )
+                        try:
+                            dataset_released = await asyncio.shield(shared_unlock)
+                        except asyncio.CancelledError:
+                            dataset_released = await shared_unlock
+                            raise
+                        if dataset_released is not True:
+                            raise RuntimeError(
+                                "dataset shared publication lease was not released"
+                            )
 
     @staticmethod
     async def _finish_index_publication(
@@ -3492,6 +3533,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         candidate_version_number: int | None = None,
         previous_version_number: int | None = None,
         finalize_document: bool = False,
+        delete_all_excess: bool = False,
+        defer_terminal_until_fence_release: bool = False,
     ) -> tuple[int, int]:
         """Atomically replace/activate PostgreSQL rows and release the fence."""
 
@@ -3507,7 +3550,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 deleted = await self.delete_segments_by_document(
                     document_id,
                     exclude_ids=keep_segment_ids,
-                    content_type="text",
+                    content_type=None if delete_all_excess else "text",
                     connection=connection,
                 )
             promoted = await self.activate_staged_segments(
@@ -3617,19 +3660,28 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 dataset_id,
             )
             if finalize_document:
-                if not finish_publication:
+                if not finish_publication and not defer_terminal_until_fence_release:
                     raise RuntimeError("text terminal requires one completed publication")
-                await connection.execute(
-                    f"""UPDATE documents
-                       SET status = 'completed', progress = 100, error = NULL,
-                           metadata = COALESCE(metadata, '{{}}'::jsonb)
-                               - '{DOCUMENT_INGEST_ACTION_KEY}'
-                               - '{DOCUMENT_RECOVER_STAGE_KEY}'
-                               - '{DOCUMENT_PIPELINE_EXECUTION_KEY}',
-                           completed_at = NOW(), updated_at = NOW()
-                       WHERE document_id = $1 AND dataset_id = $2""",
-                    document_id, dataset_id,
-                )
+                if defer_terminal_until_fence_release:
+                    await connection.execute(
+                        """UPDATE documents
+                           SET status = 'completed', progress = 100, error = NULL,
+                               completed_at = NOW(), updated_at = NOW()
+                           WHERE document_id = $1 AND dataset_id = $2""",
+                        document_id, dataset_id,
+                    )
+                else:
+                    await connection.execute(
+                        f"""UPDATE documents
+                           SET status = 'completed', progress = 100, error = NULL,
+                               metadata = COALESCE(metadata, '{{}}'::jsonb)
+                                   - '{DOCUMENT_INGEST_ACTION_KEY}'
+                                   - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                                   - '{DOCUMENT_PIPELINE_EXECUTION_KEY}',
+                               completed_at = NOW(), updated_at = NOW()
+                           WHERE document_id = $1 AND dataset_id = $2""",
+                        document_id, dataset_id,
+                    )
             if finish_publication:
                 await self._finish_index_publication(connection, dataset_id)
         return promoted, deleted
@@ -3725,6 +3777,11 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                     # T1 stable identity columns (document_id::content_type::position)
                     seg.get("index_node_id"),
                     seg.get("index_node_hash"),
+                    seg.get("image_url"),
+                    seg.get("image_attachment_id"),
+                    seg.get("image_filename"),
+                    seg.get("image_media_type"),
+                    seg.get("image_file_size"),
                 )
             )
 
@@ -3739,10 +3796,12 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                     content_hash,
                     source_type, source_reference, citation_text,
                     page_number, section_header, language, contextual_prefix,
-                    content_type, index_node_id, index_node_hash
+                    content_type, index_node_id, index_node_hash,
+                    image_url, image_attachment_id, image_filename,
+                    image_media_type, image_file_size
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                           $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-                          $28, $29, $30)
+                          $28, $29, $30, $31, $32, $33, $34, $35)
                 ON CONFLICT (document_id, content_type, position) DO UPDATE SET
                     segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
@@ -3783,6 +3842,11 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                     contextual_prefix = EXCLUDED.contextual_prefix,
                     index_node_id = EXCLUDED.index_node_id,
                     index_node_hash = EXCLUDED.index_node_hash,
+                    image_url = EXCLUDED.image_url,
+                    image_attachment_id = EXCLUDED.image_attachment_id,
+                    image_filename = EXCLUDED.image_filename,
+                    image_media_type = EXCLUDED.image_media_type,
+                    image_file_size = EXCLUDED.image_file_size,
                     updated_at = NOW()
                 """,
                 rows,
@@ -4250,6 +4314,185 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         return {
             str(row["document_id"]).strip() for row in rows if str(row["document_id"] or "").strip()
         }
+
+    async def filter_active_summary_vector_ids(
+        self, dataset_id: str, tenant_id: str, vector_ids: list[str],
+    ) -> set[str]:
+        """Keep L1 points on the currently published summary generation."""
+
+        normalized_ids = sorted({str(value).strip() for value in vector_ids if str(value).strip()})
+        if not normalized_ids:
+            return set()
+        if not dataset_id or not tenant_id or not self._pool:
+            raise RuntimeError("hierarchical summary authority is unavailable")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT DISTINCT summary.vector_id
+                   FROM document_summaries AS summary
+                   JOIN documents AS d ON d.document_id = summary.document_id
+                   JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                  WHERE d.dataset_id = $1 AND ds.tenant_id = $2
+                    AND ds.is_deleted = FALSE
+                    AND summary.vector_id = ANY($3::text[])
+                    AND COALESCE(d.enabled, TRUE) = TRUE
+                    AND COALESCE(d.archived, FALSE) = FALSE
+                    AND NOT (COALESCE(d.metadata, '{}'::jsonb) ? '_document_lifecycle_reindex')""",
+                dataset_id, tenant_id, normalized_ids,
+            )
+        return {str(row["vector_id"]).strip() for row in rows if str(row["vector_id"] or "").strip()}
+
+    async def authorize_document_source_versions(
+        self,
+        dataset_id: str,
+        tenant_id: str,
+        references: list[tuple[str, int, str]],
+    ) -> set[tuple[str, int, str]]:
+        """Resolve exact saved versions for active documents in one scoped read."""
+
+        if not dataset_id or not tenant_id or not self._pool:
+            raise RuntimeError("document source authority is unavailable")
+        normalized = sorted({
+            (str(document_id).strip(), int(version), str(source_hash).strip().lower())
+            for document_id, version, source_hash in references
+            if str(document_id).strip() and int(version) > 0
+        })
+        if not normalized:
+            return set()
+        document_ids, versions, hashes = map(list, zip(*normalized, strict=True))
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """WITH requested(document_id, version_number, source_hash) AS (
+                       SELECT * FROM unnest($3::text[], $4::integer[], $5::text[])
+                   )
+                   SELECT DISTINCT requested.document_id,
+                          requested.version_number, requested.source_hash
+                   FROM requested
+                   JOIN documents AS d ON d.document_id = requested.document_id
+                   JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                   JOIN document_versions AS v
+                     ON v.document_id = d.document_id
+                    AND v.version_number = requested.version_number
+                   WHERE d.dataset_id = $1 AND ds.tenant_id = $2
+                     AND ds.is_deleted = FALSE
+                     AND COALESCE(d.enabled, TRUE) = TRUE
+                     AND COALESCE(d.archived, FALSE) = FALSE
+                     AND NOT (COALESCE(d.metadata, '{}'::jsonb) ? '_document_lifecycle_reindex')
+                     AND v.change_type NOT IN ('pending_restore', 'pending_before_restore')
+                     AND lower(v.content_hash) = requested.source_hash
+                     AND encode(sha256(convert_to(v.content, 'UTF8')), 'hex')
+                         = requested.source_hash""",
+                dataset_id, tenant_id, document_ids, versions, hashes,
+            )
+        return {
+            (str(row["document_id"]), int(row["version_number"]), str(row["source_hash"]))
+            for row in rows
+        }
+
+    async def published_source_identities(
+        self, dataset_id: str, tenant_id: str, document_ids: list[str],
+    ) -> dict[str, tuple[int, str]]:
+        """Bind retrieval hits only to the active, verified version snapshot."""
+
+        normalized = sorted({str(value).strip() for value in document_ids if str(value).strip()})
+        if not normalized:
+            return {}
+        if not dataset_id or not tenant_id or not self._pool:
+            raise RuntimeError("published source identity authority is unavailable")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT d.document_id, d.current_version, lower(v.content_hash) AS source_hash
+                   FROM documents AS d
+                   JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                   JOIN document_versions AS v
+                     ON v.document_id = d.document_id
+                    AND v.version_number = d.current_version
+                  WHERE d.dataset_id = $1 AND ds.tenant_id = $2
+                    AND ds.is_deleted = FALSE
+                    AND d.document_id = ANY($3::text[])
+                    AND COALESCE(d.enabled, TRUE) = TRUE
+                    AND COALESCE(d.archived, FALSE) = FALSE
+                    AND NOT (COALESCE(d.metadata, '{}'::jsonb) ? '_document_lifecycle_reindex')
+                    AND v.change_type NOT IN ('pending_restore', 'pending_before_restore')
+                    AND v.content = d.content
+                    AND encode(sha256(convert_to(v.content, 'UTF8')), 'hex')
+                        = lower(v.content_hash)""",
+                dataset_id, tenant_id, normalized,
+            )
+        return {
+            str(row["document_id"]): (int(row["current_version"]), str(row["source_hash"]))
+            for row in rows
+        }
+
+    async def list_unfinished_special_publication_datasets(
+        self, *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Find fenced datasets that have a durable special owner to reconcile."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT DISTINCT ds.dataset_id
+                   FROM datasets AS ds
+                   JOIN document_pipeline_executions AS execution
+                     ON execution.dataset_id = ds.dataset_id
+                  WHERE ds.content_revision < 0 AND ds.is_deleted = FALSE
+                    AND execution.status = 'running'
+                    AND COALESCE(execution.manifest, '{}'::jsonb)
+                        ? 'special_publication'
+                  ORDER BY ds.dataset_id LIMIT $1""",
+                max(1, min(int(limit), 1000)),
+            )
+        datasets: list[dict[str, Any]] = []
+        for row in rows:
+            dataset = await self.get_dataset(str(row["dataset_id"]))
+            if dataset is not None:
+                datasets.append(dataset)
+        return datasets
+
+    async def list_unbound_special_preparations(
+        self, *, limit: int = 100,
+    ) -> list[dict[str, str]]:
+        """Find crashed image preparations before they acquired a read fence."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT execution.execution_id, execution.document_id,
+                          execution.dataset_id,
+                          execution.manifest -> 'special_publication'
+                              ->> 'generation_id' AS generation_id,
+                          execution.manifest -> 'special_publication'
+                              ->> 'source_hash' AS source_hash
+                   FROM document_pipeline_executions AS execution
+                   JOIN documents AS document
+                     ON document.document_id = execution.document_id
+                    AND document.dataset_id = execution.dataset_id
+                   JOIN datasets AS dataset
+                     ON dataset.dataset_id = execution.dataset_id
+                  WHERE execution.status = 'running'
+                    AND dataset.is_deleted = FALSE
+                    AND dataset.content_revision >= 0
+                    AND execution.manifest -> 'special_publication'
+                        ->> 'phase' = 'preparing'
+                    AND NOT (execution.manifest -> 'special_publication'
+                        ? 'publication_revision')
+                    AND document.metadata ->> '_document_pipeline_execution_id'
+                        = execution.execution_id
+                    AND document.metadata ->> '_special_publication_generation_id'
+                        = execution.manifest -> 'special_publication'
+                            ->> 'generation_id'
+                  ORDER BY execution.created_at
+                  LIMIT $1""",
+                max(1, min(int(limit), 1000)),
+            )
+        return [
+            {key: str(row[key]) for key in (
+                "execution_id", "document_id", "dataset_id", "generation_id", "source_hash",
+            )}
+            for row in rows
+        ]
 
     async def document_has_completed_segments(
         self, dataset_id: str, tenant_id: str, document_id: str,
@@ -5850,7 +6093,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 """
                 INSERT INTO service_health_records (
                     service_id, status, response_time_ms, details, error_message
-                ) VALUES ($1, $2, $3, $4, $5)
+                ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5)
             """,
                 service_id,
                 status,
@@ -9133,7 +9376,9 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
     # Document Summaries (Hierarchical Indexing)
     # ============================================
 
-    async def save_document_summary(self, data: dict[str, Any]) -> bool:
+    async def save_document_summary(
+        self, data: dict[str, Any], *, connection: Any | None = None,
+    ) -> bool:
         """
         Save or update a document summary for L1 hierarchical indexing.
 
@@ -9155,7 +9400,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         if not document_id:
             return False
 
-        async with self._pool.acquire() as conn:
+        async def _save(conn: Any) -> None:
             await conn.execute(
                 """
                 INSERT INTO document_summaries (
@@ -9170,10 +9415,15 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 """,
                 document_id,
                 data.get("summary", ""),
-                data.get("keywords", []),
-                data.get("topics", []),
+                json.dumps(data.get("keywords", [])),
+                json.dumps(data.get("topics", [])),
                 data.get("vector_id"),
             )
+        if connection is not None:
+            await _save(connection)
+            return True
+        async with self._pool.acquire() as conn:
+            await _save(conn)
             return True
 
     async def get_document_summary(self, document_id: str) -> dict[str, Any] | None:

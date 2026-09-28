@@ -75,9 +75,12 @@ class Lifecycle:
             "profile": object(),
         }
 
-    async def recertify_active_publication(self, _context, *, publication_revision: int):
+    async def recertify_active_publication(
+        self, _context, *, publication_revision: int, connection: Any,
+    ):
         self.events.append("active:full-scroll")
         assert publication_revision == -1007
+        assert isinstance(connection, Connection)
         if self.fail_recertify:
             raise RuntimeError("injected cross-authority mismatch")
         return {
@@ -168,7 +171,7 @@ async def test_active_publication_failure_restores_backup_and_keeps_negative_rev
         events.append("pg:authority")
         return "committed"
 
-    with pytest.raises(RuntimeError, match="negative revision remains fail-closed"):
+    with pytest.raises(RuntimeError, match="rollback was incomplete; retrieval remains fenced"):
         await service._publish_points_atomically(
             collection="collection-a",
             points=[SimpleNamespace(id="point-a")],

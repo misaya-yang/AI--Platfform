@@ -40,10 +40,12 @@ from knowledge_service.persistence.database import (
     DatabaseStorage,
     dataset_ingestion_identity,
 )
+from knowledge_service.services.knowledge.special_publication import SpecialPublicationCoordinator
 from knowledge_service.services.knowledge.worker import (
     KnowledgeIngestTask,
     KnowledgeWorker,
 )
+from qdrant_client.http.models import PointStruct
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -219,6 +221,15 @@ async def verb_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE(document_id, version_number)
                 );
+                CREATE TABLE document_summaries (
+                    document_id VARCHAR(255) PRIMARY KEY REFERENCES documents(document_id) ON DELETE CASCADE,
+                    summary TEXT NOT NULL DEFAULT '',
+                    keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    topics JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    vector_id VARCHAR(255),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
                 INSERT INTO datasets (dataset_id, tenant_id)
                 VALUES ('dataset-a', 'tenant-a');
                 """
@@ -296,6 +307,123 @@ async def _get_document_row(
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     return {**dict(row), "metadata": metadata or {}}
+
+
+@pytest.mark.asyncio
+async def test_hierarchy_summary_writes_jsonb_on_live_postgres(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-summary")
+
+    assert await database.save_document_summary({
+        "document_id": "doc-summary", "summary": "one fact",
+        "keywords": ["alpha", "beta"], "topics": ["topic"],
+        "vector_id": str(uuid.uuid4()),
+    })
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT keywords, topics FROM document_summaries WHERE document_id = $1",
+            "doc-summary",
+        )
+    assert row is not None
+    assert json.loads(row["keywords"]) == ["alpha", "beta"]
+    assert json.loads(row["topics"]) == ["topic"]
+
+
+@pytest.mark.asyncio
+async def test_special_publication_pg_commit_and_crash_recovery(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    generation = str(uuid.uuid4())
+    old_point, candidate_point = str(uuid.uuid4()), str(uuid.uuid4())
+    await _put_document(
+        pool, document_id="doc-special", status="indexing", content="old body",
+        metadata={DOCUMENT_PIPELINE_EXECUTION_KEY: generation,
+                  "original_file_key": "source/original.pdf"},
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE datasets SET collection_name = 'special_base', "
+            "index_config = '{}'::jsonb WHERE dataset_id = 'dataset-a'",
+        )
+        await conn.execute(
+            """INSERT INTO document_pipeline_executions
+               (execution_id, document_id, dataset_id, action, status)
+               VALUES ($1, 'doc-special', 'dataset-a', 'reprocess', 'running')""",
+            generation,
+        )
+
+    class Vectors:
+        def __init__(self) -> None:
+            self.points = {"special_base": {old_point}}
+            self.fail_old_cleanup = True
+
+        async def document_point_ids_by_collection(self, **_kwargs: Any) -> dict[str, list[str]]:
+            return {name: sorted(ids) for name, ids in self.points.items() if ids}
+
+        async def ensure_collection(self, **kwargs: Any) -> str:
+            return str(kwargs["collection_name"])
+
+        async def upsert(self, name: str, points: list[PointStruct], **_kwargs: Any) -> None:
+            self.points.setdefault(name, set()).update(str(point.id) for point in points)
+
+        async def delete_document_points_by_ids(
+            self, name: str, ids: list[str], **_kwargs: Any,
+        ) -> None:
+            if self.fail_old_cleanup and old_point in ids:
+                self.fail_old_cleanup = False
+                raise RuntimeError("injected interruption after PG authority commit")
+            self.points.setdefault(name, set()).difference_update(ids)
+
+    vectors = Vectors()
+    service = SimpleNamespace(db=database, vector_store=vectors,
+                              image_storage_service=SimpleNamespace(),
+                              bm25_v2_lifecycle_service=None)
+    coordinator = SpecialPublicationCoordinator(service)
+    dataset = await database.get_dataset("dataset-a")
+    assert dataset is not None
+    plan = SimpleNamespace(
+        generation_id=generation, document_id="doc-special", dataset_id="dataset-a",
+        content="new body", source_hash=hashlib.sha256(b"new body").hexdigest(),
+        points_by_collection={"special_base": [PointStruct(
+            id=candidate_point, vector=[0.1, 0.2],
+            payload={"document_id": "doc-special", "text": "new body"},
+        )]},
+        segment_rows=[{
+            "segment_id": candidate_point, "dataset_id": "dataset-a",
+            "document_id": "doc-special", "position": 0, "text": "new body",
+            "content_type": "text", "vector_id": candidate_point,
+            "enabled": False, "status": "indexing", "metadata": {},
+        }],
+        segment_ids=[candidate_point], object_manifest=[],
+        summary_row={
+            "document_id": "doc-special", "summary": "new body",
+            "keywords": ["new"], "topics": ["body"], "vector_id": candidate_point,
+        },
+    )
+    await database.record_special_publication_manifest(
+        generation, "doc-special", "dataset-a", generation,
+        source_hash=plan.source_hash, planned_object_keys=[],
+    )
+
+    with pytest.raises(RuntimeError, match="injected interruption"):
+        await coordinator.publish(plan, dataset, generation, "old body")
+    fenced = await database.get_dataset("dataset-a")
+    assert fenced is not None and fenced["content_revision"] < 0
+    assert (await _get_document_row(pool, "doc-special"))["content"] == "new body"
+    owner = await database.get_active_special_publication_for_dataset("dataset-a")
+    assert owner["execution_id"] == generation and owner["phase"] == "committed"
+    assert await coordinator.recover_unfinished(fenced)
+    assert (await database.get_dataset("dataset-a"))["content_revision"] > 0
+    assert vectors.points["special_base"] == {candidate_point}
+    assert (await _get_execution_row(pool, generation))["status"] == "completed"
+    final = await _get_document_row(pool, "doc-special")
+    assert final["current_version"] == 2 and final["version_count"] == 2
+    summary = await database.get_document_summary("doc-special")
+    assert summary is not None and summary["vector_id"] == candidate_point
 
 
 async def _get_execution_row(

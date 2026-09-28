@@ -951,6 +951,7 @@ class KnowledgeService:
                 certification = await lifecycle.recertify_active_publication(
                     context,
                     publication_revision=int(publication.revision),
+                    connection=publication.connection,
                 )
                 async with publication.connection.transaction():
                     revision = await finish(

@@ -599,22 +599,20 @@ class Bm25V2LifecycleStore:
         collection_name: str,
         tenant_id: str,
         dataset_id: str,
+        connection: Any | None = None,
     ) -> AuthoritySnapshot:
         """Recompute the enabled-L3-text PostgreSQL authority set.
 
-        Same predicate shape as ``scripts/backfill_bm25_v2.py``
-        ``PostgresBackfillAuthority.snapshot`` under REPEATABLE READ:
-        completed L3 text segments with a vector_id, under enabled,
-        non-archived, non-lifecycle-reindex documents, in the dataset's base
-        collection, with no deletion fence. A negative publication also
-        includes in-flight documents: their previous serving rows remain
-        readable while terminal status is certified by the final publication
-        step.
+        Serving authority follows each completed, enabled L3 text segment
+        under an enabled, non-archived, non-lifecycle-reindex document in the
+        dataset's base collection. Document status does not hide an old serving
+        segment during indexing or after a failed reprocess. With ``connection``,
+        read on the publisher's transaction so the digest includes its
+        uncommitted candidate rows. The caller owns that transaction and must
+        not pass a connection from a different publisher.
         """
 
-        async with self._pool.acquire() as conn, conn.transaction(
-            isolation="repeatable_read", readonly=True
-        ):
+        async def _read(conn: Any) -> AuthoritySnapshot:
             dataset = await conn.fetchrow(
                 """
                 SELECT dataset_id, tenant_id, collection_name, content_revision,
@@ -648,7 +646,6 @@ class Bm25V2LifecycleStore:
                        s.status AS segment_status,
                        d.enabled AS document_enabled,
                        d.archived AS document_archived,
-                       d.status AS document_status,
                        (
                            COALESCE(d.metadata, '{}'::jsonb)
                            ? '_document_lifecycle_reindex'
@@ -674,13 +671,6 @@ class Bm25V2LifecycleStore:
                   AND COALESCE(s.content_type, 'text') = 'text'
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND (
-                        d.status = 'completed'
-                        OR (
-                            ds.content_revision < 0
-                            AND d.status NOT IN ('waiting', 'error')
-                        )
-                  )
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -691,23 +681,30 @@ class Bm25V2LifecycleStore:
                 str(tenant_id),
                 str(collection_name),
             )
-        point_ids = [str(row["point_id"]) for row in rows]
-        if len(point_ids) != len(set(point_ids)):
-            raise Bm25V2LifecycleDbError(
-                "authoritative segments contain duplicate vector_id values"
+            point_ids = [str(row["point_id"]) for row in rows]
+            if len(point_ids) != len(set(point_ids)):
+                raise Bm25V2LifecycleDbError(
+                    "authoritative segments contain duplicate vector_id values"
+                )
+            source_entries = [
+                (str(row["point_id"]), str(row["text"] or "")) for row in rows
+            ]
+            return AuthoritySnapshot(
+                collection_name=str(collection_name),
+                tenant_id=str(tenant_id),
+                dataset_id=str(dataset_id),
+                content_revision=int(dataset["content_revision"] or 0),
+                point_count=len(point_ids),
+                point_ids_sha256=point_ids_sha256(point_ids),
+                source_text_sha256=source_text_sha256(source_entries),
             )
-        source_entries = [
-            (str(row["point_id"]), str(row["text"] or "")) for row in rows
-        ]
-        return AuthoritySnapshot(
-            collection_name=str(collection_name),
-            tenant_id=str(tenant_id),
-            dataset_id=str(dataset_id),
-            content_revision=int(dataset["content_revision"] or 0),
-            point_count=len(point_ids),
-            point_ids_sha256=point_ids_sha256(point_ids),
-            source_text_sha256=source_text_sha256(source_entries),
-        )
+
+        if connection is not None:
+            return await _read(connection)
+        async with self._pool.acquire() as conn, conn.transaction(
+            isolation="repeatable_read", readonly=True
+        ):
+            return await _read(conn)
 
     async def flip_dataset_lexical_active_version(
         self,

@@ -7,10 +7,11 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, FileText, ChevronDown, ExternalLink, Image as ImageIcon } from "lucide-react";
+import { Database, FileText, ChevronDown, ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { RetrievedContext } from "../types";
+import { citationSource, type CitationSource } from "./citationSource";
 import { SourceDocumentDialog } from "./SourceDocumentDialog";
 
 interface ContextDisplayProps {
@@ -19,7 +20,7 @@ interface ContextDisplayProps {
 
 export function ContextDisplay({ contexts }: ContextDisplayProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedSource, setSelectedSource] = useState<{ datasetId: string; documentId: string; excerpt: string } | null>(null);
+  const [selectedSource, setSelectedSource] = useState<CitationSource | null>(null);
   const { t } = useTranslation();
 
   if (!contexts || !Array.isArray(contexts) || contexts.length === 0) return null;
@@ -72,7 +73,9 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                     </span>
                   </div>
                   <div className="space-y-2 pl-5">
-                    {(ctx.chunks || []).slice(0, 3).map((chunk, idx) => (
+                    {(ctx.chunks || []).slice(0, 3).map((chunk, idx) => {
+                      const citation = citationSource(ctx.dataset_id, chunk);
+                      return (
                       <motion.div
                         key={idx}
                         initial={{ opacity: 0, x: -10 }}
@@ -95,52 +98,18 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                             >
                               {(chunk.score * 100).toFixed(0)}% match
                             </Badge>
-                            {chunk.image_url && (
-                              <Badge
-                                variant="secondary"
-                                className="text-[9px] px-1.5 py-0 bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]"
-                              >
-                                <ImageIcon className="h-2.5 w-2.5 mr-0.5" />
-                                Image
-                              </Badge>
-                            )}
                           </div>
-                          {typeof chunk.metadata?.document_id === "string" ? (
-                            <button type="button" onClick={() => setSelectedSource({ datasetId: ctx.dataset_id, documentId: String(chunk.metadata?.document_id), excerpt: chunk.content })}
-                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
-                              <ExternalLink className="h-3 w-3" />
-                              <span>{t("assistant.openSource", "Open source")}</span>
-                            </button>
-                          ) : chunk.source_url && (
-                            <a href={chunk.source_url} target="_blank" rel="noopener noreferrer"
-                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
-                              <ExternalLink className="h-3 w-3" />
-                              <span>{t("assistant.openSource", "Open source")}</span>
-                            </a>
-                          )}
+                          <button type="button" onClick={() => setSelectedSource(citation)}
+                            className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
+                            <ExternalLink className="h-3 w-3" />
+                            <span>{t("assistant.openSource", "Open source")}</span>
+                          </button>
                         </div>
-                        {chunk.image_url && (
-                          <div className="mb-2">
-                            <a
-                              href={chunk.image_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="block"
-                            >
-                              <img
-                                src={chunk.image_url}
-                                alt="Knowledge base image"
-                                className="max-w-full max-h-48 rounded-lg border border-[hsl(var(--assistant-border))] hover:opacity-90 transition-opacity cursor-pointer"
-                                loading="lazy"
-                              />
-                            </a>
-                          </div>
-                        )}
                         <div className="line-clamp-3 text-[hsl(var(--assistant-text-secondary))] leading-relaxed">
                           {chunk.content}
                         </div>
                       </motion.div>
-                    ))}
+                    );})}
                     {(ctx.chunks?.length || 0) > 3 && (
                       <div className="text-xs text-[hsl(var(--assistant-text-tertiary))] pl-2">
                         +{(ctx.chunks?.length || 0) - 3} more chunks

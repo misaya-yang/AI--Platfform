@@ -29,6 +29,12 @@ class DurableQueueDatabase:
     def connection_pool_max_size(self) -> int:
         return self.pool_size
 
+    async def list_unbound_special_preparations(self) -> list[dict[str, Any]]:
+        return []
+
+    async def list_unfinished_special_publication_datasets(self) -> list[dict[str, Any]]:
+        return []
+
     @asynccontextmanager
     async def document_index_update_lease(self, dataset_id: str, document_id: str):
         assert (dataset_id, document_id) == ("dataset-a", "document-a")
@@ -146,6 +152,7 @@ class DurableQueueDatabase:
 class DurableQueueService:
     def __init__(self, database: DurableQueueDatabase) -> None:
         self.db = database
+        self.vector_store = SimpleNamespace()
         self.settings = SimpleNamespace(
             knowledge=SimpleNamespace(
                 large_file_threshold=1024,
@@ -549,8 +556,18 @@ async def test_worker_start_fails_closed_when_pool_cannot_cover_owner_leases() -
 
 
 @pytest.mark.asyncio
+async def test_worker_start_rejects_three_special_publishers_without_spare_connection() -> None:
+    worker, _database, _service = make_worker(pool_size=6)
+
+    with pytest.raises(RuntimeError, match="requires at least 9"):
+        await worker.start(concurrency=3)
+
+    assert worker._running is False
+
+
+@pytest.mark.asyncio
 async def test_worker_start_runs_immediate_recovery_and_stop_cancels_it() -> None:
-    worker, _database, service = make_worker(pool_size=4)
+    worker, _database, service = make_worker(pool_size=5)
     await worker.start(concurrency=1)
     try:
         for _ in range(20):

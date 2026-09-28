@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -243,6 +244,60 @@ class KBProxyClient:
             if not response_ids <= set(batch):
                 raise ValueError("document authorization response contains unknown IDs")
             allowed.update(response_ids)
+        return allowed
+
+    async def authorize_document_sources(
+        self,
+        user: Any,
+        dataset_id: str,
+        references: list[dict[str, Any]],
+    ) -> set[tuple[str, int, str]]:
+        """Ask KB for exact saved source versions under current document ACL."""
+
+        requested: set[tuple[str, int, str]] = set()
+        for item in references:
+            if not isinstance(item, dict):
+                raise ValueError("invalid source reference")
+            document_id = str(item.get("document_id") or "").strip()
+            version = item.get("source_version")
+            source_hash = str(item.get("source_hash") or "").strip().lower()
+            if (
+                not document_id or isinstance(version, bool) or not isinstance(version, int)
+                or version <= 0 or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+            ):
+                raise ValueError("invalid source reference")
+            requested.add((document_id, version, source_hash))
+        if not requested:
+            return set()
+        allowed: set[tuple[str, int, str]] = set()
+        ordered = sorted(requested)
+        for offset in range(0, len(ordered), 500):
+            batch = ordered[offset:offset + 500]
+            payload = await self._get_service_client().request_json(
+                "POST",
+                "/api/v1/internal/knowledge/document-sources/authorize",
+                headers=self._user_headers(user),
+                json={
+                    "dataset_id": dataset_id,
+                    "references": [
+                        {"document_id": document_id, "source_version": version,
+                         "source_hash": source_hash}
+                        for document_id, version, source_hash in batch
+                    ],
+                },
+            )
+            rows = payload.get("allowed_references") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("invalid source authorization response")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid source authorization response")
+                identity = (
+                    row.get("document_id"), row.get("source_version"), row.get("source_hash"),
+                )
+                if identity not in batch:
+                    raise ValueError("source authorization response contains unknown identity")
+                allowed.add(identity)
         return allowed
 
     async def retrieve(
