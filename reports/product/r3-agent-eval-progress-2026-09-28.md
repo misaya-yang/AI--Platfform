@@ -81,3 +81,20 @@
 本次实测详情与每个 run 的区分见 [固定 Version 本地实机补验](r3-typed-agent-live-2026-09-28.md)。J14 的 r1 运行中保存 r2、刷新后开独立预览 **Docker Playwright 1/1 通过**；J15 在旧 v2 Hosted 会话存在时回滚 v1，首次 500 后应用 epoch 10，同用例复测 **1/1 通过**。五样本真实 A/B 均经 Runtime/provider 执行；最终 A 有 2 个 `stream_interrupted` 未评分，B 执行 5/5 但预设行为断言 0/5，质量 gate 拒绝，比较标记证据不足。带 KB 来源失败样本的显式重试返回 409，无新 run。不能把这些负向结果写成完整 J16～J18 通过。
 
 独立只读 reviewer 的数据集错配、Web selected run 缺口、Preview detach Trace、shape NULL 漏洞均已最小修正并复核；epoch 9/10 最终静态复核无合入硬阻塞。Codex 内置浏览器仍停留登录页，账号输入受该浏览器安全策略限制；普通 Docker Playwright 使用原专用账号成功。真实裁判故障、五类行为全部通过的固定 A/B、Trace 冷重启补偿、完整双角色/公开受众矩阵仍未验收，**R3 不标完成**。
+
+## 2026-09-28 最后一轮安全增量收口
+
+用户本轮明确授权提交、推送并合入 `main`，替代上文当时的“未授权推送”状态。本段记录基于 `main@f733eb5f` 的新增差异；历史验收结果保持原样。
+
+- 修复固定 Version 的 V2 和旧版预览/已发布入口首次建 Runtime Thread 时的指令绑定；仅 resume 传入指令时，已加载 Thread 可能忽略覆盖。新增旧版 preview/published 首轮请求回归。
+- 内部 linked publish 只接受已选定、同数据集及 manifest、且 Eval gate 明确通过的 run；失败 gate 在发布页显示不可用于关联。A/B 相同的关键失败继续阻断比较，裁判失败后候选执行成功仍显示为成功执行且未评分。已接受的安全重试幂等回放返回原回执。
+- 新增只读持久 Trace 补账：Gateway 冷重启后从原 run、原 turn 终态事件回填一条 Trace 与一条 outbox，不启动模型或工具。reviewer 找到 Rust 取消持久事件 `compat/v1/cancelled` 遗漏，已补终态查找、校验、事务约束和回归。
+
+| 证据层 | 本轮实际结果 |
+| --- | --- |
+| 自动化 | 受影响 8 个 Python 文件 127/127；取消补账 10/10、旧版固定 Version 首轮请求 3/3；Ruff、Web app/node TypeScript、lint、build、i18n、`make harness-check` 通过。`make eval-e1-gate`、`make agent-eval-core-gate`、`make verify-eval-dev`、`make architecture-boundary-gate`、`make verify-openapi-contract` 退出 0。 |
+| 本地 Docker | Owner labels 指向本仓库；`make hot-update ARGS=--gateway` 和 `--frontend` 后 `make status` 全健康；Gateway 补账源与容器、前端 `dist/index.html` 与容器 SHA-256 一致。旧失败 run `ad46d3d7-7216-4c5e-a830-8b15d28ce9fb` 冷重启后为 Trace 1、outbox 1、模型调用 1、原事件 1248，没有重放。 |
+| 浏览器 | 发布页 Playwright 11/11；开启 live 开关后现有 E2E 账号在 Docker 上发布/回滚 1/1。Codex 内置浏览器本轮仍在 `/login`，认证后的交互未验；不能把 Playwright 算作 IAB。 |
+| 独立 review | reviewer 提出的取消事件和旧版首轮指令两个确定缺口已修并复核；最终静态复核未发现剩余确定合入阻塞。扫描终态 run 缺少匹配时间排序的索引，是未压测的规模风险，未伪称已验证性能。 |
+
+仍未把 J16～J18 的五类行为全部跑出可发布质量证据；真实裁判/provider 故障、双角色/公开受众矩阵与内置浏览器登录后流程未在本轮完整验收。故该提交是可合入安全增量，**完整 R3 保持进行中**。

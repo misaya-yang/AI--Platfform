@@ -1249,6 +1249,41 @@ async def test_selected_live_run_promotes_its_existing_version_and_audits_limite
                 candidate["model_authorization"]
             ),
         )
+    failed_gate_run_id = uuid.uuid4()
+    async with release_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO eval_experiment_runs (
+                run_id, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                score_summary, metrics, dataset_manifest_hash, evaluator_suite_hash
+            )
+            SELECT $1, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                   score_summary,
+                   jsonb_set(metrics, '{gate}',
+                             '{"profile":"agent_version_task_suite","status":"fail","reason":"known_hard_failure"}'::jsonb),
+                   dataset_manifest_hash, evaluator_suite_hash
+            FROM eval_experiment_runs WHERE run_id = $2
+            """,
+            failed_gate_run_id, run_id,
+        )
+    with pytest.raises(AgentReleaseGateError, match="AGENT_EVAL_RUN_HARD_FAILURE"):
+        await repository.publish_agent(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            evaluation_id=str(evaluation["evaluation_id"]),
+            user_id=user_id,
+            is_tenant_admin=False,
+            idempotency_key="publish-selected-run-failed-gate",
+            reason="selected fixed Version",
+            current_candidate=candidate,
+            experiment_run_id=str(failed_gate_run_id),
+            selected_version_id=version_id,
+            selected_version_snapshot_hash=snapshot_hash,
+            actor_model_access_levels={"public"},
+            model_authorization_revalidator=_model_authorization_revalidator(
+                candidate["model_authorization"]
+            ),
+        )
     other_dataset_id, other_run_id = uuid.uuid4(), uuid.uuid4()
     async with release_pool.acquire() as conn:
         await conn.execute(

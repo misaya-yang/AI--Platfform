@@ -3259,6 +3259,7 @@ class DatabaseAgentRepository(BaseRepository):
                         "unscored_trials", "unknown_side_effect_trial_count",
                     )
                 }
+                run_gate = metrics.get("gate")
                 if (
                     any(isinstance(value, bool) or not isinstance(value, int) for value in counts.values())
                     or counts["total_trials"] <= 0
@@ -3273,6 +3274,13 @@ class DatabaseAgentRepository(BaseRepository):
                     )
                     or summary.get("critical_failed_count") != 0
                     or summary.get("excluded_case_count") != 0
+                    or not isinstance(run_gate, dict)
+                    or run_gate.get("profile") != "agent_version_task_suite"
+                    or not (
+                        run_gate.get("status") == "pass"
+                        or (run_gate.get("status") == "warning"
+                            and run_gate.get("reason") == "fixed_sample_only")
+                    )
                 ):
                     raise AgentReleaseGateError("AGENT_EVAL_RUN_HARD_FAILURE")
                 selected_version = await conn.fetchrow(
@@ -3314,8 +3322,7 @@ class DatabaseAgentRepository(BaseRepository):
                     "dataset_manifest_hash": str(run["dataset_manifest_hash"] or ""),
                     "evaluator_suite_hash": str(run["evaluator_suite_hash"] or ""),
                     "actual_fingerprint": expected_identity,
-                    "quality_gate_status": (metrics.get("gate") or {}).get("status")
-                    if isinstance(metrics.get("gate"), dict) else "unavailable",
+                    "quality_gate_status": run_gate["status"],
                     "quality_evidence_scope": "fixed_sample_only",
                     "model_quality_evaluated": True,
                     "general_quality_proven": False,

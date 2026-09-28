@@ -220,7 +220,18 @@ async def ensure_thread(
     readonly_capabilities: dict[str, Any] | None = None,
     capability_allowlist: list[dict[str, Any]] | None = None,
     native_web_search_enabled: bool = False,
+    developer_instructions: str | None = None,
 ) -> dict[str, Any]:
+    if developer_instructions is not None and not isinstance(developer_instructions, str):
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_AGENT_INSTRUCTIONS_INVALID", status_code=409
+        )
+    if developer_instructions is not None and not developer_instructions.strip():
+        developer_instructions = GENERIC_AGENT_INSTRUCTIONS_V1
+    if developer_instructions is not None and len(developer_instructions.encode("utf-8")) > 256 * 1024:
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_AGENT_INSTRUCTIONS_INVALID", status_code=409
+        )
     if readonly_capabilities is None:
         model = await plane.model_service.get_model(tenant_id, model_id)
         if not model or not bool(model.get("is_enabled", True)):
@@ -285,6 +296,11 @@ async def ensure_thread(
             ),
             "dynamicTools": plane._dynamic_tools(readonly_capabilities or {}),
         }
+        if developer_instructions is not None:
+            # A loaded kernel Thread can ignore later resume instruction
+            # overrides. Bind the immutable Version instructions at creation.
+            start["baseInstructions"] = BASE_AGENT_INSTRUCTIONS_V1
+            start["developerInstructions"] = developer_instructions
         response = await plane.http_client.post(
             f"{plane.runtime_url}/internal/v1/threads",
             headers=runtime_headers(

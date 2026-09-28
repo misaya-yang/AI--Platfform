@@ -442,6 +442,7 @@ async def start_turn(
         readonly_capabilities=readonly,
         capability_allowlist=capability_allowlist,
         native_web_search_enabled=native_web_search_enabled,
+        developer_instructions=agent_spec["developerInstructions"],
     )
     runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
     tool_policy = runtime_tool_policy(readonly, native_search_allowed=native_web_search_enabled)

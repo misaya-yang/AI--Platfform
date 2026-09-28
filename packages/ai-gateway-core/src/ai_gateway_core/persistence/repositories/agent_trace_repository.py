@@ -235,12 +235,18 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
             if isinstance(item.get("behavior_pass"), bool)
         ]
         execution_labels = [item.get("execution_succeeded") is True for item in observed]
-        execution_complete = bool(trials) and all(
-            status == "succeeded" and executed
-            for status, executed in zip(trial_statuses, execution_labels, strict=True)
+        # A judge may fail after the candidate has completed. Keep candidate
+        # execution separate from score availability in the public case row.
+        execution_complete = bool(trials) and all(execution_labels)
+        quality_complete = (
+            execution_complete
+            and all(status == "succeeded" for status in trial_statuses)
+            and len(behavior_labels) == len(trials)
         )
-        quality_complete = execution_complete and len(behavior_labels) == len(trials)
-        if any(status == "failed" for status in trial_statuses):
+        if any(
+            status == "failed" and not executed
+            for status, executed in zip(trial_statuses, execution_labels, strict=True)
+        ):
             execution_status = "failed"
         elif any(status == "skipped" for status in trial_statuses):
             execution_status = "cancelled" if any(
@@ -1773,6 +1779,31 @@ class AgentTraceRepository(BaseRepository):
             "status": status,
             "source_adapter": source_adapter,
         }
+        if source_adapter == "gateway.agent_runtime" and self.enabled:
+            # Runtime recovery can race the original observer. The trace row
+            # serializes both writers, and any prior job (including a finished
+            # one) is final for this immutable Runtime turn.
+            async with self._pool.acquire() as conn, conn.transaction():
+                await self._lock_outbox_claim(conn)
+                owned = await conn.fetchrow(
+                    "SELECT trace_id FROM agent_traces WHERE trace_id = $1::uuid "
+                    "AND tenant_id = $2 FOR UPDATE",
+                    trace_id, tenant_id,
+                )
+                if not owned:
+                    return None
+                row = await conn.fetchrow(
+                    """INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+                       SELECT $1::varchar, 'trace.ingested'::varchar, $2::jsonb
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM agent_trace_outbox
+                           WHERE tenant_id = $1::varchar
+                             AND job_type = 'trace.ingested'
+                             AND payload->>'trace_id' = $3::text
+                       ) RETURNING *""",
+                    tenant_id, self._json_dumps(payload), trace_id,
+                )
+            return self._decode_eval_row(dict(row)) if row else None
         row = await self.fetchrow(
             """
             INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
@@ -1792,6 +1823,264 @@ class AgentTraceRepository(BaseRepository):
             trace_id,
         )
         return self._decode_eval_row(row) if row else None
+
+    async def list_assistant_runtime_trace_reconciliation_candidates(
+        self,
+        *,
+        since: datetime,
+        limit: int,
+        after_finished_at: datetime | None = None,
+        after_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Page recent terminal Runtime runs; never invoke the Runtime itself."""
+        rows = await self.fetch(
+            """SELECT r.run_id, r.tenant_id, r.user_id, r.session_id,
+                      r.status, r.request_preview, r.usage, r.error, r.started_at,
+                      COALESCE(r.finished_at, r.updated_at) AS ended_at,
+                      s.runtime_thread_id, s.snapshot
+               FROM assistant_runs r
+               JOIN assistant_runtime_snapshots s
+                 ON s.run_id = r.run_id AND s.tenant_id = r.tenant_id
+                AND s.user_id = r.user_id AND s.session_id = r.session_id
+                AND (r.runtime_snapshot_id IS NULL OR s.snapshot_id = r.runtime_snapshot_id)
+               LEFT JOIN agent_traces t ON t.trace_id = r.run_id
+               WHERE r.engine = 'agent_runtime'
+                 AND r.status IN ('completed', 'succeeded', 'failed', 'cancelled')
+                 AND COALESCE(r.finished_at, r.updated_at) >= $1::timestamptz
+                 AND ($2::timestamptz IS NULL OR
+                      (COALESCE(r.finished_at, r.updated_at), r.run_id) >
+                      ($2::timestamptz, $3::uuid))
+                 AND (t.trace_id IS NULL OR (
+                     t.tenant_id = r.tenant_id AND t.user_id = r.user_id
+                     AND t.session_id = r.session_id
+                     AND t.workflow_kind = 'agent_runtime_turn'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM agent_trace_outbox o
+                         WHERE o.tenant_id = r.tenant_id
+                           AND o.job_type = 'trace.ingested'
+                           AND o.payload->>'trace_id' = r.run_id::text
+                     )
+                 ))
+               ORDER BY COALESCE(r.finished_at, r.updated_at), r.run_id
+               LIMIT $4""",
+            since, after_finished_at, after_run_id, max(1, min(limit, 500)),
+        )
+        return [
+            {**row, "usage": self._decode_json(row.get("usage"), default={}),
+             "snapshot": self._decode_json(row.get("snapshot"), default={})}
+            for row in rows
+        ]
+
+    async def get_assistant_runtime_trace_terminal(
+        self, *, tenant_id: str, user_id: str, session_id: str,
+        runtime_thread_id: str, run_id: str,
+    ) -> dict[str, Any] | None:
+        return await self.fetchrow(
+            """SELECT event_id, sequence, event_type, status, payload, created_at
+               FROM assistant_runtime_items
+               WHERE runtime_thread_id = $1::uuid AND tenant_id = $2
+                 AND user_id = $3 AND session_id = $4 AND turn_id = $5
+                 AND event_type IN ('compat/v1/run_finished', 'compat/v1/run_error', 'compat/v1/cancelled')
+                 AND payload->'data'->>'run_id' = $5
+               ORDER BY sequence DESC LIMIT 1""",
+            runtime_thread_id, tenant_id, user_id, session_id, run_id,
+        )
+
+    async def count_assistant_runtime_trace_events(
+        self, *, tenant_id: str, user_id: str, session_id: str,
+        runtime_thread_id: str, run_id: str,
+    ) -> dict[str, int]:
+        rows = await self.fetch(
+            """SELECT event_type, COUNT(*)::int AS event_count
+               FROM assistant_runtime_items
+               WHERE runtime_thread_id = $1::uuid AND tenant_id = $2
+                 AND user_id = $3 AND session_id = $4 AND turn_id = $5
+                 AND event_type LIKE 'compat/v1/%'
+                 AND payload->'data'->>'run_id' = $5
+               GROUP BY event_type""",
+            runtime_thread_id, tenant_id, user_id, session_id, run_id,
+        )
+        return {str(row["event_type"]).removeprefix("compat/v1/"): int(row["event_count"])
+                for row in rows}
+
+    async def read_assistant_runtime_trace_text_page(
+        self, *, tenant_id: str, user_id: str, session_id: str,
+        runtime_thread_id: str, run_id: str, after_sequence: int,
+        limit: int = 250,
+    ) -> list[dict[str, Any]]:
+        return await self.fetch(
+            """SELECT sequence, payload->'data'->>'content' AS content
+               FROM assistant_runtime_items
+               WHERE runtime_thread_id = $1::uuid AND tenant_id = $2
+                 AND user_id = $3 AND session_id = $4 AND turn_id = $5
+                 AND sequence > $6 AND event_type = 'compat/v1/text_delta'
+                 AND payload->'data'->>'run_id' = $5
+                 AND NULLIF(payload->'data'->>'content', '') IS NOT NULL
+               ORDER BY sequence LIMIT $7""",
+            runtime_thread_id, tenant_id, user_id, session_id, run_id,
+            after_sequence, max(1, min(limit, 500)),
+        )
+
+    async def get_assistant_runtime_trace_model_usage(
+        self, *, tenant_id: str, user_id: str, session_id: str,
+        runtime_thread_id: str, run_id: str,
+    ) -> dict[str, Any]:
+        """Return measured call usage only when every dispatched call is complete."""
+        row = await self.fetchrow(
+            """SELECT
+                 COUNT(*) FILTER (WHERE c.dispatched_at IS NOT NULL)::int AS dispatched_calls,
+                 COUNT(*) FILTER (
+                     WHERE c.dispatched_at IS NOT NULL AND c.status = 'completed'
+                       AND c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL
+                 )::int AS measured_calls,
+                 COALESCE(SUM(c.input_tokens) FILTER (
+                     WHERE c.dispatched_at IS NOT NULL AND c.status = 'completed'
+                 ), 0)::bigint AS input_tokens,
+                 COALESCE(SUM(c.output_tokens) FILTER (
+                     WHERE c.dispatched_at IS NOT NULL AND c.status = 'completed'
+                 ), 0)::bigint AS output_tokens,
+                 COALESCE(SUM(c.cost_microusd) FILTER (
+                     WHERE c.dispatched_at IS NOT NULL AND c.status = 'completed'
+                 ), 0)::bigint AS cost_microusd,
+                 COUNT(*) FILTER (
+                     WHERE c.dispatched_at IS NOT NULL AND c.status = 'completed'
+                       AND c.cost_microusd IS NOT NULL
+                 )::int AS cost_measured_calls
+               FROM assistant_runtime_model_calls c
+               JOIN assistant_runtime_snapshots s
+                 ON s.run_id = c.run_id AND s.tenant_id = c.tenant_id
+                AND s.user_id = c.user_id AND s.session_id = c.session_id
+                AND s.runtime_thread_id = $4::uuid
+               WHERE c.tenant_id = $1 AND c.user_id = $2 AND c.session_id = $3
+                 AND c.run_id = $5::uuid""",
+            tenant_id, user_id, session_id, runtime_thread_id, run_id,
+        )
+        return dict(row or {})
+
+    async def insert_reconciled_assistant_runtime_trace(
+        self, *, run: dict[str, Any], terminal: dict[str, Any], trace: dict[str, Any],
+    ) -> bool:
+        """Atomically insert one scoped terminal trace, event and Eval outbox job."""
+        if not self.enabled:
+            return False
+        run_id = str(run["run_id"])
+        tenant_id = str(run["tenant_id"])
+        user_id = str(run["user_id"])
+        session_id = str(run["session_id"])
+        status = str(run["status"])
+        event_id = str(terminal["event_id"])
+        metrics = trace["metrics"]
+        async with self._pool.acquire() as conn, conn.transaction():
+            current = await conn.fetchrow(
+                """SELECT r.run_id FROM assistant_runs r
+                   JOIN assistant_runtime_snapshots s
+                     ON s.run_id = r.run_id AND s.tenant_id = r.tenant_id
+                    AND s.user_id = r.user_id AND s.session_id = r.session_id
+                    AND s.runtime_thread_id = $5::uuid
+                    AND (r.runtime_snapshot_id IS NULL OR s.snapshot_id = r.runtime_snapshot_id)
+                   WHERE r.run_id = $1::uuid AND r.tenant_id = $2
+                     AND r.user_id = $3 AND r.session_id = $4
+                     AND r.engine = 'agent_runtime' AND r.status = $6
+                     AND r.status IN ('completed', 'succeeded', 'failed', 'cancelled')
+                     AND EXISTS (
+                         SELECT 1 FROM assistant_runtime_items i
+                         WHERE i.runtime_thread_id = s.runtime_thread_id
+                           AND i.tenant_id = r.tenant_id AND i.user_id = r.user_id
+                           AND i.session_id = r.session_id AND i.turn_id = r.run_id::text
+                           AND i.event_id = $7::uuid
+                           AND i.event_type IN ('compat/v1/run_finished', 'compat/v1/run_error', 'compat/v1/cancelled')
+                           AND i.payload->'data'->>'run_id' = r.run_id::text
+                     ) FOR UPDATE OF r""",
+                run_id, tenant_id, user_id, session_id,
+                str(run["runtime_thread_id"]), status, event_id,
+            )
+            if not current:
+                return False
+            inserted = await conn.fetchrow(
+                """INSERT INTO agent_traces (
+                     trace_id, trace_family, workflow_kind, tenant_id, user_id,
+                     session_id, thread_id, run_id, request_id, model_id, provider,
+                     status, started_at, ended_at, total_latency_ms,
+                     first_token_latency_ms, input_tokens, output_tokens, total_tokens,
+                     input_preview, output_preview, redaction_state, metadata,
+                     metrics, privacy, source_adapter, retention_expires_at
+                   ) VALUES (
+                     $1::uuid, 'assistant', 'agent_runtime_turn', $2, $3,
+                     $4, $4, $5, $6, $7, $8,
+                     $9, $10::timestamptz, $11::timestamptz, $12,
+                     $13, $14, $15, $16,
+                     $17, $18, $19::jsonb, $20::jsonb,
+                     $21::jsonb, $22::jsonb, 'gateway.agent_runtime', $23::timestamptz
+                   ) ON CONFLICT (trace_id) DO NOTHING RETURNING trace_id""",
+                run_id, tenant_id, user_id, session_id, run_id,
+                trace["request_id"], trace.get("model_id"), trace.get("provider"),
+                trace["status"], _coerce_timestamptz(trace["started_at"]),
+                _coerce_timestamptz(trace["ended_at"]),
+                int(metrics["total_latency_ms"]), int(metrics["first_token_latency_ms"]),
+                int(metrics["input_tokens"]), int(metrics["output_tokens"]),
+                int(metrics["total_tokens"]), trace["input_preview"],
+                trace["output_preview"], self._json_dumps(trace["redaction_state"]),
+                self._json_dumps({"schema_version": "ate-03", **trace["metadata"]}),
+                self._json_dumps(metrics), self._json_dumps(trace["privacy"]),
+                _coerce_timestamptz(trace["retention_expires_at"]),
+            )
+            if inserted:
+                span = trace["spans"][0]
+                await conn.execute(
+                    """INSERT INTO agent_trace_spans (
+                         span_id, trace_id, span_kind, name, status, sequence_no,
+                         started_at, ended_at, duration_ms, input_preview,
+                         output_preview, attributes, error_type
+                       ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6,
+                         $7::timestamptz, $8::timestamptz, $9, $10, $11,
+                         $12::jsonb, $13)""",
+                    span["span_id"], run_id, span["span_kind"], span["name"],
+                    span["status"], span["sequence_no"],
+                    _coerce_timestamptz(span["started_at"]),
+                    _coerce_timestamptz(span["ended_at"]), span["duration_ms"],
+                    span["input_preview"], span["output_preview"],
+                    self._json_dumps(span["attributes"]), span["error_type"],
+                )
+                event = trace["events"][0]
+                await conn.execute(
+                    """INSERT INTO agent_trace_events (
+                         event_id, trace_id, event_type, sequence_no, occurred_at,
+                         payload, payload_size_bytes, redacted
+                       ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::timestamptz,
+                         $6::jsonb, 0, TRUE)""",
+                    event_id, run_id, event["event_type"], event["sequence_no"],
+                    _coerce_timestamptz(terminal["created_at"]),
+                    self._json_dumps(event["payload"]),
+                )
+            else:
+                existing = await conn.fetchrow(
+                    """SELECT trace_id FROM agent_traces
+                       WHERE trace_id = $1::uuid AND tenant_id = $2 AND user_id = $3
+                         AND session_id = $4 AND run_id = $5
+                         AND trace_family = 'assistant'
+                         AND workflow_kind = 'agent_runtime_turn'
+                         AND status = $6
+                       FOR UPDATE""",
+                    run_id, tenant_id, user_id, session_id, run_id,
+                    trace["status"],
+                )
+                if not existing:
+                    return False
+            payload = {
+                "trace_id": run_id, "trace_family": "assistant",
+                "status": trace["status"], "source_adapter": "gateway.agent_runtime",
+            }
+            await conn.fetchrow(
+                """INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+                   SELECT $1::varchar, 'trace.ingested'::varchar, $2::jsonb
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM agent_trace_outbox
+                       WHERE tenant_id = $1::varchar AND job_type = 'trace.ingested'
+                         AND payload->>'trace_id' = $3::text
+                   ) RETURNING job_id""",
+                tenant_id, self._json_dumps(payload), run_id,
+            )
+        return bool(inserted)
 
     async def resolve_eval_job_actor(self, *, tenant_id: str) -> dict[str, str]:
         claim = _OUTBOX_CLAIM.get()
@@ -2180,19 +2469,6 @@ class AgentTraceRepository(BaseRepository):
                 "succeeded", "failed", "cancelled",
             }:
                 raise ValueError("eval_retry_requires_terminal_live_run")
-            source_snapshot = source.get("target_snapshot") or {}
-            if source_snapshot.get("dataset_kb_linked") is not False:
-                raise ValueError("eval_retry_dataset_provenance_unverified")
-            dataset = await conn.fetchrow(
-                """SELECT metadata FROM eval_datasets
-                   WHERE tenant_id = $1 AND dataset_id = $2::uuid""",
-                tenant_id, source.get("dataset_id"),
-            )
-            if not dataset:
-                raise ValueError("eval_retry_dataset_unavailable")
-            dataset_metadata = self._decode_json(dataset.get("metadata"), default={})
-            if dataset_metadata.get("kb_dataset_id"):
-                raise ValueError("eval_retry_kb_source_requires_fresh_authorization")
             existing = await conn.fetchrow(
                 """SELECT run_id, status, target_snapshot FROM eval_experiment_runs
                    WHERE tenant_id = $1 AND target_snapshot->>'retry_of_run_id' = $2
@@ -2209,6 +2485,21 @@ class AgentTraceRepository(BaseRepository):
                     "run_id": str(existing["run_id"]),
                     "status": str(existing["status"]),
                 }
+            # A byte-for-byte idempotent replay only reads the already accepted
+            # receipt. New attempts must still recheck current source grants.
+            source_snapshot = source.get("target_snapshot") or {}
+            if source_snapshot.get("dataset_kb_linked") is not False:
+                raise ValueError("eval_retry_dataset_provenance_unverified")
+            dataset = await conn.fetchrow(
+                """SELECT metadata FROM eval_datasets
+                   WHERE tenant_id = $1 AND dataset_id = $2::uuid""",
+                tenant_id, source.get("dataset_id"),
+            )
+            if not dataset:
+                raise ValueError("eval_retry_dataset_unavailable")
+            dataset_metadata = self._decode_json(dataset.get("metadata"), default={})
+            if dataset_metadata.get("kb_dataset_id"):
+                raise ValueError("eval_retry_kb_source_requires_fresh_authorization")
             rows = await conn.fetch(
                 """SELECT * FROM eval_experiment_run_cases
                    WHERE tenant_id = $1 AND run_id = $2::uuid
@@ -3314,6 +3605,11 @@ class AgentTraceRepository(BaseRepository):
         ]
         if critical_flips:
             gate_failures.append("critical_case_regression")
+        if any(
+            case["critical"] and case["behavior_pass"] is False
+            for case in candidate_cases.values()
+        ):
+            gate_failures.append("candidate_critical_case_failed")
         quality_delta = deltas.get("quality_score")
         if quality_delta is not None and quality_delta < -0.02:
             gate_failures.append("quality_regression")

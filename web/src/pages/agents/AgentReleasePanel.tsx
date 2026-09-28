@@ -114,6 +114,15 @@ function releaseRunMismatch(
     && version.spec_hash === evaluation.spec_hash)) {
     return "The run's immutable Version does not match this evaluated draft revision.";
   }
+  const gate = run.metrics?.gate;
+  if (!gate || typeof gate !== "object" || Array.isArray(gate)) {
+    return "The run's quality gate is unavailable.";
+  }
+  const { profile, status, reason } = gate as Record<string, unknown>;
+  if (profile !== "agent_version_task_suite"
+    || (status !== "pass" && !(status === "warning" && reason === "fixed_sample_only"))) {
+    return "The run's quality gate does not permit linked publication.";
+  }
   return null;
 }
 

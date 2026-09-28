@@ -680,6 +680,21 @@ def create_app() -> FastAPI:
                 app.state.trace_retention_scheduler = trace_retention_scheduler
                 logger.info("Agent trace retention scheduler 已启动")
 
+            # Recover terminal Runtime turns whose in-process SSE trace writer
+            # was lost with an earlier Gateway process. This reads durable
+            # rows only and never starts or resumes a Runtime turn.
+            from .services.eval.assistant_trace_reconciler import run_assistant_trace_reconciler
+
+            app.state.assistant_trace_reconciler_task = asyncio.create_task(
+                run_assistant_trace_reconciler(
+                    container.database,
+                    retention_days=(
+                        trace_retention_scheduler.retention_days
+                        if trace_retention_scheduler is not None else 90
+                    ),
+                )
+            )
+
             # 启动使用量记录器后台任务
             from .services.metrics import get_usage_recorder
 
@@ -797,6 +812,11 @@ def create_app() -> FastAPI:
         trace_retention_scheduler = getattr(app.state, "trace_retention_scheduler", None)
         if trace_retention_scheduler is not None:
             await trace_retention_scheduler.stop()
+
+        assistant_trace_reconciler_task = getattr(app.state, "assistant_trace_reconciler_task", None)
+        if assistant_trace_reconciler_task is not None:
+            assistant_trace_reconciler_task.cancel()
+            await asyncio.gather(assistant_trace_reconciler_task, return_exceptions=True)
 
         # Stop usage scheduler
         usage_scheduler = getattr(app.state, "usage_scheduler", None)

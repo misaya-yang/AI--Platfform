@@ -8,10 +8,13 @@ from typing import Any
 
 import httpx
 import pytest
+from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
 from src.services.agent_runtime.control_plane import (
+    BASE_AGENT_INSTRUCTIONS_V1,
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
     AgentRuntimeControlPlane,
@@ -573,6 +576,77 @@ async def test_empty_developer_instructions_use_stable_generic_default() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entrypoint", "channel", "publication_id"),
+    [("studio_preview", "preview", None), ("published_agent", "api", "publication-a")],
+)
+async def test_version_first_turn_binds_signed_instructions_at_thread_creation(
+    entrypoint: str, channel: str, publication_id: str | None,
+) -> None:
+    runtime_thread_id = uuid.uuid4()
+    requests: list[tuple[str, dict[str, Any]]] = []
+
+    class FreshDatabase(_Database):
+        async def fetchrow(self, query: str, *args: Any):
+            if "FROM assistant_runtime_threads" in query:
+                return None
+            return await super().fetchrow(query, *args)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path.endswith("/threads") or request.url.path.endswith("/resume"):
+            return httpx.Response(200, request=request, json={"thread": {"id": str(runtime_thread_id)}})
+        if request.url.path.endswith("/turns"):
+            return httpx.Response(200, request=request, json={"turn": {
+                "id": body["runId"], "items": [], "itemsView": "notLoaded", "status": "inProgress",
+            }})
+        raise AssertionError(request.url.path)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentRuntimeControlPlane(
+        database=FreshDatabase(runtime_thread_id),
+        model_service=_ModelService(), provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test", runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+        kernel_revision="kernel-1", http_client=client,
+    )
+    try:
+        builtin = await resolve_agent_launch(
+            entrypoint="assistant", tenant_id="tenant-a", user_id="user-a",
+            session_id="session-a", model_id="qwen3.7-plus",
+            model_service=plane.model_service,
+        )
+        version = builtin.to_dict()
+        version["identity"].update(
+            agent_id="agent-a", agent_version_id="version-a",
+            publication_id=publication_id, channel=channel, entrypoint=entrypoint,
+            auth_mode="private" if channel == "preview" else "token",
+        )
+        version["agent_spec"].update(
+            agentId="agent-a", agentVersionId="version-a", channel=channel,
+            developerInstructions="Version one instructions: R3_OLD",
+        )
+        version["fingerprints"]["spec"] = runtime_sha256(version["agent_spec"])
+        snapshot = ResolvedAgentLaunchV1.parse(version).to_control_snapshot()
+        await plane.start_turn(
+            tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+            message="hello", model_id="qwen3.7-plus", reasoning_option="auto",
+            legacy_thinking_level=None, max_tokens=64,
+            resolved_agent_snapshot=snapshot, enable_dynamic_tools=False,
+        )
+    finally:
+        await client.aclose()
+
+    first = next(body for path, body in requests if path.endswith("/threads"))
+    assert first["start"]["developerInstructions"] == "Version one instructions: R3_OLD"
+    assert first["start"]["baseInstructions"] == BASE_AGENT_INSTRUCTIONS_V1
+    assert len([path for path, _ in requests if path.endswith("/turns")]) == 1
+
+
+@pytest.mark.asyncio
 async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() -> None:
     runtime_thread_id = uuid.uuid4()
     database = _Database(runtime_thread_id)
@@ -711,7 +785,16 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
 
 
 @pytest.mark.asyncio
-async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinned() -> None:
+@pytest.mark.parametrize(
+    ("developer_instructions", "expected_instructions"),
+    [
+        ("Version one instructions: R3_OLD", "Version one instructions: R3_OLD"),
+        ("", GENERIC_AGENT_INSTRUCTIONS_V1),
+    ],
+)
+async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinned(
+    developer_instructions: str, expected_instructions: str,
+) -> None:
     runtime_thread_id = uuid.uuid4()
     requests: list[tuple[str, dict[str, Any]]] = []
 
@@ -807,12 +890,15 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
             session_id="session-a",
             model_id="qwen3.7-plus",
             readonly_capabilities=readonly,
+            developer_instructions=developer_instructions,
         )
     finally:
         await client.aclose()
 
     thread_request = next(body for path, body in requests if path.endswith("/threads"))
     assert thread_request["start"]["approvalPolicy"] == "on-request"
+    assert thread_request["start"]["baseInstructions"] == BASE_AGENT_INSTRUCTIONS_V1
+    assert thread_request["start"]["developerInstructions"] == expected_instructions
     assert thread_request["start"]["dynamicTools"][0]["name"] == "search_knowledge_base"
     assert len(thread_request["start"]["dynamicTools"]) == 1
     assert all(tool["name"] != "tool_search" for tool in thread_request["start"]["dynamicTools"])

@@ -267,6 +267,7 @@ class AgentRuntimeControlPlane:
         readonly_capabilities: dict[str, Any] | None = None,
         capability_allowlist: list[dict[str, Any]] | None = None,
         native_web_search_enabled: bool = False,
+        developer_instructions: str | None = None,
     ) -> dict[str, Any]:
         return await thread_lifecycle.ensure_thread(
             self,
@@ -277,6 +278,7 @@ class AgentRuntimeControlPlane:
             readonly_capabilities=readonly_capabilities,
             capability_allowlist=capability_allowlist,
             native_web_search_enabled=native_web_search_enabled,
+            developer_instructions=developer_instructions,
         )
 
     @staticmethod

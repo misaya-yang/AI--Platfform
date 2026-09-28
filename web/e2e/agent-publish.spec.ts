@@ -742,6 +742,7 @@ test.describe("Agent publish and rollback", () => {
     state.versions.push({ ...version(VERSION_THREE_ID, 3, 8, null), spec_hash: selectedEvaluation.spec_hash });
     const matchingRunId = "81818181-8181-4181-8181-818181818181";
     const wrongDatasetRunId = "82828282-8282-4282-8282-828282828282";
+    const failedGateRunId = "84848484-8484-4484-8484-848484848484";
     await page.route("**/api/v1/eval/experiment-runs/*", async (route) => {
       const runId = new URL(route.request().url()).pathname.split("/").at(-1);
       return route.fulfill(response({
@@ -760,7 +761,13 @@ test.describe("Agent publish and rollback", () => {
           model_id: spec.model.model_id,
           knowledge_dataset_ids: [],
         },
-        score_summary: {}, metrics: {}, created_by: "owner-user", created_at: NOW,
+        score_summary: {},
+        metrics: {
+          gate: runId === failedGateRunId
+            ? { profile: "agent_version_task_suite", status: "fail", reason: "known_hard_failure" }
+            : { profile: "agent_version_task_suite", status: "warning", reason: "fixed_sample_only" },
+        },
+        created_by: "owner-user", created_at: NOW,
       }));
     });
     await page.goto(`/agents/${AGENT_ID}/evals`, { waitUntil: "domcontentloaded" });
@@ -772,6 +779,12 @@ test.describe("Agent publish and rollback", () => {
     await runInput.fill(wrongDatasetRunId);
     await sheet.getByRole("button", { name: "Verify run" }).click();
     await expect(sheet.getByText("The run's test set does not match this release evaluation.")).toBeVisible();
+    await expect(publishButton).toBeDisabled();
+    expect(state.publishCalls).toBe(0);
+
+    await runInput.fill(failedGateRunId);
+    await sheet.getByRole("button", { name: "Verify run" }).click();
+    await expect(sheet.getByText("The run's quality gate does not permit linked publication.")).toBeVisible();
     await expect(publishButton).toBeDisabled();
     expect(state.publishCalls).toBe(0);
 

@@ -36,6 +36,7 @@ def _fixed_snapshot(agent_id: str, version_id: str) -> dict:
         "agent_version_id": version_id,
         "publication": {"id": None, "channel": "preview", "auth_mode": "private"},
         "model": {"id": "agent-model", "provider": "provider-a", "parameters": {}},
+        "agent_spec": {"developerInstructions": "Version one instructions: R3_OLD"},
         "knowledge": {"datasets": [], "retrieval": {"mode": "off"}},
         "capabilities": [],
         "memory": {"mode": "session"},
@@ -237,6 +238,7 @@ async def test_fixed_version_thread_and_turn_ignore_later_draft_and_recheck_acl(
         async def ensure_thread(self, **kwargs):
             assert kwargs["model_id"] == "agent-model"
             assert kwargs["capability_allowlist"] == []
+            assert kwargs["developer_instructions"] == "Version one instructions: R3_OLD"
             return {"runtime_thread_id": runtime_thread_id}
 
         async def start_turn(self, **kwargs):

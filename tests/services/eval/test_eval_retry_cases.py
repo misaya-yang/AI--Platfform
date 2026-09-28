@@ -198,6 +198,23 @@ async def test_retry_fails_closed_when_kb_dataset_link_or_provenance_is_uncertai
 
 
 @pytest.mark.asyncio
+async def test_retry_idempotent_replay_survives_later_dataset_revocation() -> None:
+    conn = _Connection()
+    repo = AgentTraceRepository(SimpleNamespace(_pool=SimpleNamespace(acquire=lambda: conn), enabled=True))
+    request = {
+        "tenant_id": "tenant-a", "run_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "case_ids": ["failed"], "created_by": "operator", "idempotency_key": "request-123",
+    }
+    accepted = await repo.retry_failed_experiment_cases(**request)
+    conn.dataset_metadata = {"kb_dataset_id": "revoked-after-acceptance"}
+
+    replay = await repo.retry_failed_experiment_cases(**request)
+
+    assert replay == accepted
+    assert conn.run_insert_count == 1
+
+
+@pytest.mark.asyncio
 async def test_llm_judge_snapshot_freezes_server_model_ref() -> None:
     repo = AgentTraceRepository(SimpleNamespace(_pool=None, enabled=False))
 

@@ -175,6 +175,25 @@ def test_case_metric_aggregate_stays_unknown_when_any_trial_is_missing() -> None
     assert metrics["cost_cents"] is None
 
 
+def test_judge_failure_keeps_candidate_execution_success_separate_from_quality() -> None:
+    row = _cases()[0]
+    row["status"] = "failed"
+    row["observed_metrics"] = {
+        **row["observed_metrics"],
+        "execution_succeeded": True,
+        "execution_outcome": "judge_failed",
+        "behavior_pass": None,
+        "aggregate_score": None,
+        "error": "eval_judge_infrastructure_failure",
+    }
+
+    case = _aggregate_live_case_rows([row])["case-00"]
+
+    assert case["execution_status"] == "succeeded"
+    assert case["status"] == "unscored"
+    assert case["behavior_pass"] is None
+
+
 @pytest.mark.asyncio
 async def test_compare_blocks_critical_quality_and_execution_regressions() -> None:
     baseline = _run("baseline")
@@ -262,6 +281,45 @@ async def test_compare_identifies_two_verified_fixed_agent_versions() -> None:
     assert comparison["statistics"]["paired_case_count"] == 12
     assert comparison["gate"]["status"] == "warning"
     assert "fixed_sample_only" in comparison["gate"]["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_compare_blocks_shared_critical_failure_in_fixed_agent_versions() -> None:
+    baseline = _run("baseline")
+    candidate = _run("candidate")
+    for run, version in ((baseline, "version-a"), (candidate, "version-b")):
+        identity = {
+            "agent_id": "agent-a", "agent_version_id": version,
+            "agent_spec_hash": f"spec-{version}",
+            "agent_runtime_snapshot_hash": f"sha256:{version}",
+        }
+        run["target_snapshot"] = {"candidate_type": "agent_version", **identity}
+        run["metrics"]["actual_fingerprint"].update(identity)
+        run["metrics"]["gate"] = {
+            "profile": "agent_version_task_suite", "status": "fail", "reason": "known_hard_failure",
+        }
+        run["score_summary"].update({
+            "score_sum": 9.9,
+            "overall_score": 0.825,
+            "failed_case_count": 1,
+            "pass_rate": 11 / 12,
+            "critical_failed_count": 1,
+            "critical_pass_rate": 0.0,
+            "behavior_pass_rate": 11 / 12,
+        })
+    repository = _ComparisonRepository(
+        baseline, candidate, _cases(failed_case="case-00"), _cases(failed_case="case-00"),
+    )
+
+    comparison = await repository.compare_experiment_runs(
+        tenant_id="tenant-a", baseline_run_id="baseline", candidate_run_id="candidate",
+    )
+
+    assert comparison is not None
+    assert comparison["compatibility"]["compatible"] is True
+    assert comparison["case_diffs"][0]["status"] == "same_failure"
+    assert comparison["gate"]["status"] == "fail"
+    assert "candidate_critical_case_failed" in comparison["gate"]["failures"]
 
 
 @pytest.mark.asyncio

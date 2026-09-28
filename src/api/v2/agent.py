@@ -534,7 +534,10 @@ async def create_thread(
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         thread_options = (
-            {"capability_allowlist": snapshot_capability_allowlist(target_snapshot)}
+            {
+                "capability_allowlist": snapshot_capability_allowlist(target_snapshot),
+                "developer_instructions": target_snapshot["agent_spec"]["developerInstructions"],
+            }
             if target_snapshot is not None
             else {}
         )
