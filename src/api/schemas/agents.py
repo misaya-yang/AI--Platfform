@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -154,6 +154,7 @@ class AgentChannelPolicy(BaseModel):
     attachments: bool = False
     high_risk_tools: bool = False
     allowed_origins: list[str] = Field(default_factory=list, max_length=64)
+    expires_at: datetime | None = None
     requests_per_minute: int = Field(default=30, ge=1, le=10_000)
     requests_per_day: int = Field(default=1000, ge=1, le=10_000_000)
     ip_requests_per_minute: int = Field(default=60, ge=1, le=10_000)
@@ -183,6 +184,13 @@ class AgentChannelPolicy(BaseModel):
             normalized.append(origin)
         return sorted(set(normalized))
 
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_is_timezone_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expires_at must include a timezone")
+        return value
+
 
 class AgentReleaseEvaluationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -197,6 +205,13 @@ class AgentReleaseEvaluationRequest(BaseModel):
     def _public_channel_is_conservative(self) -> AgentReleaseEvaluationRequest:
         if self.auth_mode == "public" and self.channel_policy.high_risk_tools:
             raise ValueError("public channels cannot enable high-risk tools")
+        if self.auth_mode == "public" and (
+            self.channel_policy.expires_at is None
+            or self.channel_policy.expires_at <= datetime.now(timezone.utc)
+        ):
+            raise ValueError("public channels require a future expires_at")
+        if self.auth_mode != "public" and self.channel_policy.expires_at is not None:
+            raise ValueError("expires_at is only supported for public channels")
         return self
 
 
@@ -388,6 +403,7 @@ class AgentPublicationResponse(BaseModel):
     version_spec_hash: str | None = None
     auth_mode: AgentAuthMode
     policy: dict[str, Any] = Field(default_factory=dict)
+    expires_at: datetime | str | None = None
     status: Literal["draft", "active", "disabled", "degraded"]
     created_by: str
     updated_by: str

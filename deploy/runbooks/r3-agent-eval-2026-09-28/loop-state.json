@@ -1,0 +1,39 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "domain_id": "r3-agent-eval",
+  "lifecycle": "active",
+  "status": "in_progress",
+  "goal": "完成 AG-01～09、EV-01～08 与 J14～J18 的 Agent 草稿、预览、评测、发布、使用、回滚、反馈闭环。",
+  "owner": "root integration session",
+  "base_sha": "8b3a877a",
+  "branch": "codex/r3-agent-eval-20260928",
+  "integrated_main_sha": "8b3a877a",
+  "active_phase": "R3-acceptance",
+  "active_feature": "J14～J18 real A/B, permissions, failure and browser acceptance",
+  "active_package": "R3-CANDIDATE_80-safe-increment",
+  "next_action": "After locally merging the reviewed safe increment, finish J14～J18 real five-case synthetic KB A/B, two-role audience, controlled provider/judge failure, and authenticated Codex IAB acceptance. Do not mark full R3 complete from automated or other-browser evidence.",
+  "last_result": "2026-09-28 A/B/C code integrated; independent static review found no remaining merge blocker; Agent Studio 40/40 source-stable gate, Eval/KB/OpenAPI/architecture/migration gates passed; epoch 7 applied and Docker source hash parity/health confirmed; real Docker Agent Studio and internal publish live E2E 2 passed, 1 feature-flag skip. Authenticated Codex IAB and J16～J18 full live matrix remain pending. See reports/product/r3-agent-eval-progress-2026-09-28.md.",
+  "updated_at": "2026-09-28",
+  "blockers": [
+    "Codex in-app browser is reachable but its authenticated session expired",
+    "Only one verified existing E2E account is available for real two-tenant/two-role validation",
+    "No public or tenant-visible local Dataset is configured for the full anonymous audience matrix"
+  ],
+  "cycle": ["observe", "act", "verify", "review", "integrate", "decide"],
+  "iteration": 2,
+  "max_iterations": 20,
+  "phases": [
+    {"id": "R3-A", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
+    {"id": "R3-B", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
+    {"id": "R3-C", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
+    {"id": "R3-integration", "file": "README.md", "depends_on": ["R3-A", "R3-B", "R3-C"], "status": "in_progress", "evidence": ["reports/agent-studio/agent-studio-regression-v1-result.json", "reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static-live-partial"}
+  ],
+  "pending_acceptance": ["J14", "J15", "J16", "J17", "J18"],
+  "execution_authorization": {
+    "scope": "R3 AG-01～09 and EV-01～08 only; preserve R1/R2 completed increments",
+    "parallel_agents": "User-authorized three disjoint code streams; root owns integration and shared live runtime",
+    "commit_authorized": true,
+    "local_merge_authorized": true,
+    "push_authorized": false
+  }
+}

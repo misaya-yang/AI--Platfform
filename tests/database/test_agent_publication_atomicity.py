@@ -22,6 +22,9 @@ from ai_gateway_core.persistence.repositories.agent_repository import (
     DatabaseAgentRepository,
 )
 
+from database.authority.commands import default_paths
+from database.authority.manifest import load_epoch_manifest
+from database.authority.runner import MigrationAuthority
 from tests.database.test_agent_studio_migrations import _postgres_config
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,21 +41,40 @@ class _Holder:
     enabled: bool = True
 
 
+class _IsolatedAuthorityConnection:
+    """Run authority DDL as the isolated fixture table owner."""
+
+    def __init__(self, conn: asyncpg.Connection, owner_role: str) -> None:
+        self._conn = conn
+        self._owner_role = owner_role
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    async def execute(self, query: str, *args: Any) -> str:
+        if query.startswith("SET LOCAL ROLE "):
+            query = f"SET LOCAL ROLE {self._owner_role}"
+        return await self._conn.execute(query, *args)
+
+
 @pytest_asyncio.fixture
 async def release_pool() -> AsyncIterator[asyncpg.Pool]:
     config = _postgres_config()
-    schema_name = f"agent_release_test_{uuid.uuid4().hex}"
+    database_name = f"agent_release_test_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(**config)
-    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
-    await admin.close()
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+    finally:
+        await admin.close()
     pool = await asyncpg.create_pool(
-        **config,
+        **{**config, "database": database_name},
         min_size=1,
         max_size=2,
-        server_settings={"search_path": f'"{schema_name}",public'},
+        server_settings={"search_path": "gateway,public"},
     )
     try:
         async with pool.acquire() as conn:
+            await conn.execute("CREATE SCHEMA gateway")
             await conn.execute(
                 """
                 CREATE TABLE datasets (
@@ -152,12 +174,26 @@ async def release_pool() -> AsyncIterator[asyncpg.Pool]:
             lifecycle_sql = LIFECYCLE_MIGRATION.read_text(encoding="utf-8")
             await conn.execute(lifecycle_sql)
             await conn.execute(lifecycle_sql)
+            paths = default_paths()
+            epoch_dir = paths.epoch_dir("2026_08_post_kb_v1")
+            manifest = load_epoch_manifest(epoch_dir / "manifest.yml")
+            owner_role = await conn.fetchval("SELECT quote_ident(current_user)")
+            authority = MigrationAuthority("isolated-test", paths, role_prefix="test_")
+            await authority.ensure_ledger(conn)
+            await authority.apply_change_transactional(
+                _IsolatedAuthorityConnection(conn, owner_role),
+                manifest.baseline_id,
+                manifest.by_sequence()[7],
+                epoch_dir,
+            )
         yield pool
     finally:
         await pool.close()
         admin = await asyncpg.connect(**config)
-        await admin.execute(f'DROP SCHEMA "{schema_name}" CASCADE')
-        await admin.close()
+        try:
+            await admin.execute(f'DROP DATABASE "{database_name}"')
+        finally:
+            await admin.close()
 
 
 def _repository(pool: asyncpg.Pool) -> DatabaseAgentRepository:

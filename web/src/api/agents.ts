@@ -199,6 +199,7 @@ export async function runAgentReleaseEvaluation(
       attachments: boolean;
       high_risk_tools: boolean;
       allowed_origins: string[];
+      expires_at?: string | null;
     };
   },
 ): Promise<AgentReleaseEvaluation> {

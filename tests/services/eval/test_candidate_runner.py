@@ -304,6 +304,64 @@ async def test_live_executor_runs_each_trial_once_and_reuses_trace_for_evaluator
 
 
 @pytest.mark.asyncio
+async def test_live_execution_failure_does_not_become_zero_quality_or_replay() -> None:
+    repository = _LiveRepository([_run_case("critical", 1), _run_case("normal", 1)])
+    calls: list[str] = []
+
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        case = kwargs["run_case"]
+        calls.append(case["case_id"])
+        if case["case_id"] == "normal":
+            raise RuntimeError("provider unavailable")
+        return _candidate_result(case)
+
+    executor = EvaluatorExecutor(repository, candidate_run=run_candidate)  # type: ignore[arg-type]
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+
+    assert result.status == "failed"
+    assert result.score_summary["case_count"] == 1
+    assert result.score_summary["excluded_case_count"] == 1
+    assert result.score_summary["overall_score"] == 1.0
+    assert result.metrics["gate"]["status"] == "unavailable"
+    assert repository.cases[1]["observed_metrics"]["behavior_pass"] is None
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+    assert calls == ["critical", "normal"]
+
+
+@pytest.mark.asyncio
+async def test_live_judge_failure_keeps_execution_separate_from_quality() -> None:
+    repository = _LiveRepository([_run_case("critical", 1)])
+
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        return _candidate_result(kwargs["run_case"])
+
+    executor = EvaluatorExecutor(repository, candidate_run=run_candidate)  # type: ignore[arg-type]
+
+    async def fail_judge(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("judge unavailable")
+
+    executor._score_target_payloads = fail_judge  # type: ignore[method-assign]
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+
+    assert result.status == "failed"
+    assert result.score_summary["case_count"] == 0
+    assert result.score_summary["overall_score"] is None
+    assert result.metrics["completed_trials"] == 1
+    assert result.metrics["unscored_trials"] == 1
+    assert repository.cases[0]["observed_metrics"]["execution_outcome"] == "judge_failed"
+
+
+@pytest.mark.asyncio
 async def test_live_gate_requires_critical_and_mandatory_safety_cases() -> None:
     async def run_candidate(**kwargs: Any) -> dict[str, Any]:
         return _candidate_result(kwargs["run_case"])

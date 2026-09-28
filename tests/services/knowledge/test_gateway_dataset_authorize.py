@@ -27,7 +27,7 @@ from knowledge_service.api.routes.knowledge import (
     DatasetAuthorizeRequest,
     authorize_gateway_datasets,
 )
-from knowledge_service.auth.user_context import UserContext
+from knowledge_service.auth.user_context import UserContext, get_user_context
 from knowledge_service.core.exceptions import PermissionDeniedError
 from knowledge_service.services.knowledge.dataset_service import DatasetService
 
@@ -180,6 +180,25 @@ async def test_authorize_datasets_tenant_visibility_needs_same_tenant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anonymous_tenant_identity_can_only_read_public_dataset() -> None:
+    database = AuthorizeDatabase(_datasets())
+    database.permissions[("ds-granted", "user", "agent-embed:opaque")] = "viewer"
+    service = _service(database)
+    anonymous = UserContext(
+        user_id="agent-embed:opaque",
+        tenant_id="tenant-a",
+        user_tier="anonymous",
+        user_type="anonymous",
+        roles=["guest", "admin"],
+    )
+
+    assert not anonymous.is_authenticated
+    assert await service.authorize_datasets(
+        anonymous, ["ds-owned", "ds-tenant", "ds-granted", "ds-public"]
+    ) == ["ds-public"]
+
+
+@pytest.mark.asyncio
 async def test_authorize_datasets_dedupes_and_keeps_order() -> None:
     database = AuthorizeDatabase(_datasets())
     service = _service(database)
@@ -201,6 +220,7 @@ def _signed_headers(**overrides: str) -> dict[str, str]:
         "X-User-Id": "user-a",
         "X-Tenant-Id": "tenant-a",
         "X-User-Tier": "normal",
+        "X-User-Type": "user",
         "X-User-Roles": "user",
     }
     headers.update(overrides)
@@ -220,6 +240,35 @@ async def test_authorize_route_requires_signature_bound_identity() -> None:
 
     assert excinfo.value.status_code == 401
     assert excinfo.value.detail["code"] == "AUTH_DENIED"
+
+    with pytest.raises(HTTPException) as missing_type:
+        await authorize_gateway_datasets(
+            FakeRequest(_signed_headers(**{"X-User-Type": ""})), body=body, svc=svc
+        )
+    assert missing_type.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_authorize_route_and_context_keep_signed_anonymous_identity() -> None:
+    database = AuthorizeDatabase(_datasets())
+    svc = SimpleNamespace(dataset_service=_service(database))
+    headers = _signed_headers(
+        **{
+            "X-User-Id": "agent-embed:opaque",
+            "X-User-Tier": "anonymous",
+            "X-User-Type": "anonymous",
+            "X-User-Roles": "guest",
+        }
+    )
+    request = FakeRequest(headers)
+    user = await get_user_context(request)
+    assert not user.is_authenticated
+    response = await authorize_gateway_datasets(
+        request,
+        body=DatasetAuthorizeRequest(dataset_ids=["ds-tenant", "ds-public"]),
+        svc=svc,
+    )
+    assert response.allowed_dataset_ids == ["ds-public"]
 
 
 @pytest.mark.asyncio

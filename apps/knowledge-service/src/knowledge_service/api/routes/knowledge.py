@@ -5159,7 +5159,8 @@ async def authorize_gateway_datasets(
 
     user_id = request.headers.get("X-User-Id", "").strip()
     tenant_id = request.headers.get("X-Tenant-Id", "").strip()
-    if not user_id or not tenant_id:
+    user_type = request.headers.get("X-User-Type", "").strip()
+    if not user_id or not tenant_id or not user_type:
         raise HTTPException(
             status_code=401,
             detail={
@@ -5175,8 +5176,9 @@ async def authorize_gateway_datasets(
         user_id=user_id,
         tenant_id=tenant_id,
         user_tier=request.headers.get("X-User-Tier", "normal").strip(),
-        user_type=request.headers.get("X-User-Type", "user").strip(),
+        user_type=user_type,
         roles=roles,
+        is_authenticated=user_type.lower() not in {"anonymous", "guest"},
     )
     try:
         allowed = await svc.dataset_service.authorize_datasets(

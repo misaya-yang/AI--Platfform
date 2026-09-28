@@ -794,6 +794,29 @@ export async function getEvalExperimentRun(runId: string): Promise<EvalExperimen
   return response.data;
 }
 
+export async function cancelEvalExperimentRun(runId: string): Promise<{
+  run_id: string;
+  status: EvalExperimentRun["status"];
+  runtime_interrupt_pending: number;
+}> {
+  const response = await api.post(`/api/v1/eval/experiment-runs/${encodeURIComponent(runId)}:cancel`);
+  return response.data;
+}
+
+export async function retryFailedEvalExperimentCases(
+  runId: string,
+  caseIds: string[],
+  acknowledgeReplay: boolean,
+  idempotencyKey: string,
+): Promise<EvalExperimentRunBatchResponse> {
+  const response = await api.post<EvalExperimentRunBatchResponse>(
+    `/api/v1/eval/experiment-runs/${encodeURIComponent(runId)}:retry-failed`,
+    { case_ids: caseIds, acknowledge_replay: acknowledgeReplay },
+    { headers: { "Idempotency-Key": idempotencyKey } },
+  );
+  return response.data;
+}
+
 export async function getEvalExperimentRunResults(
   runId: string,
   params: { limit?: number; offset?: number } = {}

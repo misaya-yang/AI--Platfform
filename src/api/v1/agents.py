@@ -33,6 +33,7 @@ from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentRuntimeUnavailableError,
     AgentValidationError,
     DatabaseAgentRepository,
+    require_public_release_expiry,
 )
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
@@ -229,6 +230,43 @@ def _model_access_levels(user: UserContext) -> set[str]:
     return {"public"}
 
 
+def _release_audience_user(
+    user: UserContext, *, agent_id: str, channel: str, auth_mode: str
+) -> UserContext:
+    """Check broad releases with a representative least-privileged reader."""
+
+    if channel == "api":
+        return UserContext(
+            user_id=f"agent-token:release-check:{agent_id}",
+            tenant_id=user.tenant_id,
+            tier="service",
+            is_authenticated=True,
+            roles=["agent_runtime"],
+            user_type="service",
+        )
+    if channel not in {"hosted", "embed"}:
+        return user
+    if auth_mode == "tenant":
+        return UserContext(
+            user_id=f"agent-release-tenant:{agent_id}",
+            tenant_id=user.tenant_id,
+            tier="normal",
+            is_authenticated=True,
+            roles=["user"],
+        )
+    if auth_mode not in {"public", "token"}:
+        return user
+    return UserContext(
+        user_id=f"agent-release-public:{agent_id}",
+        tenant_id=user.tenant_id,
+        tier="anonymous",
+        is_authenticated=False,
+        roles=["guest"],
+        ip="",
+        user_type="anonymous",
+    )
+
+
 def _get_repository(request: Request) -> Any:
     repository = getattr(request.app.state, "agent_repository", None)
     if repository is not None:
@@ -330,11 +368,14 @@ async def _resolve_release_model_authorization(
             or str(result.get("provider") or "") != provider_id
         ):
             raise AgentReleaseCandidateError("AGENT_RUNTIME_MODEL_AUTHORIZATION_STALE")
+        access_level = str(result.get("access_level") or "public")
+        if access_level not in _model_access_levels(user):
+            raise AgentReleaseCandidateError("AGENT_RUNTIME_MODEL_FORBIDDEN")
         return build_model_authorization_evidence(
             source="agent_runtime_resolver",
             model_id=model_id,
             provider_id=provider_id,
-            access_level=str(result.get("access_level") or "public"),
+            access_level=access_level,
             model_enabled=True,
             provider_enabled=True,
             runtime_provider_configured=True,
@@ -410,6 +451,7 @@ async def _resolve_release_candidate(
 ) -> dict[str, Any]:
     """Resolve trusted release state from the saved Draft and runtime adapters."""
 
+    require_public_release_expiry(auth_mode, channel_policy)
     resolution = await repository.resolve_preview_runtime(
         tenant_id=user.tenant_id,
         agent_id=agent_id,
@@ -428,16 +470,19 @@ async def _resolve_release_candidate(
     }
     from .agent_runtime import _build_snapshot
 
+    audience_user = _release_audience_user(
+        user, agent_id=agent_id, channel=channel, auth_mode=auth_mode
+    )
     snapshot = await _build_snapshot(
         request,
         release_resolution,
-        user,
+        audience_user,
         channel=channel,
     )
     snapshot_model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
     model_authorization = await _resolve_release_model_authorization(
         request=request,
-        user=user,
+        user=audience_user,
         resolution=resolution,
         model_id=str(snapshot_model.get("id") or ""),
         provider_id=str(snapshot_model.get("provider") or ""),
@@ -463,7 +508,7 @@ async def _resolve_release_candidate(
     )
     candidate["_model_authorization_revalidator"] = _model_revalidator(
         request=request,
-        user=user,
+        user=audience_user,
         resolution=resolution,
         model_id=str(snapshot_model.get("id") or ""),
         provider_id=str(snapshot_model.get("provider") or ""),
@@ -1297,7 +1342,7 @@ async def run_agent_release_evaluation(
             draft_revision=payload.draft_revision,
             channel=payload.channel,
             auth_mode=payload.auth_mode,
-            channel_policy=payload.channel_policy.model_dump(mode="python"),
+            channel_policy=payload.channel_policy.model_dump(mode="json"),
             dataset_id=str(payload.dataset_id) if payload.dataset_id else None,
         )
         result = await repository.create_release_evaluation(
@@ -1976,19 +2021,42 @@ async def rollback_agent_publication(
 
         from .agent_runtime import _build_snapshot
 
+        audience_user = _release_audience_user(
+            user,
+            agent_id=str(publication["agent_id"]),
+            channel=str(publication["channel"]),
+            auth_mode=str(publication["auth_mode"]),
+        )
         snapshot = await _build_snapshot(
             request,
             resolution,
-            user,
+            audience_user,
             channel=str(publication["channel"]),
         )
         snapshot_model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
         model_authorization = await _resolve_release_model_authorization(
             request=request,
-            user=user,
+            user=audience_user,
             resolution=resolution,
             model_id=str(snapshot_model.get("id") or ""),
             provider_id=str(snapshot_model.get("provider") or ""),
+        )
+        version = resolution["version"]
+        build_agent_version_candidate(
+            resolution={
+                **resolution,
+                "draft": {
+                    "draft_id": version["source_draft_id"],
+                    "revision": version["source_draft_revision"],
+                    "spec_hash": version["spec_hash"],
+                },
+            },
+            runtime_snapshot=snapshot,
+            channel=str(publication["channel"]),
+            auth_mode=str(publication["auth_mode"]),
+            channel_policy=dict(publication.get("policy") or {}),
+            dataset_id=None,
+            model_authorization=model_authorization,
         )
         runtime_snapshot_hash = runtime_sha256(snapshot).removeprefix("sha256:")
         runtime_spec_hash = str(snapshot["fingerprints"]["spec"]).removeprefix("sha256:")
@@ -2006,7 +2074,7 @@ async def rollback_agent_publication(
             actor_model_access_levels=_model_access_levels(user),
             model_authorization_revalidator=_model_revalidator(
                 request=request,
-                user=user,
+                user=audience_user,
                 resolution=resolution,
                 model_id=str(snapshot_model.get("id") or ""),
                 provider_id=str(snapshot_model.get("provider") or ""),

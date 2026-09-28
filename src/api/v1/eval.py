@@ -10,7 +10,7 @@ from ai_gateway_core.eval.evaluator_executor import (
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
@@ -42,6 +42,7 @@ from ..schemas.eval import (
     EvalExperiment,
     EvalExperimentCreate,
     EvalExperimentListResponse,
+    EvalExperimentRetryRequest,
     EvalExperimentRun,
     EvalExperimentRunBatchResponse,
     EvalExperimentRunComparisonResponse,
@@ -604,6 +605,55 @@ async def cancel_eval_experiment_run(
     return {**result, "runtime_interrupt_pending": pending}
 
 
+@router.post(
+    "/experiment-runs/{run_id}:retry-failed",
+    response_model=EvalExperimentRunBatchResponse,
+    status_code=202,
+)
+async def retry_failed_eval_experiment_cases(
+    run_id: str,
+    body: EvalExperimentRetryRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> EvalExperimentRunBatchResponse:
+    _require_eval_run_access(request, auth)
+    if not auth.user_id:
+        raise HTTPException(status_code=403, detail="Authenticated user is required for retry")
+    if (
+        not isinstance(idempotency_key, str)
+        or not 8 <= len(idempotency_key) <= 128
+        or idempotency_key != idempotency_key.strip()
+    ):
+        raise HTTPException(status_code=422, detail="Idempotency-Key header is required")
+    if body.acknowledge_replay is not True:
+        raise HTTPException(
+            status_code=422,
+            detail="Confirm that retry runs a new model attempt and may repeat tool effects and costs",
+        )
+    try:
+        job = await _get_trace_repository(request).retry_failed_experiment_cases(
+            tenant_id=auth.tenant_id,
+            run_id=run_id,
+            case_ids=body.case_ids,
+            created_by=auth.user_id,
+            idempotency_key=idempotency_key,
+        )
+    except ValueError as exc:
+        status_code = 409 if any(
+            marker in str(exc)
+            for marker in (
+                "side_effect_unconfirmed", "idempotency_conflict",
+                "kb_source_requires_fresh_authorization", "dataset_provenance_unverified",
+                "dataset_unavailable",
+            )
+        ) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    return EvalExperimentRunBatchResponse(jobs=[EvalAsyncJobResponse(**job)])
+
+
 @router.get("/experiment-runs:compare", response_model=EvalExperimentRunComparisonResponse)
 async def compare_eval_experiment_runs(
     request: Request,
@@ -644,6 +694,9 @@ async def run_eval_experiment(
     if body.run_mode == "live_candidate":
         if not dataset_id:
             raise HTTPException(status_code=422, detail="live_candidate requires a dataset")
+        dataset = await repo.get_dataset(tenant_id=auth.tenant_id, dataset_id=str(dataset_id))
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
         manifest = await repo.list_example_manifest(
             tenant_id=auth.tenant_id,
             dataset_id=str(dataset_id),
@@ -716,6 +769,11 @@ async def run_eval_experiment(
         }
         public_target.update(
             {
+                "dataset_id": str(dataset_id),
+                "dataset_name": dataset.get("name"),
+                "dataset_version": dataset.get("version"),
+                "dataset_kb_linked": bool((dataset.get("metadata") or {}).get("kb_dataset_id")),
+                "approved_case_count": len(examples),
                 "candidate_label": body.candidate_label,
                 "baseline_label": body.baseline_label,
                 "prompt_override_hash": prompt_override_hash,
@@ -748,23 +806,26 @@ async def run_eval_experiment(
 
     jobs = []
     for evaluator_id in body.evaluator_ids:
-        job = await repo.enqueue_evaluator_run(
-            tenant_id=auth.tenant_id,
-            evaluator_id=evaluator_id,
-            created_by=auth.user_id,
-            payload={
-                "experiment_id": experiment_id,
-                "dataset_id": dataset_id,
-                "trace_id": trace_id,
-                "target_snapshot": {
-                    **body.target_snapshot,
-                    "run_mode": "rescore_trace",
-                    "candidate_label": body.candidate_label,
-                    "baseline_label": body.baseline_label,
+        try:
+            job = await repo.enqueue_evaluator_run(
+                tenant_id=auth.tenant_id,
+                evaluator_id=evaluator_id,
+                created_by=auth.user_id,
+                payload={
+                    "experiment_id": experiment_id,
+                    "dataset_id": dataset_id,
+                    "trace_id": trace_id,
+                    "target_snapshot": {
+                        **body.target_snapshot,
+                        "run_mode": "rescore_trace",
+                        "candidate_label": body.candidate_label,
+                        "baseline_label": body.baseline_label,
+                    },
+                    "metadata": body.metadata,
                 },
-                "metadata": body.metadata,
-            },
-        )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         jobs.append(EvalAsyncJobResponse(**job))
     return EvalExperimentRunBatchResponse(jobs=jobs)
 
@@ -945,12 +1006,15 @@ async def run_eval_evaluator_async(
     auth: AuthContext = Depends(get_auth_context),
 ) -> EvalAsyncJobResponse:
     _require_eval_run_access(request, auth)
-    job = await _get_trace_repository(request).enqueue_evaluator_run(
-        tenant_id=auth.tenant_id,
-        evaluator_id=evaluator_id,
-        created_by=auth.user_id,
-        payload=body.model_dump(),
-    )
+    try:
+        job = await _get_trace_repository(request).enqueue_evaluator_run(
+            tenant_id=auth.tenant_id,
+            evaluator_id=evaluator_id,
+            created_by=auth.user_id,
+            payload=body.model_dump(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return EvalAsyncJobResponse(**job)
 
 

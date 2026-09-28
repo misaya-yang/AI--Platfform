@@ -637,7 +637,7 @@ function AgentStudioWorkspace({
           {renderSection()}
           <footer className="agent-config-footer"><Text type="secondary">{t("agents.studio.lastSaved", { time: new Date(lastSavedAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) })}</Text><Button type="primary" icon={<Save size={15} />} disabled={!dirty || !canEdit || validationIssues.length > 0} loading={saveMutation.isPending} onClick={requestSave}>{t("agents.common.saveDraft")}</Button></footer>
         </section>
-        <AgentPreviewPanel agentId={agent.agent_id} agentName={agent.name} draftRevision={revision} versions={versions} savedSpec={savedSpec} dirty={dirty} />
+        <AgentPreviewPanel key={agent.agent_id} agentId={agent.agent_id} agentName={agent.name} draftRevision={revision} versions={versions} savedSpec={savedSpec} dirty={dirty} />
       </div>
 
       <Drawer className="agent-section-drawer" title={t("agents.studio.drawerTitle")} placement="bottom" size="large" open={drawerOpen} onClose={() => setDrawerOpen(false)} afterOpenChange={(open) => { if (!open) mobileSectionTriggerRef.current?.focus(); }} extra={<Button type="text" icon={<X size={17} />} aria-label={t("agents.studio.closeSections")} onClick={() => setDrawerOpen(false)} />}>

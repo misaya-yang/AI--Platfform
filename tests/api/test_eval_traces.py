@@ -1427,6 +1427,44 @@ async def test_eval_experiment_run_results_return_case_scores(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_legacy_rescore_manifest_is_hidden_on_run_and_experiment_get(monkeypatch) -> None:
+    fixture = FakeTraceRepository()
+    private_case = {"input": {"message": "revoked KB private text"}}
+    legacy_run = {
+        **fixture.baseline_run,
+        "target_snapshot": {
+            "dataset_version": "v1",
+            "dataset_manifest": [private_case],
+        },
+    }
+
+    class LegacyRepository(AgentTraceRepository):
+        def __init__(self) -> None:
+            super().__init__(SimpleNamespace(_pool=None, enabled=False))
+
+        async def fetchrow(self, query: str, *_args: Any) -> dict[str, Any] | None:
+            return fixture.experiment if "FROM eval_experiments" in query else legacy_run
+
+        async def fetch(self, _query: str, *_args: Any) -> list[dict[str, Any]]:
+            return [legacy_run]
+
+    repo = LegacyRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view"])
+    run = await get_eval_experiment_run(
+        run_id=legacy_run["run_id"], request=_request(), auth=auth,
+    )
+    experiment = await get_eval_experiment(
+        experiment_id=fixture.experiment["experiment_id"], request=_request(), auth=auth,
+    )
+
+    assert run.target_snapshot == {"dataset_version": "v1"}
+    assert experiment.runs[0].target_snapshot == {"dataset_version": "v1"}
+    assert "revoked KB private text" not in run.model_dump_json()
+    assert "revoked KB private text" not in experiment.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_eval_run_endpoint_requires_eval_run_permission(monkeypatch) -> None:
     repo = FakeTraceRepository()
     monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
@@ -1443,6 +1481,27 @@ async def test_eval_run_endpoint_requires_eval_run_permission(monkeypatch) -> No
     assert exc_info.value.status_code == 403
     detail = exc_info.value.detail
     assert detail["required_capability"] == Capability.GATEWAY_EVAL_RUN.value
+
+
+@pytest.mark.asyncio
+async def test_direct_evaluator_run_reports_missing_dataset_as_422(monkeypatch) -> None:
+    class MissingDatasetRepository:
+        async def enqueue_evaluator_run(self, **_kwargs: Any) -> dict[str, Any]:
+            raise ValueError("eval_dataset_not_found")
+
+    monkeypatch.setattr(
+        eval_routes, "_get_trace_repository", lambda _request: MissingDatasetRepository(),
+    )
+    with pytest.raises(HTTPException) as error:
+        await run_eval_evaluator_async(
+            evaluator_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            body=EvalEvaluatorRunRequest(dataset_id="ffffffff-ffff-4fff-8fff-ffffffffffff"),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail == "eval_dataset_not_found"
 
 
 @pytest.mark.asyncio
@@ -1512,6 +1571,32 @@ async def test_eval_example_review_import_and_export(monkeypatch) -> None:
     )
     assert exported.dataset.dataset_id == repo.dataset["dataset_id"]
     assert exported.examples[0].case_id in {"assistant.case.one", repo.example["example_id"]}
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected_error"),
+    [
+        ({"expected_trajectory": {"required_span_kinds": "invalid"}}, "required_span_kinds"),
+        ({"assertions": [{"type": "output_contains"}]}, "assertions[1].value"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_eval_patch_validates_persisted_behavior_fields(
+    monkeypatch, patch: dict[str, Any], expected_error: str,
+) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await update_eval_example(
+            dataset_id=repo.dataset["dataset_id"], example_id=repo.example["example_id"],
+            body=EvalExampleUpdate(**patch), request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert expected_error in str(error.value.detail)
+    assert not any(call[0] == "update_example" for call in repo.calls)
 
 
 @pytest.mark.asyncio

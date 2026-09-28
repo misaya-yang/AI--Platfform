@@ -219,6 +219,7 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
 
     aggregated: dict[str, dict[str, Any]] = {}
     for case_id, trials in grouped.items():
+        trial_statuses = [str(row.get("status") or "queued") for row in trials]
         observed = [
             row.get("observed_metrics") if isinstance(row.get("observed_metrics"), dict) else {}
             for row in trials
@@ -234,6 +235,23 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
             if isinstance(item.get("behavior_pass"), bool)
         ]
         execution_labels = [item.get("execution_succeeded") is True for item in observed]
+        execution_complete = bool(trials) and all(
+            status == "succeeded" and executed
+            for status, executed in zip(trial_statuses, execution_labels, strict=True)
+        )
+        quality_complete = execution_complete and len(behavior_labels) == len(trials)
+        if any(status == "failed" for status in trial_statuses):
+            execution_status = "failed"
+        elif any(status == "skipped" for status in trial_statuses):
+            execution_status = "cancelled" if any(
+                item.get("execution_outcome") == "cancelled" for item in observed
+            ) else "skipped"
+        elif any(status == "running" for status in trial_statuses):
+            execution_status = "running"
+        elif any(status == "queued" for status in trial_statuses):
+            execution_status = "queued"
+        else:
+            execution_status = "succeeded" if execution_complete else "failed"
         representative = next(
             (item for item in observed if item.get("trace_id")),
             observed[0] if observed else {},
@@ -248,10 +266,8 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
             trials[0],
         )
         status = "unscored"
-        if observed and (not all(execution_labels) or not all(behavior_labels)):
-            status = "failed"
-        elif observed and behavior_labels and all(behavior_labels):
-            status = "passed"
+        if quality_complete:
+            status = "passed" if all(behavior_labels) else "failed"
         aggregated[case_id] = {
             "case_id": case_id,
             "example_id": trials[0].get("example_id"),
@@ -262,14 +278,16 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
             "candidate_trace_id": representative.get("trace_id"),
             "trace_ids": [str(item.get("trace_id")) for item in observed if item.get("trace_id")],
             "status": status,
-            "behavior_pass": bool(behavior_labels) and all(behavior_labels),
-            "execution_succeeded": bool(execution_labels) and all(execution_labels),
+            "execution_status": execution_status,
+            "behavior_pass": all(behavior_labels) if quality_complete else None,
+            "execution_succeeded": execution_complete,
             "critical": bool((trials[0].get("metadata") or {}).get("critical")),
-            "aggregate_score": _average(scores),
+            "aggregate_score": _average(scores) if quality_complete and len(scores) == len(trials) else None,
             "score_stddev": (
-                round(statistics.pstdev(scores), 4) if len(scores) > 1 else 0.0 if scores else None
+                round(statistics.pstdev(scores), 4) if quality_complete and len(scores) > 1
+                else 0.0 if quality_complete and scores else None
             ),
-            "flaky": len(set(behavior_labels)) > 1,
+            "flaky": quality_complete and len(set(behavior_labels)) > 1,
             "trial_count": len(trials),
             "observed_metrics": {
                 key: _average_complete_metric(observed, key)
@@ -304,6 +322,55 @@ def _aggregate_live_case_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str,
             "errors": sorted({str(item.get("error")) for item in observed if item.get("error")}),
         }
     return aggregated
+
+
+def _retry_source_cases(
+    rows: list[dict[str, Any]], case_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Select one failed frozen attempt per case without replaying uncertain dispatches."""
+    if not case_ids or len(case_ids) != len(set(case_ids)) or any(not item.strip() for item in case_ids):
+        raise ValueError("eval_retry_case_ids_invalid")
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_case.setdefault(str(row.get("case_id") or ""), []).append(row)
+    selected: list[dict[str, Any]] = []
+    for case_id in case_ids:
+        if case_id not in by_case:
+            raise ValueError(f"eval_retry_case_not_found:{case_id}")
+        eligible = [
+            row for row in by_case[case_id]
+            if row.get("status") == "failed"
+            or (row.get("status") == "succeeded"
+                and (row.get("observed_metrics") or {}).get("behavior_pass") is False)
+        ]
+        if not eligible:
+            raise ValueError(f"eval_retry_case_not_failed:{case_id}")
+        if any(
+            str((row.get("metadata") or {}).get("source_kind") or "").startswith(("kb", "knowledge"))
+            or any(key in (row.get("metadata") or {}) for key in (
+                "kb_dataset_id", "kb_source_versions", "kb_trace_id",
+            ))
+            for row in eligible
+        ):
+            raise ValueError(f"eval_retry_kb_source_requires_fresh_authorization:{case_id}")
+        if any(
+            row.get("dispatch_state") in {"dispatching", "reconcile_required"}
+            or (row.get("observed_metrics") or {}).get("exit_reason") == "side_effect_unknown"
+            for row in eligible
+        ):
+            raise ValueError(f"eval_retry_side_effect_unconfirmed:{case_id}")
+        source = eligible[0]
+        observed = source.get("observed_metrics") or {}
+        model_only_complete = (
+            observed.get("execution_succeeded") is True
+            and (source.get("candidate_trace_id") or observed.get("trace_id"))
+            and observed.get("tool_trajectory") == []
+            and observed.get("exit_reason") in {"completed", "succeeded"}
+        )
+        if source.get("dispatch_state") != "not_started" and not model_only_complete:
+            raise ValueError(f"eval_retry_side_effect_unconfirmed:{case_id}")
+        selected.append(source)
+    return selected
 
 
 def _example_metadata_patch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1797,6 +1864,47 @@ class AgentTraceRepository(BaseRepository):
             raise ValueError("eval_evaluator_not_found")
         evaluator = await self.freeze_eval_judge(tenant_id=tenant_id, evaluator=evaluator)
         target_snapshot = dict(payload.get("target_snapshot") or {})
+        target_snapshot.pop("dataset_manifest", None)
+        dataset_id = payload.get("dataset_id")
+        dataset_manifest_hash = None
+        manifest: list[dict[str, Any]] | None = None
+        if dataset_id:
+            from ai_gateway_core.eval.evaluator_executor import is_runnable_dataset_example
+
+            dataset = await self.get_dataset(tenant_id=tenant_id, dataset_id=str(dataset_id))
+            if dataset is None:
+                raise ValueError("eval_dataset_not_found")
+            manifest = [
+                {
+                    key: example.get(key)
+                    for key in (
+                        "example_id", "split", "input", "expected_output", "metadata",
+                        "source_trace_id", "source_span_id",
+                    )
+                }
+                for example in await self.list_example_manifest(
+                    tenant_id=tenant_id, dataset_id=str(dataset_id),
+                )
+                if is_runnable_dataset_example(example)
+            ]
+            manifest.sort(key=lambda item: str(item.get("example_id") or ""))
+            dataset_manifest_hash = _canonical_hash(manifest)
+            target_snapshot.update({
+                "dataset_version": dataset.get("version"),
+                "dataset_manifest_hash": dataset_manifest_hash,
+                "dataset_case_count": len(manifest),
+            })
+        target_snapshot["evaluator_snapshot"] = {
+            key: evaluator.get(key)
+            for key in (
+                "evaluator_id", "name", "evaluator_type", "rubric", "version",
+                "sampling_config", "filter_config",
+            )
+        }
+        evaluator_suite_hash = _canonical_hash({
+            **target_snapshot["evaluator_snapshot"],
+            "metadata": evaluator.get("metadata") or {},
+        })
         trace_id = payload.get("trace_id")
         if trace_id and "trace_id" not in target_snapshot:
             target_snapshot["trace_id"] = trace_id
@@ -1811,23 +1919,25 @@ class AgentTraceRepository(BaseRepository):
                 """
                 INSERT INTO eval_experiment_runs (
                     experiment_id, tenant_id, evaluator_id, dataset_id, status,
+                    dataset_manifest_hash, evaluator_suite_hash,
                     target_snapshot, metrics, created_by
                 ) VALUES (
                     $1::uuid, $2, $3::uuid, $4::uuid, 'queued',
-                    $5::jsonb, $6::jsonb, $7
+                    $5, $6, $7::jsonb, $8::jsonb, $9
                 )
                 RETURNING *
                 """,
                 payload.get("experiment_id"),
                 tenant_id,
                 evaluator_id,
-                payload.get("dataset_id"),
+                dataset_id,
+                dataset_manifest_hash,
+                evaluator_suite_hash,
                 self._json_dumps(target_snapshot),
                 self._json_dumps({}),
                 created_by,
             )
             decoded_run = self._decode_eval_row(run) if run else {}
-            target_snapshot = payload.get("target_snapshot") or {}
             trace_family = "assistant"
             if isinstance(target_snapshot, dict):
                 family = str(target_snapshot.get("trace_family") or "").strip()
@@ -1842,6 +1952,7 @@ class AgentTraceRepository(BaseRepository):
                     "trace_id": payload.get("trace_id"),
                     "trace_family": trace_family,
                     "target_snapshot": target_snapshot if isinstance(target_snapshot, dict) else {},
+                    "dataset_manifest": manifest,
             }
             job = await conn.fetchrow(
                 """INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
@@ -2047,6 +2158,147 @@ class AgentTraceRepository(BaseRepository):
             *params,
         )
         return [self._decode_eval_row(row) for row in rows]
+
+    async def retry_failed_experiment_cases(
+        self, *, tenant_id: str, run_id: str, case_ids: list[str], created_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Queue a separate one-attempt run using selected frozen case and candidate snapshots."""
+        request_hash = hashlib.sha256(
+            f"{tenant_id}:{created_by}:{run_id}:{idempotency_key}".encode()
+        ).hexdigest()
+        async with self._pool.acquire() as conn, conn.transaction():
+            source_row = await conn.fetchrow(
+                """SELECT * FROM eval_experiment_runs
+                   WHERE tenant_id = $1 AND run_id = $2::uuid FOR UPDATE""",
+                tenant_id, run_id,
+            )
+            if not source_row:
+                return None
+            source = self._decode_eval_row(dict(source_row))
+            if source.get("run_mode") != "live_candidate" or source.get("status") not in {
+                "succeeded", "failed", "cancelled",
+            }:
+                raise ValueError("eval_retry_requires_terminal_live_run")
+            source_snapshot = source.get("target_snapshot") or {}
+            if source_snapshot.get("dataset_kb_linked") is not False:
+                raise ValueError("eval_retry_dataset_provenance_unverified")
+            dataset = await conn.fetchrow(
+                """SELECT metadata FROM eval_datasets
+                   WHERE tenant_id = $1 AND dataset_id = $2::uuid""",
+                tenant_id, source.get("dataset_id"),
+            )
+            if not dataset:
+                raise ValueError("eval_retry_dataset_unavailable")
+            dataset_metadata = self._decode_json(dataset.get("metadata"), default={})
+            if dataset_metadata.get("kb_dataset_id"):
+                raise ValueError("eval_retry_kb_source_requires_fresh_authorization")
+            existing = await conn.fetchrow(
+                """SELECT run_id, status, target_snapshot FROM eval_experiment_runs
+                   WHERE tenant_id = $1 AND target_snapshot->>'retry_of_run_id' = $2
+                   AND target_snapshot->>'retry_request_key_hash' = $3
+                   LIMIT 1""",
+                tenant_id, run_id, request_hash,
+            )
+            if existing:
+                existing_snapshot = self._decode_json(existing["target_snapshot"], default={})
+                if sorted(existing_snapshot.get("retry_case_ids") or []) != sorted(case_ids):
+                    raise ValueError("eval_retry_idempotency_conflict")
+                return {
+                    "job_id": str(existing_snapshot["retry_job_id"]),
+                    "run_id": str(existing["run_id"]),
+                    "status": str(existing["status"]),
+                }
+            rows = await conn.fetch(
+                """SELECT * FROM eval_experiment_run_cases
+                   WHERE tenant_id = $1 AND run_id = $2::uuid
+                   AND case_id = ANY($3::varchar[])
+                   ORDER BY case_id, trial_index FOR UPDATE""",
+                tenant_id, run_id, case_ids,
+            )
+            frozen_cases = _retry_source_cases(
+                [self._decode_eval_row(dict(row)) for row in rows], case_ids,
+            )
+            frozen_cases.sort(key=lambda row: row["case_id"])
+            manifest = [
+                {
+                    "case_id": row["case_id"], "example_id": row.get("example_id"),
+                    "input": row["input"], "expected_output": row["expected_output"],
+                    "expected_trajectory": row["expected_trajectory"],
+                    "assertions": row["assertions"], "metadata": row["metadata"],
+                }
+                for row in frozen_cases
+            ]
+            manifest_hash = _canonical_hash(manifest)
+            source_config = source.get("execution_config") or {}
+            evaluator_ids = [
+                item.get("evaluator_id") for item in source_config.get("evaluators") or []
+                if isinstance(item, dict) and item.get("evaluator_id")
+            ]
+            if not evaluator_ids:
+                raise ValueError("eval_retry_frozen_evaluator_missing")
+            snapshot = {
+                **source_snapshot,
+                "run_mode": "live_candidate",
+                "repetitions": 1,
+                "dataset_manifest_hash": manifest_hash,
+                "retry_of_run_id": run_id,
+                "retry_request_key_hash": request_hash,
+                "retry_case_ids": sorted(case_ids),
+                "retry_source_run_case_ids": [row["run_case_id"] for row in frozen_cases],
+            }
+            fingerprint = {
+                **(source.get("candidate_fingerprint") or {}), "verification": "pending",
+            }
+            new_run = await conn.fetchrow(
+                """INSERT INTO eval_experiment_runs (
+                    experiment_id, tenant_id, evaluator_id, dataset_id, status, run_mode,
+                    repetitions, baseline_run_id, dataset_manifest_hash, evaluator_suite_hash,
+                    candidate_fingerprint, execution_config, target_snapshot, metrics, created_by
+                ) VALUES (
+                    $1::uuid, $2, $3::uuid, $4::uuid, 'queued', 'live_candidate', 1,
+                    $5::uuid, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, '{}'::jsonb, $11
+                ) RETURNING run_id""",
+                source["experiment_id"], tenant_id, source["evaluator_id"], source["dataset_id"],
+                source.get("baseline_run_id"), manifest_hash, source.get("evaluator_suite_hash"),
+                self._json_dumps(fingerprint), self._json_dumps(source_config),
+                self._json_dumps(snapshot), created_by,
+            )
+            new_run_id = str(new_run["run_id"])
+            await conn.executemany(
+                """INSERT INTO eval_experiment_run_cases (
+                    run_id, tenant_id, case_id, example_id, trial_index, input,
+                    expected_output, expected_trajectory, assertions, metadata
+                ) VALUES (
+                    $1::uuid, $2, $3, $4::uuid, 1, $5::jsonb, $6::jsonb, $7::jsonb,
+                    $8::jsonb, $9::jsonb
+                )""",
+                [
+                    (new_run_id, tenant_id, row["case_id"], row.get("example_id"),
+                     self._json_dumps(row["input"]), self._json_dumps(row["expected_output"]),
+                     self._json_dumps(row["expected_trajectory"]),
+                     self._json_dumps(row["assertions"]), self._json_dumps(row["metadata"]))
+                    for row in frozen_cases
+                ],
+            )
+            job = await conn.fetchrow(
+                """INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+                   VALUES ($1, 'eval.evaluator.run', jsonb_build_object(
+                       'run_id', $2::text, 'experiment_id', $3::text,
+                       'dataset_id', $4::text, 'evaluator_id', $5::text,
+                       'evaluator_ids', $6::jsonb,
+                       'run_mode', 'live_candidate', 'trace_family', 'assistant'))
+                   RETURNING job_id""",
+                tenant_id, new_run_id, source["experiment_id"], source["dataset_id"],
+                source["evaluator_id"], self._json_dumps(evaluator_ids),
+            )
+            await conn.execute(
+                """UPDATE eval_experiment_runs
+                   SET target_snapshot = jsonb_set(target_snapshot, '{retry_job_id}', to_jsonb($3::text))
+                   WHERE tenant_id = $1 AND run_id = $2::uuid""",
+                tenant_id, new_run_id, str(job["job_id"]),
+            )
+        return {"job_id": str(job["job_id"]), "run_id": new_run_id, "status": "queued"}
 
     async def update_experiment_run_case(
         self,
@@ -2735,12 +2987,15 @@ class AgentTraceRepository(BaseRepository):
         public_cases: list[dict[str, Any]] = []
         for case in cases.values():
             failure_reason = "; ".join(case["errors"] or case["contract_failures"]) or None
+            if failure_reason is None and case["execution_status"] in {"cancelled", "skipped"}:
+                failure_reason = f"Trial {case['execution_status']} before scoring"
             public_cases.append(
                 {
                     "example_id": case["example_id"],
                     "case_id": case["case_id"],
                     "candidate_trace_id": case["candidate_trace_id"] or "",
                     "status": case["status"],
+                    "execution_status": case["execution_status"],
                     "aggregate_score": case["aggregate_score"],
                     "failure_reason": failure_reason,
                     "input": case["input"],
@@ -2812,6 +3067,11 @@ class AgentTraceRepository(BaseRepository):
             reasons.append("incomplete_run_cases")
         baseline_cases = _aggregate_live_case_rows(baseline_rows)
         candidate_cases = _aggregate_live_case_rows(candidate_rows)
+        if any(
+            case["status"] == "unscored"
+            for case in [*baseline_cases.values(), *candidate_cases.values()]
+        ):
+            reasons.append("unscored_case_results")
         if set(baseline_cases) != set(candidate_cases) or not baseline_cases:
             reasons.append("case_set_mismatch")
         else:
@@ -2940,12 +3200,16 @@ class AgentTraceRepository(BaseRepository):
                 if left_score is not None and right_score is not None
                 else None
             )
-            if score_delta is not None:
+            if score_delta is not None and left["status"] != "unscored" and right["status"] != "unscored":
                 paired_score_deltas.append(score_delta)
-            if left["behavior_pass"] and not right["behavior_pass"]:
+            if left["status"] == "unscored" or right["status"] == "unscored":
+                classification = "unscored"
+            elif left["behavior_pass"] is True and right["behavior_pass"] is False:
                 classification = "regressed"
-            elif not left["behavior_pass"] and right["behavior_pass"]:
+            elif left["behavior_pass"] is False and right["behavior_pass"] is True:
                 classification = "improved"
+            elif left["behavior_pass"] is False and right["behavior_pass"] is False:
+                classification = "same_failure"
             elif score_delta is not None and score_delta < -0.02:
                 classification = "regressed"
             elif score_delta is not None and score_delta > 0.02:
@@ -2980,6 +3244,10 @@ class AgentTraceRepository(BaseRepository):
                 {
                     "case_id": case_id,
                     "status": classification,
+                    "baseline_quality_status": left["status"],
+                    "candidate_quality_status": right["status"],
+                    "baseline_execution_status": left["execution_status"],
+                    "candidate_execution_status": right["execution_status"],
                     "critical": right["critical"],
                     "baseline_score": left_score,
                     "candidate_score": right_score,
@@ -3000,11 +3268,13 @@ class AgentTraceRepository(BaseRepository):
                 }
             )
 
-        rank = {"regressed": 0, "flaky": 1, "improved": 2, "unchanged": 3}
+        rank = {"regressed": 0, "unscored": 1, "flaky": 2, "same_failure": 3, "improved": 4, "unchanged": 5}
         case_diffs.sort(key=lambda item: (rank.get(str(item["status"]), 9), str(item["case_id"])))
-        confidence_interval = _paired_bootstrap_ci(paired_score_deltas)
+        confidence_interval = _paired_bootstrap_ci(paired_score_deltas) if not reasons else None
         evidence_status = "insufficient_evidence"
-        if len(paired_score_deltas) >= 10 and confidence_interval:
+        if reasons:
+            evidence_status = "unverifiable"
+        elif len(paired_score_deltas) >= 10 and confidence_interval:
             evidence_status = (
                 "improvement"
                 if confidence_interval[0] > 0
@@ -3019,8 +3289,8 @@ class AgentTraceRepository(BaseRepository):
             case_id
             for case_id in sorted(set(baseline_cases) & set(candidate_cases))
             if candidate_cases[case_id]["critical"]
-            and baseline_cases[case_id]["behavior_pass"]
-            and not candidate_cases[case_id]["behavior_pass"]
+            and baseline_cases[case_id]["behavior_pass"] is True
+            and candidate_cases[case_id]["behavior_pass"] is False
         ]
         if critical_flips:
             gate_failures.append("critical_case_regression")
@@ -3078,6 +3348,8 @@ class AgentTraceRepository(BaseRepository):
             "improved_case_count": sum(1 for item in case_diffs if item["status"] == "improved"),
             "unchanged_case_count": sum(1 for item in case_diffs if item["status"] == "unchanged"),
             "flaky_case_count": sum(1 for item in case_diffs if item["flaky"]),
+            "same_failure_case_count": sum(1 for item in case_diffs if item["status"] == "same_failure"),
+            "unscored_case_count": sum(1 for item in case_diffs if item["status"] == "unscored"),
             "critical_regressions": critical_flips,
             "attribution_status": attribution,
         }
@@ -3904,6 +4176,14 @@ class AgentTraceRepository(BaseRepository):
                 decoded[key] = self._decode_json(decoded.get(key), default={})
         if "assertions" in decoded:
             decoded["assertions"] = self._decode_json(decoded.get("assertions"), default=[])
+        if "target_snapshot" in decoded and isinstance(decoded["target_snapshot"], dict):
+            # Older rescore runs may have persisted case contents here. Both
+            # GET run and GET experiment use this projection, including after
+            # a linked KB source grant has been revoked.
+            decoded["target_snapshot"] = {
+                key: value for key, value in decoded["target_snapshot"].items()
+                if key != "dataset_manifest"
+            }
         return decoded
 
     def _decode_json(self, value: Any, *, default: Any) -> Any:

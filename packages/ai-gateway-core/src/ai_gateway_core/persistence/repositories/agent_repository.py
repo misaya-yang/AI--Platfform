@@ -17,7 +17,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from ai_gateway_contracts.agent_runtime import agent_memory_principal
@@ -127,6 +127,37 @@ class AgentReleaseIdempotencyConflictError(AgentRepositoryError):
 
 class AgentPublicationNotFoundError(AgentRepositoryError):
     """Publication is absent or deliberately hidden from the caller."""
+
+
+def require_public_release_expiry(
+    auth_mode: str, policy: dict[str, Any], *, now: datetime | None = None
+) -> datetime | None:
+    """Require a future, timezone-aware deadline for every new public release."""
+
+    if auth_mode != "public":
+        return None
+    raw = policy.get("expires_at")
+    try:
+        expiry = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AgentReleaseGateError("AGENT_PUBLIC_EXPIRY_REQUIRED") from exc
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
+        raise AgentReleaseGateError("AGENT_PUBLIC_EXPIRY_REQUIRED")
+    if expiry <= (now or datetime.now(timezone.utc)):
+        raise AgentReleaseGateError("AGENT_PUBLIC_EXPIRY_EXPIRED")
+    return expiry
+
+
+def _require_active_publication(publication: Any) -> None:
+    if not publication or publication["status"] != "active":
+        raise AgentRuntimeUnavailableError("PUBLICATION_DISABLED")
+    if _publication_expired(publication):
+        raise AgentRuntimeUnavailableError("PUBLICATION_EXPIRED")
+
+
+def _publication_expired(publication: Any) -> bool:
+    expires_at = publication.get("expires_at")
+    return expires_at is not None and expires_at <= datetime.now(timezone.utc)
 
 
 def canonical_spec(spec: dict[str, Any]) -> str:
@@ -2108,6 +2139,10 @@ class DatabaseAgentRepository(BaseRepository):
             or str(candidate.get("agent_id") or "") != agent_id
         ):
             raise AgentReleaseGateError("AGENT_EVAL_TARGET_MISMATCH")
+        require_public_release_expiry(
+            str(candidate.get("auth_mode") or ""),
+            dict(candidate.get("channel_policy") or {}),
+        )
         async with self._pool.acquire() as conn, conn.transaction():
             agent, _ = await self._authorized_agent(
                 conn,
@@ -3084,6 +3119,10 @@ class DatabaseAgentRepository(BaseRepository):
                 gate = _row_to_dict(evaluation).get("gate_snapshot") or {}
                 findings = gate.get("blocking_findings") if isinstance(gate, dict) else []
                 raise AgentReleaseGateError("AGENT_EVAL_NOT_PASSED", findings)
+            release_policy = _row_to_dict(evaluation)["channel_policy"]
+            expires_at = require_public_release_expiry(
+                str(evaluation["auth_mode"]), release_policy
+            )
             draft = await conn.fetchrow(
                 """
                 SELECT * FROM agent_drafts
@@ -3224,7 +3263,8 @@ class DatabaseAgentRepository(BaseRepository):
                     """
                     UPDATE agent_publications
                     SET version_id = $4, auth_mode = $5, policy = $6::jsonb,
-                        status = 'active', updated_by = $7, updated_at = NOW()
+                        expires_at = $8, status = 'active', updated_by = $7,
+                        updated_at = NOW()
                     WHERE tenant_id = $1 AND publication_id = $2 AND agent_id = $3
                     RETURNING *
                     """,
@@ -3233,16 +3273,17 @@ class DatabaseAgentRepository(BaseRepository):
                     uuid.UUID(agent_id),
                     uuid.UUID(str(version_result["agent_version_id"])),
                     evaluation["auth_mode"],
-                    canonical_spec(_row_to_dict(evaluation)["channel_policy"]),
+                    canonical_spec(release_policy),
                     user_id,
+                    expires_at,
                 )
             else:
                 publication = await conn.fetchrow(
                     """
                     INSERT INTO agent_publications (
                         tenant_id, agent_id, channel, version_id, auth_mode,
-                        policy, status, created_by, updated_by
-                    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'active', $7, $7)
+                        policy, status, created_by, updated_by, expires_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'active', $7, $7, $8)
                     RETURNING *
                     """,
                     tenant_id,
@@ -3250,8 +3291,9 @@ class DatabaseAgentRepository(BaseRepository):
                     evaluation["channel"],
                     uuid.UUID(str(version_result["agent_version_id"])),
                     evaluation["auth_mode"],
-                    canonical_spec(_row_to_dict(evaluation)["channel_policy"]),
+                    canonical_spec(release_policy),
                     user_id,
+                    expires_at,
                 )
             release_diff = structured_agent_release_diff(before_spec, spec)
             validation_snapshot = {
@@ -3648,6 +3690,8 @@ class DatabaseAgentRepository(BaseRepository):
             )
             if not publication:
                 raise AgentPublicationNotFoundError("AGENT_PUBLICATION_NOT_FOUND")
+            if _publication_expired(publication):
+                raise AgentReleaseGateError("AGENT_PUBLIC_EXPIRY_EXPIRED")
             if publication["status"] != "active":
                 await self._enforce_active_publication_quota(
                     conn,
@@ -4072,8 +4116,7 @@ class DatabaseAgentRepository(BaseRepository):
                 user_id,
                 is_tenant_admin,
             )
-            if not publication or publication["status"] != "active":
-                raise AgentRuntimeUnavailableError("PUBLICATION_DISABLED")
+            _require_active_publication(publication)
             agent, role = await self._authorized_agent(
                 conn,
                 tenant_id=tenant_id,
@@ -4156,6 +4199,7 @@ class DatabaseAgentRepository(BaseRepository):
     ) -> dict[str, Any]:
         """Load only immutable material owned by an already-authorized Publication."""
 
+        _require_active_publication(publication)
         agent = await conn.fetchrow(
             """
             SELECT *
@@ -4249,8 +4293,7 @@ class DatabaseAgentRepository(BaseRepository):
                 """,
                 uuid.UUID(public_id),
             )
-            if not publication or publication["status"] != "active":
-                raise AgentRuntimeUnavailableError("PUBLICATION_DISABLED")
+            _require_active_publication(publication)
             if str(publication["channel"]) != channel:
                 raise AgentRuntimeUnavailableError("PUBLICATION_CHANNEL_MISMATCH")
 
@@ -4300,6 +4343,7 @@ class DatabaseAgentRepository(BaseRepository):
                        publication.agent_id, publication.public_id,
                        publication.channel, publication.auth_mode,
                        publication.policy, publication.status,
+                       publication.expires_at,
                        agent.name, agent.description,
                        version.resolved_spec->'identity' AS identity
                 FROM agent_publications AS publication
@@ -4314,8 +4358,7 @@ class DatabaseAgentRepository(BaseRepository):
                 """,
                 uuid.UUID(public_id),
             )
-        if not row or row["status"] != "active":
-            raise AgentRuntimeUnavailableError("PUBLICATION_DISABLED")
+        _require_active_publication(row)
         return _row_to_dict(row)
 
     async def resolve_api_token_runtime(
@@ -4338,6 +4381,7 @@ class DatabaseAgentRepository(BaseRepository):
                 SELECT token.*, publication.agent_id, publication.channel,
                        publication.auth_mode, publication.policy,
                        publication.public_id, publication.version_id,
+                       publication.expires_at AS publication_expires_at,
                        publication.status AS publication_status
                 FROM agent_api_tokens AS token
                 JOIN agent_publications AS publication
@@ -4381,6 +4425,7 @@ class DatabaseAgentRepository(BaseRepository):
                 "policy": token["policy"],
                 "public_id": token["public_id"],
                 "version_id": token["version_id"],
+                "expires_at": token["publication_expires_at"],
                 "status": token["publication_status"],
             }
             result = await self._load_channel_runtime_material(

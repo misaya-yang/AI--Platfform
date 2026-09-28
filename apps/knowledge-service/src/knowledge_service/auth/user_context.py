@@ -29,6 +29,16 @@ class UserContext:
     ip: str = ""
     is_authenticated: bool = True
 
+    def __post_init__(self) -> None:
+        anonymous = (
+            self.user_id.strip().lower() == "anonymous"
+            or self.user_tier.strip().lower() == "anonymous"
+            or self.user_type.strip().lower() in {"anonymous", "guest"}
+            or "guest" in {str(role).strip().lower() for role in (self.roles or [])}
+        )
+        if anonymous:
+            object.__setattr__(self, "is_authenticated", False)
+
     @property
     def tier(self) -> str:
         """Alias for user_tier — gateway code uses user.tier."""
@@ -40,7 +50,7 @@ class UserContext:
 
     @property
     def is_anonymous(self) -> bool:
-        return self.user_id == "anonymous"
+        return not self.is_authenticated
 
 
 # Sentinel used when anonymous access is allowed but no headers are present.
@@ -84,6 +94,7 @@ async def get_user_context(request: Request) -> UserContext:
             user_tier=user_tier,
             user_type=user_type,
             roles=roles,
+            is_authenticated=user_type.lower() not in {"anonymous", "guest"},
         )
 
     # Check if anonymous access is allowed

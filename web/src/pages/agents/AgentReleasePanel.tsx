@@ -59,6 +59,7 @@ import type {
   AgentRole,
   AgentVersion,
 } from "@/types/agents";
+import { futurePublicExpiry } from "./agentReleaseExpiry";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -306,6 +307,7 @@ export function AgentReleasePanel({
   const [attachments, setAttachments] = useState(false);
   const [highRiskTools, setHighRiskTools] = useState(false);
   const [allowedOrigins, setAllowedOrigins] = useState("");
+  const [publicExpiresAt, setPublicExpiresAt] = useState("");
   const [selectedEvaluation, setSelectedEvaluation] = useState<AgentReleaseEvaluation | null>(null);
   const [publishReason, setPublishReason] = useState("");
   const [rollbackTarget, setRollbackTarget] = useState<{
@@ -369,6 +371,7 @@ export function AgentReleasePanel({
           attachments,
           high_risk_tools: authMode === "public" ? false : highRiskTools,
           allowed_origins: originValues(),
+          ...(authMode === "public" ? { expires_at: futurePublicExpiry(publicExpiresAt) } : {}),
         },
       });
       queryClient.setQueryData<AgentReleaseEvaluation[]>(
@@ -457,12 +460,17 @@ export function AgentReleasePanel({
   const errorDetail = latestError ? agentErrorDetail(latestError) : null;
   const selectedDiff = diffQuery.data?.diff;
   const selectedGate = selectedEvaluation?.gate_snapshot;
+  const publicExpiry = selectedEvaluation?.auth_mode === "public"
+    ? selectedEvaluation.channel_policy.expires_at : null;
+  const publicExpiryValid = selectedEvaluation?.auth_mode !== "public"
+    || (Boolean(publicExpiry) && new Date(publicExpiry!).getTime() > Date.now());
   const publishDisabled = Boolean(
     !selectedEvaluation
     || selectedEvaluation.status !== "passed"
     || selectedEvaluation.stale
     || !canRelease
     || dirty
+    || !publicExpiryValid
     || (selectedGate?.blocking_findings?.length ?? 0) > 0
   );
   const evidenceEvent = evidenceVersionId
@@ -510,16 +518,20 @@ export function AgentReleasePanel({
           <div className="agent-release-controls">
             <label><span>{t("agents.studio.release.dataset")}</span><Select allowClear value={datasetId} placeholder={t("agents.studio.release.noDatasetShort")} options={datasets.map((dataset) => ({ value: dataset.dataset_id, label: dataset.version ? `${dataset.name} · ${dataset.version}` : dataset.name }))} onChange={(value) => setDatasetId(value ?? null)} /></label>
             <label><span>{t("agents.studio.release.channel")}</span><Select value={channel} options={channelOptions} onChange={setChannel} /></label>
-            <label><span>{t("agents.studio.release.authMode")}</span><Select value={authMode} options={["private", "tenant", "token", "public"].map((value) => ({ value, label: t(`agents.studio.release.auth.${value}`) }))} onChange={(value) => { setAuthMode(value); if (value === "public") setHighRiskTools(false); }} /></label>
+            <label><span>{t("agents.studio.release.authMode")}</span><Select value={authMode} options={["private", "tenant", "token", "public"].map((value) => ({ value, label: t(`agents.studio.release.auth.${value}`) }))} onChange={(value) => { setAuthMode(value); if (value === "public") setHighRiskTools(false); else setPublicExpiresAt(""); }} /></label>
             <label className="agent-release-origins"><span>{t("agents.studio.release.allowedOrigins")}</span><Input value={allowedOrigins} onChange={(event) => setAllowedOrigins(event.target.value)} placeholder="https://app.example.com" /></label>
+            {authMode === "public" && <label><span>{t("agents.studio.release.publicExpiry", { defaultValue: "Public access ends" })}</span><Input type="datetime-local" value={publicExpiresAt} onChange={(event) => setPublicExpiresAt(event.target.value)} aria-required="true" aria-invalid={!futurePublicExpiry(publicExpiresAt)} /></label>}
           </div>
+          {authMode === "public" && <Alert type={futurePublicExpiry(publicExpiresAt) ? "info" : "warning"} showIcon title={futurePublicExpiry(publicExpiresAt)
+            ? t("agents.studio.release.publicExpiryNotice", { defaultValue: "This public audience and expiry are frozen in the release evaluation." })
+            : t("agents.studio.release.publicExpiryRequired", { defaultValue: "Choose a future expiry before evaluating public access." })} />}
           <div className="agent-release-policy-controls">
             <Checkbox checked={attachments} onChange={(event) => setAttachments(event.target.checked)}>{t("agents.studio.release.attachments")}</Checkbox>
             <Checkbox disabled={authMode === "public"} checked={highRiskTools} onChange={(event) => setHighRiskTools(event.target.checked)}>{t("agents.studio.release.highRiskTools")}</Checkbox>
           </div>
           <footer>
             <Text type="secondary">{t("agents.studio.release.exactRevision", { revision: draftRevision })}</Text>
-            <Button type="primary" icon={<Play size={15} />} loading={runEvalMutation.isPending} disabled={!canRelease || dirty} onClick={() => runEvalMutation.mutate()}>{t("agents.studio.release.runEval")}</Button>
+            <Button type="primary" icon={<Play size={15} />} loading={runEvalMutation.isPending} disabled={!canRelease || dirty || (authMode === "public" && !futurePublicExpiry(publicExpiresAt))} onClick={() => runEvalMutation.mutate()}>{t("agents.studio.release.runEval")}</Button>
           </footer>
         </section>
 
@@ -557,6 +569,7 @@ export function AgentReleasePanel({
               <div className="agent-publish-facts">
                 <span><small>{t("agents.studio.release.channel")}</small>{selectedEvaluation.channel.toUpperCase()}</span>
                 <span><small>{t("agents.studio.release.authMode")}</small>{t(`agents.studio.release.auth.${selectedEvaluation.auth_mode}`)}</span>
+                {selectedEvaluation.auth_mode === "public" && <span><small>{t("agents.studio.release.publicExpiry", { defaultValue: "Public access ends" })}</small>{publicExpiry ? new Date(publicExpiry).toLocaleString(locale) : "—"}</span>}
                 <span><small>{t("agents.studio.release.profile")}</small>{selectedEvaluation.profile_id}</span>
                 <span><small>{t("agents.studio.release.specHash")}</small>{shortHash(selectedEvaluation.spec_hash)}</span>
               </div>
@@ -567,6 +580,7 @@ export function AgentReleasePanel({
                 <p><ShieldCheck size={15} />{t("agents.studio.release.noSecrets")}</p>
               </section>
               <FindingList title={t("agents.studio.release.blockingFindings")} findings={selectedGate?.blocking_findings ?? []} blocking />
+              {!publicExpiryValid && <Alert type="error" showIcon title={t("agents.studio.release.publicExpiryElapsed", { defaultValue: "This evaluation's public expiry has passed. Run a new evaluation with a future expiry." })} />}
               <FindingList title={t("agents.studio.release.nonBlockingFindings")} findings={selectedGate?.non_blocking_findings ?? []} blocking={false} />
               <section className="agent-release-diff">
                 <Title level={5}>{t("agents.studio.release.diffTitle")}</Title>

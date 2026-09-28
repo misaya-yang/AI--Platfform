@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Final
 
 from ai_gateway_contracts.agent_runtime import runtime_sha256
@@ -154,11 +154,23 @@ def _normalized_policy(policy: Any) -> dict[str, Any]:
             if isinstance(origin, str) and str(origin).strip()
         }
     )
-    return {
+    normalized = {
         "attachments": bool(raw.get("attachments", False)),
         "high_risk_tools": bool(raw.get("high_risk_tools", False)),
         "allowed_origins": origins,
     }
+    expiry = raw.get("expires_at")
+    if expiry is not None:
+        try:
+            parsed = expiry if isinstance(expiry, datetime) else datetime.fromisoformat(
+                str(expiry).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise AgentReleaseCandidateError("AGENT_RELEASE_PUBLIC_EXPIRY_INVALID") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise AgentReleaseCandidateError("AGENT_RELEASE_PUBLIC_EXPIRY_INVALID")
+        normalized["expires_at"] = parsed.astimezone(timezone.utc).isoformat()
+    return normalized
 
 
 def _normalized_capability_key(raw: Any) -> tuple[str, str, str, str | None] | None:

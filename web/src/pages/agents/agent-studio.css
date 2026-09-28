@@ -983,6 +983,52 @@
   font-size: 10.5px;
 }
 
+.agent-preview-approval {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 7px;
+  background: hsl(var(--card));
+}
+
+.agent-preview-approval p {
+  margin: 5px 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-preview-approval > div {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.agent-preview-artifacts {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 7px;
+  background: hsl(var(--card));
+}
+
+.agent-preview-artifacts ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.agent-preview-artifacts li {
+  overflow-wrap: anywhere;
+}
+
+.agent-preview-artifacts button {
+  padding: 0;
+  border: 0;
+  color: hsl(var(--primary));
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+}
+
 .agent-preview-composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -1,6 +1,6 @@
-import { Alert, Button, Empty, Input, Progress, Segmented, Space, Spin, Tag } from "antd";
+import { Alert, Button, Checkbox, Empty, Input, Progress, Segmented, Space, Spin, Tag } from "antd";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -9,7 +9,7 @@ import type {
   EvalExperimentRunResultsResponse,
 } from "@/api/eval";
 
-type ResultFilter = "all" | "failed" | "review" | "passed";
+type ResultFilter = "all" | "failed" | "review" | "passed" | "unscored";
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -60,6 +60,9 @@ export function ExperimentRunResults({
   error,
   onRetry,
   onOpenTrace,
+  onCancel,
+  onRetryFailedCases,
+  actionLoading = false,
 }: {
   run: EvalExperimentRun | null;
   results: EvalExperimentRunResultsResponse | null;
@@ -67,15 +70,25 @@ export function ExperimentRunResults({
   error: Error | null;
   onRetry: () => void;
   onOpenTrace: (item: EvalExperimentCaseResult) => void;
+  onCancel?: () => void;
+  onRetryFailedCases?: (caseIds: string[]) => void;
+  actionLoading?: boolean;
 }) {
   const { t } = useTranslation();
   const [filter, setFilter] = useState<ResultFilter>("all");
   const [query, setQuery] = useState("");
+  const [selectedCaseIds, setSelectedCaseIds] = useState<Set<string>>(new Set());
+  useEffect(() => setSelectedCaseIds(new Set()), [run?.run_id]);
   const cases = useMemo(() => results?.cases || [], [results?.cases]);
+  const retryableIds = new Set(cases
+    .filter((item) => item.status === "failed" || recordValue(item).execution_status === "failed")
+    .map((item) => item.case_id));
+  const selectedRetryIds = [...selectedCaseIds].filter((caseId) => retryableIds.has(caseId));
   const visibleCases = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return [...cases]
-      .filter((item) => filter === "all" || item.status === filter)
+      .filter((item) => filter === "all" || item.status === filter
+        || (filter === "failed" && recordValue(item).execution_status === "failed"))
       .filter((item) => {
         if (!normalizedQuery) return true;
         return [item.case_id, item.failure_reason, item.candidate_trace_id]
@@ -116,6 +129,21 @@ export function ExperimentRunResults({
   const scoredCount = numberValue(summary.scored_count);
   const reviewCount = numberValue(summary.review_count);
   const skippedCount = numberValue(summary.skipped_count);
+  const qualityCaseCount = numberValue(summary.case_count);
+  const expectedCaseCount = numberValue(summary.expected_case_count);
+  const excludedCaseCount = numberValue(summary.excluded_case_count);
+  const targetSnapshot = recordValue(run.target_snapshot);
+  const candidateFingerprint = recordValue(run.candidate_fingerprint);
+  const modelRef = recordValue(candidateFingerprint.model_ref);
+  const gate = recordValue(run.metrics?.gate);
+  const gateStatus = String(gate.status || run.gate_status || "not evaluated");
+  const qualityStatus = summary.pending_human === true
+    ? "Pending human review"
+    : excludedCaseCount && excludedCaseCount > 0
+      ? "Incomplete"
+      : (qualityCaseCount && qualityCaseCount > 0) || (scoredCount && scoredCount > 0)
+        ? "Scored"
+        : "Unscored";
   const progress = { ...(run.metrics || {}), ...recordValue(run.metrics?.progress), ...(run.progress || {}) };
   const completed = numberValue(progress.completed_trials ?? progress.completed_cases ?? progress.completed);
   const failed = numberValue(progress.failed_trials ?? progress.failed_cases ?? progress.failed);
@@ -132,6 +160,7 @@ export function ExperimentRunResults({
     [t("eval.workbench.tokensPerTask", "Tokens / task"), metricValue(run, "total_tokens_per_task", "tokens_per_task"), "number"],
     [t("eval.workbench.costPerTask", "Cost / task"), metricValue(run, "cost_per_task_cents", "cost_cents_per_task"), "cost"],
     [t("eval.workbench.executionErrorRate", "Execution errors"), metricValue(run, "execution_error_rate", "error_rate"), "percent"],
+    ["Judge failures", metricValue(run, "judge_failed_trials"), "number"],
     [t("eval.workbench.flakyRate", "Flaky"), metricValue(run, "flaky_rate"), "percent"],
   ] as const;
 
@@ -144,10 +173,31 @@ export function ExperimentRunResults({
             <Tag color={runStatusColor(run.status)}>{run.status}</Tag>
           </Space>
           <code>{run.run_id}</code>
+          <div>Mode: {run.run_mode || String(targetSnapshot.run_mode || "rescore_trace")}
+            {targetSnapshot.dataset_version ? ` · Dataset ${String(targetSnapshot.dataset_version)}` : ""}
+            {modelRef.model_id ? ` · Model ${String(modelRef.model_id)}` : ""}
+            {run.repetitions && run.repetitions > 1 ? ` · ${run.repetitions} attempts per case` : ""}
+          </div>
+          {run.dataset_manifest_hash ? <div>Dataset snapshot: <code>{run.dataset_manifest_hash.slice(0, 12)}</code></div> : null}
+          <div>Execution: {run.status} · Quality: {qualityStatus} · Gate: {gateStatus}</div>
+          {expectedCaseCount !== null ? (
+            <div>Quality coverage: {qualityCaseCount ?? 0}/{expectedCaseCount} cases
+              {excludedCaseCount ? ` · ${excludedCaseCount} excluded from scoring` : ""}
+            </div>
+          ) : null}
         </div>
-        <Button icon={<RefreshCw size={15} />} onClick={onRetry} loading={loading}>
-          {t("common.refresh", "Refresh")}
-        </Button>
+        <Space wrap>
+          {isPending && onCancel ? <Button danger onClick={onCancel} loading={actionLoading}>Cancel run</Button> : null}
+          {!isPending && run.run_mode === "live_candidate" && onRetryFailedCases && retryableIds.size > 0 ? (
+            <Button disabled={selectedRetryIds.length === 0} loading={actionLoading}
+              onClick={() => onRetryFailedCases(selectedRetryIds)}>
+              Retry selected failed cases ({selectedRetryIds.length})
+            </Button>
+          ) : null}
+          <Button icon={<RefreshCw size={15} />} onClick={onRetry} loading={loading}>
+            {t("common.refresh", "Refresh")}
+          </Button>
+        </Space>
       </div>
 
       {isPending ? (
@@ -161,6 +211,10 @@ export function ExperimentRunResults({
         </div>
       ) : null}
       {run.error_message ? <Alert type="error" showIcon title={run.error_message} /> : null}
+      {excludedCaseCount && excludedCaseCount > 0 ? (
+        <Alert type="warning" showIcon title="Some cases have no valid quality result"
+          description="Execution or judging failed for these cases. They are excluded from the quality score and cannot pass the gate." />
+      ) : null}
       {error ? (
         <Alert
           type="error"
@@ -185,9 +239,10 @@ export function ExperimentRunResults({
           onChange={setFilter}
           options={[
             { label: `All ${cases.length}`, value: "all" },
-            { label: `Failed ${cases.filter((item) => item.status === "failed").length}`, value: "failed" },
+            { label: `Failed ${cases.filter((item) => item.status === "failed" || recordValue(item).execution_status === "failed").length}`, value: "failed" },
             { label: `Review ${cases.filter((item) => item.status === "review").length}`, value: "review" },
             { label: `Passed ${cases.filter((item) => item.status === "passed").length}`, value: "passed" },
+            { label: `Unscored ${cases.filter((item) => item.status === "unscored").length}`, value: "unscored" },
           ]}
         />
         <Input
@@ -204,7 +259,20 @@ export function ExperimentRunResults({
           {visibleCases.map((item) => (
             <article key={`${item.example_id || item.case_id}:${item.candidate_trace_id}`} className="eval-case-result" role="listitem">
               <div className="eval-case-result-main">
-                <Tag color={statusColor(item.status)}>{item.status}</Tag>
+                {!isPending && run.run_mode === "live_candidate" && retryableIds.has(item.case_id) && onRetryFailedCases ? (
+                  <Checkbox
+                    aria-label={`Select failed case ${item.case_id} for retry`}
+                    checked={selectedCaseIds.has(item.case_id)}
+                    onChange={(event) => setSelectedCaseIds((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) next.add(item.case_id); else next.delete(item.case_id);
+                      return next;
+                    })}
+                  />
+                ) : null}
+                <Tag color={recordValue(item).execution_status === "failed" ? "error" : statusColor(item.status)}>
+                  {recordValue(item).execution_status === "failed" ? "execution failed · unscored" : item.status}
+                </Tag>
                 <div>
                   <strong>{item.case_id}</strong>
                   <span>{item.trace.model_id || "unknown model"} · {item.trace.total_latency_ms ?? "—"} ms</span>

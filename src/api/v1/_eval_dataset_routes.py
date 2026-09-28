@@ -287,18 +287,22 @@ def build_eval_dataset_routes(
             if not reviewed:
                 raise HTTPException(status_code=404, detail="Example not found")
             return EvalExample(**reviewed)
+        current_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
         patch_metadata = dict(patch.get("metadata") or {})
-        for key in ("tags", "difficulty", "owner", "review_status"):
+        for key in (
+            "expected_trajectory", "assertions", "tags", "difficulty", "owner", "review_status",
+        ):
             if key in patch:
                 patch_metadata[key] = patch[key]
+        merged_metadata = {**current_metadata, **patch_metadata}
         validation_case = {
-            "case_id": example_id,
-            "split": patch.get("split") or "regression",
-            "input": patch.get("input") or {},
-            "expected_output": patch.get("expected_output") or {},
-            "expected_trajectory": patch.get("expected_trajectory") or {},
-            "assertions": patch.get("assertions") or [],
-            "metadata": patch_metadata,
+            "case_id": merged_metadata.get("case_id") or example_id,
+            "split": patch.get("split") or existing.get("split") or "regression",
+            "input": patch.get("input") if patch.get("input") is not None else existing.get("input") or {},
+            "expected_output": patch.get("expected_output") if patch.get("expected_output") is not None else existing.get("expected_output") or {},
+            "expected_trajectory": merged_metadata.get("expected_trajectory") or {},
+            "assertions": merged_metadata.get("assertions") or [],
+            "metadata": merged_metadata,
         }
         errors = validate_case(validation_case)
         if errors:

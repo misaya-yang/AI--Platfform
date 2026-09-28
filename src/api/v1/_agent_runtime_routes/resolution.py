@@ -296,13 +296,16 @@ def _channel_policy(resolution: dict[str, Any], *, channel: str) -> dict[str, An
     raw = publication.get("policy") if isinstance(publication, dict) else {}
     raw = raw if isinstance(raw, dict) else {}
     allowed_origins = raw.get("allowed_origins")
-    return {
+    policy = {
         "attachments": bool(raw.get("attachments", channel == "preview")),
         "high_risk_tools": bool(raw.get("high_risk_tools", channel == "preview")),
         "allowed_origins": [
             str(origin) for origin in (allowed_origins or []) if isinstance(origin, str)
         ],
     }
+    if isinstance(raw.get("expires_at"), str) and raw["expires_at"]:
+        policy["expires_at"] = raw["expires_at"]
+    return policy
 
 
 def _public_effective_native_capabilities(snapshot: dict[str, Any]) -> list[dict[str, Any]]:

@@ -64,11 +64,15 @@ from ._agent_runtime_routes.core import _runtime_enabled as _runtime_enabled
 from ._agent_runtime_routes.core import _session_manager as _session_manager
 from ._agent_runtime_routes.core import _token_user as _token_user
 from ._agent_runtime_routes.preview import (
+    PreviewSessionRecoveryResponse as PreviewSessionRecoveryResponse,
+)
+from ._agent_runtime_routes.preview import (
     create_preview_session as create_preview_session,
 )
 from ._agent_runtime_routes.preview import (
     create_version_preview_session as create_version_preview_session,
 )
+from ._agent_runtime_routes.preview import get_preview_session as get_preview_session
 from ._agent_runtime_routes.published import (
     create_published_session as create_published_session,
 )
@@ -373,6 +377,12 @@ router.add_api_route(
     methods={"POST"},
     response_model=AgentRuntimeSessionResponse,
     status_code=201,
+)
+router.add_api_route(
+    "/agents/{agent_id}/preview/sessions/{session_id}",
+    get_preview_session,
+    methods={"GET"},
+    response_model=PreviewSessionRecoveryResponse,
 )
 router.add_api_route(
     "/agents/{agent_id}/preview/chat/stream",

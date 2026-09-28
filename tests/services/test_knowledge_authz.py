@@ -117,6 +117,34 @@ async def test_resolve_allows_full_grant_and_normalizes_bindings():
 
 
 @pytest.mark.asyncio
+async def test_anonymous_agent_resolution_attests_reader_and_rejects_tenant_kb():
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["type"] = request.headers["X-User-Type"]
+        seen["tier"] = request.headers["X-User-Tier"]
+        seen["roles"] = request.headers["X-User-Roles"]
+        seen["signature"] = request.headers["X-Gateway-Secret"]
+        return httpx.Response(200, json={"allowed_dataset_ids": ["kb-public"]})
+
+    resolver = _attach_mock_transport(KnowledgeServiceAgentKnowledgeResolver(), handler)
+    with pytest.raises(AgentKnowledgeAuthorizationError):
+        await resolver.resolve(
+            tenant_id="tenant-a",
+            user_id="agent-embed:opaque",
+            bindings=[{"dataset_id": "kb-public"}, {"dataset_id": "kb-tenant"}],
+            authenticated=False,
+            roles=["admin"],
+            is_tenant_admin=True,
+        )
+    assert seen["type"] == "anonymous"
+    assert seen["tier"] == "anonymous"
+    assert seen["roles"] == "guest"
+    assert seen["signature"].startswith("v2:")
+    await resolver.close()
+
+
+@pytest.mark.asyncio
 async def test_resolve_tenant_admin_sends_signature_bound_admin_tier():
     seen: dict = {}
 

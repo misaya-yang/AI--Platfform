@@ -1,6 +1,6 @@
 {
   "baseline_id": "2026_08_post_kb_v1",
-  "epoch": 6,
+  "epoch": 7,
   "changes": [
     {
       "sequence": 1,
@@ -132,6 +132,26 @@
       "resume_handler": null,
       "repair_handler": null,
       "notes": "AR-06: public shares retain their legacy audience by default; internal shares require a private JSON object source scope. New Gateway readers must enforce audience before internal writes are enabled."
+    },
+    {
+      "sequence": 7,
+      "name": "agent_publication_expiry",
+      "file": "007_agent_publication_expiry.sql",
+      "sha256": "40e352e8b71e5105554f38bdebb01e02aff65ba13cbd619b97456c9496c97132",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('gateway.agent_publications') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='gateway' AND table_name='agent_publications' AND column_name='expires_at')"
+      ],
+      "postconditions": [
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='gateway' AND table_name='agent_publications' AND column_name='expires_at' AND data_type='timestamp with time zone')"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R3 D03/AG-06: additive authoritative expiry for future public Agent publications; legacy/internal NULL remains compatible. Migrate before starting new Gateway readers."
     }
   ]
 }

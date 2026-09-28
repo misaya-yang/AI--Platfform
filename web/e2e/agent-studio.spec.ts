@@ -125,6 +125,15 @@ interface HarnessState {
   currentName: string;
   currentDescription: string;
   createdSpec: typeof baseSpec | null;
+  previewSessions: Record<string, {
+    pin: { session_id: string; agent_id: string; agent_version_id: string | null; draft_revision: number | null; channel: "preview"; request_id: string };
+    messages: Array<{ role: "user" | "assistant"; content: string; metadata: { runtime_run_id: string } }>;
+  }>;
+  previewRuns: Record<string, { sessionId: string; status: "succeeded" }>;
+  previewRunCount: number;
+  previewPinReads: string[];
+  previewHistoryReads: string[];
+  previewArtifactReads: string[];
 }
 
 function json(body: unknown, status = 200) {
@@ -236,20 +245,58 @@ async function fulfillAgentApi(route: Route, state: HarnessState, options: Harne
   if (path === `/api/v1/agents/${AGENT_ID}/preview/sessions` && method === "POST") {
     if (options.previewFailure) return route.fulfill(json({ detail: { ...options.previewFailure, request_id: "preview-failure-request" } }, options.previewFailure.status));
     state.draftSessions += 1;
-    return route.fulfill(json({ session_id: `draft-session-${state.draftSessions}`, agent_id: AGENT_ID, agent_version_id: null, draft_revision: state.draftRevision, publication_id: null, channel: "preview", runtime_fingerprint: "sha256:draft", request_id: "draft-session-request" }, 201));
+    const sessionId = `draft-session-${state.draftSessions}`;
+    state.previewSessions[sessionId] = {
+      pin: { session_id: sessionId, agent_id: AGENT_ID, agent_version_id: null, draft_revision: state.draftRevision, channel: "preview", request_id: "draft-session-request" },
+      messages: [],
+    };
+    return route.fulfill(json({ ...state.previewSessions[sessionId].pin, publication_id: null, runtime_fingerprint: "sha256:draft" }, 201));
   }
 
   if (path === `/api/v1/agents/${AGENT_ID}/versions/${VERSION_ID}/preview/sessions` && method === "POST") {
     state.versionSessions += 1;
-    return route.fulfill(json({ session_id: `version-session-${state.versionSessions}`, agent_id: AGENT_ID, agent_version_id: VERSION_ID, draft_revision: null, publication_id: null, channel: "preview", runtime_fingerprint: "sha256:version", request_id: "version-session-request" }, 201));
+    const sessionId = `version-session-${state.versionSessions}`;
+    state.previewSessions[sessionId] = {
+      pin: { session_id: sessionId, agent_id: AGENT_ID, agent_version_id: VERSION_ID, draft_revision: null, channel: "preview", request_id: "version-session-request" },
+      messages: [],
+    };
+    return route.fulfill(json({ ...state.previewSessions[sessionId].pin, publication_id: null, runtime_fingerprint: "sha256:version" }, 201));
+  }
+
+  const previewPin = path.match(new RegExp(`^/api/v1/agents/${AGENT_ID}/preview/sessions/([^/]+)$`));
+  if (previewPin && method === "GET") {
+    const session = state.previewSessions[previewPin[1]];
+    if (!session) throw new Error(`Preview recovery requested an unknown session: ${previewPin[1]}`);
+    state.previewPinReads.push(previewPin[1]);
+    return route.fulfill(json(session.pin));
   }
 
   if (path.endsWith("/preview/chat/stream") && method === "POST") {
+    const body = request.postDataJSON();
+    const session = state.previewSessions[body.session_id];
+    if (!session) throw new Error(`Preview stream requested an unknown session: ${body.session_id}`);
+    const versionTarget = path.includes(`/versions/${VERSION_ID}/`);
+    if (session.pin.agent_version_id !== (versionTarget ? VERSION_ID : null)) {
+      throw new Error(`Preview stream target does not match pinned session: ${body.session_id}`);
+    }
+    if (!versionTarget && body.draft_revision !== session.pin.draft_revision) {
+      throw new Error(`Preview stream revision does not match pinned session: ${body.session_id}`);
+    }
+    state.previewRunCount += 1;
+    const runId = `00000000-0000-4000-8000-${String(state.previewRunCount).padStart(12, "0")}`;
+    const answer = "Billing issue · duplicate charge. Route this request to Billing review.";
+    state.previewRuns[runId] = { sessionId: body.session_id, status: "succeeded" };
+    session.messages.push(
+      { role: "user", content: body.message, metadata: { runtime_run_id: runId } },
+      { role: "assistant", content: answer, metadata: { runtime_run_id: runId } },
+    );
     const stream = [
+      { event_type: "run_started", data: { run_id: runId } },
       { event_type: "text_delta", data: { content: "Billing issue · duplicate charge. " } },
       { event_type: "text_delta", data: { content: "Route this request to Billing review." } },
       { event_type: "tool_call_start", data: { tool_name: "lookup_account", status: "allowed" } },
       { event_type: "context_retrieved", data: { dataset_name: "Refund policy", citation_count: 2 } },
+      { event_type: "run_finished", data: { status: "succeeded" } },
     ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
     return route.fulfill({ status: 200, contentType: "text/event-stream", body: stream });
   }
@@ -282,6 +329,12 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     currentName: agents[0].name,
     currentDescription: agents[0].description,
     createdSpec: null,
+    previewSessions: {},
+    previewRuns: {},
+    previewRunCount: 0,
+    previewPinReads: [],
+    previewHistoryReads: [],
+    previewArtifactReads: [],
   };
 
   await page.route("**/api/v1/**", async (route) => {
@@ -290,6 +343,25 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     const path = url.pathname;
     if (path === "/api/v1/auth/me") return route.fulfill(json({ user_id: "agent-studio-user", email: "agent-studio@example.com", display_name: "Agent Studio User", roles: ["user"], permissions: ["console:dashboard:view", "conversation:playground:access", "console:eval:view"], effective_permissions: ["console:dashboard:view", "conversation:playground:access", "console:eval:view"], tier: "normal", force_password_change: false }));
     if (path.startsWith("/api/v1/agents")) return fulfillAgentApi(route, state, options);
+    const history = path.match(/^\/api\/v1\/assistant\/sessions\/([^/]+)\/history$/);
+    if (history && request.method() === "GET") {
+      const session = state.previewSessions[history[1]];
+      if (!session) throw new Error(`History requested outside a pinned Preview session: ${history[1]}`);
+      state.previewHistoryReads.push(history[1]);
+      return route.fulfill(json({ session_id: history[1], messages: session.messages, total: session.messages.length }));
+    }
+    const artifacts = path.match(/^\/api\/v1\/assistant\/sessions\/([^/]+)\/artifacts$/);
+    if (artifacts && request.method() === "GET") {
+      if (!state.previewSessions[artifacts[1]]) throw new Error(`Artifacts requested outside a pinned Preview session: ${artifacts[1]}`);
+      state.previewArtifactReads.push(artifacts[1]);
+      return route.fulfill(json({ artifacts: [], total: 0 }));
+    }
+    const runStatus = path.match(/^\/api\/v1\/assistant\/runs\/([^/]+)$/);
+    if (runStatus && request.method() === "GET") {
+      const run = state.previewRuns[runStatus[1]];
+      if (!run) throw new Error(`Run status requested outside a pinned Preview session: ${runStatus[1]}`);
+      return route.fulfill(json({ run: { run_id: runStatus[1], session_id: run.sessionId, status: run.status, harness_thread_id: null } }));
+    }
     if (path === "/api/v1/assistant/models") return route.fulfill(json({ models: [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope", context_window: 131072, max_output_tokens: 8192, supports_vision: true, supports_tools: true }] }));
     if (path === "/api/v1/assistant/datasets") return route.fulfill(json({ datasets: [] }));
     if (path === "/api/v1/assistant/local-nodes" && request.method() === "GET") {
@@ -771,6 +843,30 @@ test.describe("Agent Studio workbench", () => {
     await page.getByRole("button", { name: "Clear session" }).click();
     await expect(page.getByText("Start an isolated Preview session")).toBeVisible();
     await assertNoBlockingA11yIssues(page, ["main"]);
+    assertHappy();
+  });
+
+  test("restores only the pinned Preview session after refresh", async ({ page }) => {
+    const assertHappy = watchHappyPath(page);
+    const state = await installHarness(page);
+    await page.goto(`/agents/${AGENT_ID}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".agent-preview-header").getByRole("button", { name: "New session" }).click();
+    await page.getByLabel("Message this agent").fill("Classify my duplicate charge.");
+    await page.getByRole("button", { name: "Send Preview message" }).click();
+    await expect(page.getByText("Billing issue · duplicate charge. Route this request to Billing review.")).toBeVisible();
+    await expect(page.locator(".agent-preview-header").getByRole("button", { name: "New session" })).toBeEnabled();
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Classify my duplicate charge.")).toBeVisible();
+    await expect(page.getByText("Billing issue · duplicate charge. Route this request to Billing review.")).toBeVisible();
+    await expect(page.getByText("New isolated session · Draft r8")).toBeVisible();
+    expect(state.draftSessions).toBe(1);
+    expect(state.previewPinReads.length).toBeGreaterThan(0);
+    expect(state.previewPinReads.every((id) => id === "draft-session-1")).toBe(true);
+    expect(state.previewHistoryReads.length).toBeGreaterThan(0);
+    expect(state.previewHistoryReads.every((id) => id === "draft-session-1")).toBe(true);
+    expect(state.previewArtifactReads.every((id) => id === "draft-session-1")).toBe(true);
+    expect(state.previewArtifactReads.length).toBeGreaterThan(0);
     assertHappy();
   });
 

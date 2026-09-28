@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.comm.client import InternalServiceHTTPError
 from ai_gateway_core.knowledge import KnowledgeClientLike
 from ai_gateway_core.knowledge.proxy_client import KBProxyClient
@@ -108,6 +109,43 @@ async def test_document_authorization_uses_signed_identity_and_rejects_unrequest
             await client.authorize_documents(actor, "dataset-a", ["document-b"])
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_anonymous_kb_proxy_identity_cannot_retain_admin_headers() -> None:
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.headers))
+        return httpx.Response(200, json={"allowed_document_ids": []})
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        gateway_secret=GatewaySecret(
+            secret="anonymous-kb-proxy-test-secret",
+            caller_service="gateway",
+            audience="knowledge-service",
+            allowed_path_prefixes=("/api/v1",),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    actor = SimpleNamespace(
+        user_id="agent-embed:opaque",
+        tenant_id="tenant-a",
+        tier="admin",
+        roles=["admin"],
+        user_type="user",
+        is_authenticated=False,
+    )
+    try:
+        assert await client.authorize_documents(actor, "dataset-a", ["doc-a"]) == set()
+    finally:
+        await client.close()
+
+    assert seen["x-user-type"] == "anonymous"
+    assert seen["x-user-tier"] == "anonymous"
+    assert seen["x-user-roles"] == "guest"
+    assert seen["x-gateway-secret"].startswith("v2:")
 
 
 @pytest.mark.asyncio

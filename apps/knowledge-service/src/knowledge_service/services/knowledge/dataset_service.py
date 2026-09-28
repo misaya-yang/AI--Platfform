@@ -1339,7 +1339,7 @@ class DatasetService:
                 "another dataset index deletion target is already pending"
             )
 
-        if not user.is_authenticated:
+        if not bool(getattr(user, "is_authenticated", False)):
             raise PermissionDeniedError("Authentication required")
 
         if deletion_confirmed is not True:
@@ -1625,6 +1625,8 @@ class DatasetService:
     ) -> str | None:
         if dataset.get("is_archived") and not allow_archived_owner:
             return None
+        if not user.is_authenticated:
+            return "viewer" if str(dataset.get("visibility") or "").lower() == "public" else None
         dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
         user_tenant_id = str(user.tenant_id or "").strip()
         same_tenant = bool(

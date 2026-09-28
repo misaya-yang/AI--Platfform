@@ -126,6 +126,7 @@ export interface AgentChannelPolicy {
   attachments: boolean;
   high_risk_tools: boolean;
   allowed_origins: string[];
+  expires_at?: string | null;
   requests_per_minute?: number;
   requests_per_day?: number;
   ip_requests_per_minute?: number;
@@ -269,6 +270,7 @@ export interface AgentPublication {
   version_spec_hash?: string | null;
   auth_mode: AgentAuthMode;
   policy: AgentChannelPolicy;
+  expires_at?: string | null;
   status: "draft" | "active" | "disabled" | "degraded";
   created_by: string;
   updated_by: string;

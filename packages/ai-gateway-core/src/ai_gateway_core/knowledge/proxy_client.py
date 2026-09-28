@@ -174,10 +174,22 @@ class KBProxyClient:
         """
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if user:
-            headers["X-User-Id"] = getattr(user, "user_id", "") or ""
+            user_id = str(getattr(user, "user_id", "") or "")
+            tier = str(getattr(user, "tier", "") or "")
+            roles = list(getattr(user, "roles", []) or [])
+            user_type = str(getattr(user, "user_type", "") or "user")
+            anonymous = (
+                getattr(user, "is_authenticated", True) is False
+                or user_id.lower() == "anonymous"
+                or tier.lower() == "anonymous"
+                or user_type.lower() in {"anonymous", "guest"}
+                or "guest" in {str(role).lower() for role in roles}
+            )
+            headers["X-User-Id"] = user_id
             headers["X-Tenant-Id"] = getattr(user, "tenant_id", "") or ""
-            headers["X-User-Tier"] = getattr(user, "tier", "") or ""
-            headers["X-User-Roles"] = ",".join(getattr(user, "roles", []) or [])
+            headers["X-User-Tier"] = "anonymous" if anonymous else tier
+            headers["X-User-Roles"] = "guest" if anonymous else ",".join(roles)
+            headers["X-User-Type"] = "anonymous" if anonymous else user_type
         return headers
 
     async def health_check(self) -> bool:

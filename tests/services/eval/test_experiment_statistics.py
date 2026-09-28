@@ -111,7 +111,7 @@ def _cases(
                     "case_id": case_id,
                     "trial_index": 1,
                     "trace_id": f"trace-{index}",
-                    "execution_succeeded": passed,
+                    "execution_succeeded": True,
                     "behavior_pass": passed,
                     "aggregate_score": 0.0 if not passed else 0.9,
                     "latency_ms": latency,
@@ -204,6 +204,38 @@ async def test_compare_blocks_critical_quality_and_execution_regressions() -> No
         "quality_regression",
         "execution_error_regression",
     }
+
+
+@pytest.mark.asyncio
+async def test_compare_does_not_call_execution_fault_a_quality_regression() -> None:
+    baseline = _run("baseline")
+    candidate = _run("candidate", errors=1)
+    candidate["status"] = "failed"
+    candidate_cases = _cases()
+    candidate_cases[0] = {
+        **candidate_cases[0],
+        "status": "failed",
+        "observed_metrics": {
+            **candidate_cases[0]["observed_metrics"],
+            "execution_succeeded": False,
+            "behavior_pass": None,
+            "aggregate_score": None,
+            "error": "provider unavailable",
+        },
+    }
+    repository = _ComparisonRepository(baseline, candidate, _cases(), candidate_cases)
+
+    comparison = await repository.compare_experiment_runs(
+        tenant_id="tenant-a", baseline_run_id="baseline", candidate_run_id="candidate",
+    )
+
+    assert comparison is not None
+    assert comparison["case_diffs"][0]["status"] == "unscored"
+    assert comparison["case_diffs"][0]["candidate_execution_status"] == "failed"
+    assert comparison["statistics"]["paired_case_count"] == 11
+    assert comparison["statistics"]["evidence_status"] == "unverifiable"
+    assert "unscored_case_results" in comparison["compatibility"]["reasons"]
+    assert comparison["gate"]["status"] == "fail"
 
 
 @pytest.mark.asyncio

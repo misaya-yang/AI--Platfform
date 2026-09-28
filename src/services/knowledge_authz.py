@@ -16,7 +16,7 @@ and the caller grants the agent no knowledge bindings.
 Endpoint contract (knowledge-service side, shipped):
 
     POST /api/v1/internal/knowledge/datasets/authorize
-    headers: X-Tenant-Id, X-User-Id, X-User-Roles, X-User-Tier +
+    headers: X-Tenant-Id, X-User-Id, X-User-Type, X-User-Roles, X-User-Tier +
              X-Gateway-Secret (HMAC v2)
     body:    {"dataset_ids": [...], "is_tenant_admin": bool}
     200:     {"allowed_dataset_ids": [...]}
@@ -25,6 +25,8 @@ Endpoint contract (knowledge-service side, shipped):
 identity says the caller is a tenant admin; ``is_tenant_admin`` in the body
 is advisory on the KS side. Headers are bound into the HMAC signature, so a
 forged tier can never widen access.
+Anonymous Agent readers carry ``X-User-Type: anonymous`` and can only use
+public Datasets even though the Agent's real tenant ID is present.
 """
 
 from __future__ import annotations
@@ -150,6 +152,7 @@ class KnowledgeServiceAgentKnowledgeResolver:
         bindings: list[dict[str, Any]],
         is_tenant_admin: bool = False,
         roles: list[str] | None = None,
+        authenticated: bool = True,
         **_kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return the bindings the caller is authorized for, or fail closed."""
@@ -169,10 +172,14 @@ class KnowledgeServiceAgentKnowledgeResolver:
         headers = {
             "X-Tenant-Id": str(tenant_id or ""),
             "X-User-Id": str(user_id or ""),
+            "X-User-Type": "user" if authenticated else "anonymous",
         }
-        if roles:
+        if not authenticated:
+            headers["X-User-Tier"] = "anonymous"
+            headers["X-User-Roles"] = "guest"
+        elif roles:
             headers["X-User-Roles"] = ",".join(str(role) for role in roles)
-        if is_tenant_admin:
+        if is_tenant_admin and authenticated:
             # KS grants admin scope exclusively from signature-bound identity
             # headers (X-User-Tier / X-User-Roles); the body flag is advisory.
             headers["X-User-Tier"] = "admin"
@@ -184,7 +191,7 @@ class KnowledgeServiceAgentKnowledgeResolver:
                 headers=headers,
                 json={
                     "dataset_ids": dataset_ids,
-                    "is_tenant_admin": bool(is_tenant_admin),
+                    "is_tenant_admin": bool(is_tenant_admin and authenticated),
                 },
             )
         except (InternalServiceHTTPError, httpx.HTTPError, ValueError) as exc:

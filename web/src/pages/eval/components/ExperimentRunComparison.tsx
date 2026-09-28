@@ -219,6 +219,7 @@ export function ExperimentRunComparison({
               <span>{t("eval.comparison.pairedCases")}: <strong>{String(statistics.paired_case_count ?? statistics.sample_size ?? "—")}</strong></span>
               <span>{t("eval.comparison.winTieLoss")}: <strong>{`${String(statistics.wins ?? "—")} / ${String(statistics.ties ?? "—")} / ${String(statistics.losses ?? "—")}`}</strong></span>
               <span>{t("eval.comparison.confidenceInterval")}: <strong>{confidenceInterval === undefined ? "—" : JSON.stringify(confidenceInterval)}</strong></span>
+              <span>Cases: <strong>{String(comparison.regression_summary?.improved_case_count ?? 0)} improved · {String(comparison.regression_summary?.regressed_case_count ?? 0)} regressed · {String(comparison.regression_summary?.same_failure_case_count ?? 0)} same failure · {String(comparison.regression_summary?.unscored_case_count ?? 0)} unscored</strong></span>
             </div>
           ) : null}
         </>
@@ -264,6 +265,7 @@ export function ExperimentRunComparison({
             return (
               <article key={`${String(item.case_id || index)}:${candidateTraceId}`}>
                 <div><Tag color={statusColor(status)}>{status}</Tag><strong>{String(item.case_id || `case-${index + 1}`)}</strong></div>
+                <small>Execution: {String(item.baseline_execution_status || "unknown")} → {String(item.candidate_execution_status || "unknown")} · Quality: {String(item.baseline_quality_status || "unknown")} → {String(item.candidate_quality_status || "unknown")}</small>
                 <p>{String(item.failure_reason || item.summary || item.output_diff || t("eval.comparison.noCaseDetail"))}</p>
                 {toolDiffs.length ? <small>{t("eval.comparison.toolChanges", { count: toolDiffs.length })}</small> : null}
                 {ragDiffs.length ? <small>{t("eval.comparison.ragChanges", { count: ragDiffs.length })}</small> : null}

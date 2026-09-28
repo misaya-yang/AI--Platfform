@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useSearchParams } from "react-router-dom";
 
 import {
+  cancelEvalExperimentRun,
   createEvalDataset,
   createEvalEvaluator,
   createEvalExampleFromTrace,
@@ -41,6 +42,7 @@ import {
   listEvalExamples,
   listEvalExperiments,
   promoteEvalExperimentBaseline,
+  retryFailedEvalExperimentCases,
   runEvalExperiment,
   runEvalEvaluatorAsync,
   updateEvalExample,
@@ -371,6 +373,7 @@ export function EvalPage() {
   const [runComparison, setRunComparison] = useState<EvalExperimentRunComparisonResponse | null>(null);
   const [gateResult, setGateResult] = useState<EvalGateDryRunResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
+  const retryRequestKeysRef = useRef<Map<string, string>>(new Map());
   const [runMode, setRunMode] = useState<EvalExperimentRunMode>("live_candidate");
   const [repetitions, setRepetitions] = useState(3);
   const [systemPromptOverride, setSystemPromptOverride] = useState("");
@@ -905,6 +908,56 @@ export function EvalPage() {
     onError: (error) => message.error(toError(error).message),
   });
 
+  const cancelRunMutation = useMutation({
+    mutationFn: async () => {
+      if (!latestRun) throw new Error("Select a run first");
+      return cancelEvalExperimentRun(latestRun.run_id);
+    },
+    onSuccess: async (result) => {
+      if (result.runtime_interrupt_pending > 0) {
+        message.warning("Run cancelled; some runtime interrupts remain unconfirmed");
+      } else {
+        message.success("Run cancelled");
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["eval", "run", queuedRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["eval", "run-results", queuedRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] }),
+      ]);
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const retryFailedCasesMutation = useMutation({
+    mutationFn: async (payload: {
+      sourceRunId: string;
+      caseIds: string[];
+      idempotencyKey: string;
+      selectionKey: string;
+    }) => {
+      return retryFailedEvalExperimentCases(
+        payload.sourceRunId, payload.caseIds, true, payload.idempotencyKey,
+      );
+    },
+    onSuccess: async (batch, payload) => {
+      retryRequestKeysRef.current.delete(payload.selectionKey);
+      try { sessionStorage.removeItem(payload.selectionKey); } catch { /* Storage may be unavailable. */ }
+      const runId = batch.jobs[0]?.run_id;
+      if (runId) {
+        setQueuedRunId(runId);
+        setCandidateRunId(runId);
+        setRunComparison(null);
+        setGateResult(null);
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("run_id", runId);
+        setSearchParams(nextParams, { replace: true });
+      }
+      message.success("Separate retry run queued");
+      await queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] });
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
   const examplesExportMutation = useMutation({
     mutationFn: async () => {
       if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
@@ -1088,13 +1141,8 @@ export function EvalPage() {
   const runResultsQuery = useQuery({
     queryKey: ["eval", "run-results", queuedRunId],
     queryFn: () => getEvalExperimentRunResults(queuedRunId || ""),
-    enabled: Boolean(
-      queuedRunId
-      && latestRun
-      && latestRun.run_id === queuedRunId
-      && latestRun.status !== "queued"
-      && latestRun.status !== "running"
-    ),
+    enabled: Boolean(queuedRunId && latestRun?.run_id === queuedRunId),
+    refetchInterval: latestRun?.status === "queued" || latestRun?.status === "running" ? 2_000 : false,
     staleTime: 10_000,
   });
 
@@ -1557,7 +1605,9 @@ export function EvalPage() {
         column={{ xs: 1, sm: 2, lg: 4 }}
         items={[
           { key: "mode", label: t("eval.workbench.runMode", "Run mode"), children: runMode },
-          { key: "calls", label: t("eval.workbench.estimatedCalls", "Estimated calls"), children: effectiveRunDatasetId ? String((examplesQuery.data?.total || 0) * (runMode === "live_candidate" ? repetitions : 1)) : "1" },
+          { key: "calls", label: t("eval.workbench.estimatedCalls", "Estimated calls"), children: effectiveRunDatasetId ? `Up to ${(examplesQuery.data?.total || 0) * (runMode === "live_candidate" ? repetitions : 1)} listed cases; only approved cases run` : "1 stored trace" },
+          { key: "cost", label: "Cost", children: runMode === "live_candidate" ? "Actual cost unknown until usage is reported" : "Re-score uses the selected judge; cost depends on usage" },
+          { key: "datasetVersion", label: "Dataset version", children: activeDataset?.version || "—" },
           { key: "baseline", label: t("eval.workbench.currentBaseline", "Current baseline"), children: activeExperiment?.baseline_run_id || t("eval.workbench.noBaseline", "Not set") },
           { key: "fingerprint", label: t("eval.workbench.candidateFingerprint", "Candidate fingerprint"), children: String(asRecord(latestRun?.metrics?.actual_fingerprint).system_prompt_hash || latestRun?.candidate_fingerprint?.prompt_override_hash || latestRun?.runtime_fingerprint?.prompt_hash || activeExperiment?.target_config?.prompt_hash || "—") },
         ]}
@@ -1639,6 +1689,31 @@ export function EvalPage() {
           void runResultsQuery.refetch();
         }}
         onOpenTrace={openRunResultTrace}
+        actionLoading={cancelRunMutation.isPending || retryFailedCasesMutation.isPending}
+        onCancel={canRunEvaluations ? () => modal.confirm({
+          title: "Cancel this evaluation run?",
+          content: "Cancellation stops new cases. Cases already started may still need runtime interruption.",
+          okText: "Cancel run",
+          okButtonProps: { danger: true },
+          onOk: () => cancelRunMutation.mutateAsync(),
+        }) : undefined}
+        onRetryFailedCases={canRunEvaluations ? (caseIds) => {
+          if (!latestRun) return;
+          const selectionKey = `eval:retry:${JSON.stringify([latestRun.run_id, [...caseIds].sort()])}`;
+          let storedKey: string | null = null;
+          try { storedKey = sessionStorage.getItem(selectionKey); } catch { /* Use the in-memory fallback. */ }
+          const idempotencyKey = storedKey || retryRequestKeysRef.current.get(selectionKey) || crypto.randomUUID();
+          retryRequestKeysRef.current.set(selectionKey, idempotencyKey);
+          try { sessionStorage.setItem(selectionKey, idempotencyKey); } catch { /* Use the in-memory fallback. */ }
+          modal.confirm({
+            title: `Retry ${caseIds.length} selected failed case${caseIds.length === 1 ? "" : "s"}?`,
+            content: "This creates a separate one-attempt run using frozen inputs and can incur model cost. Only failures before runtime dispatch or completed model-only cases with no tool calls can be replayed. Cases with tool effects or uncertain dispatch are blocked for manual reconciliation.",
+            okText: "Confirm new attempt",
+            onOk: () => retryFailedCasesMutation.mutateAsync({
+              sourceRunId: latestRun.run_id, caseIds, idempotencyKey, selectionKey,
+            }),
+          });
+        } : undefined}
       />
       <details className="eval-run-advanced">
         <summary>{t("eval.workbench.createOrConfigure", "Create or configure an experiment")}</summary>

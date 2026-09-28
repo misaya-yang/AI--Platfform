@@ -40,6 +40,31 @@ def test_review_selection_preserves_legacy_and_requires_approval_and_promotion()
 
 
 @pytest.mark.asyncio
+async def test_rescore_uses_frozen_manifest_after_dataset_changes() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = []
+    resolution = await EvaluatorExecutor(repo)._resolve_targets(
+        tenant_id="tenant-a",
+        job_payload={
+            "dataset_id": "dataset-1",
+            "target_snapshot": {
+                "dataset_manifest": [{
+                    "example_id": "frozen-example",
+                    "source_trace_id": "trace-1",
+                    "expected_output": {"contains": ["original answer"]},
+                    "metadata": {"case_id": "frozen-case"},
+                }],
+            },
+        },
+    )
+
+    assert resolution.expected_count == 1
+    assert resolution.targets[0]["case_id"] == "frozen-case"
+    assert resolution.targets[0]["expected_output"] == {"contains": ["original answer"]}
+    assert not any(call[0] == "list_example_manifest" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_live_worker_rejects_already_queued_kb_case_before_candidate_dispatch() -> None:
     class LiveRepo(FakeEvalRepository):
         async def get_experiment_run(self, **_kwargs: Any) -> dict[str, Any]:
@@ -2009,7 +2034,7 @@ async def test_run_summary_excludes_created_review_scores_from_valid_aggregate()
     )
 
     assert result.scores_written == 1
-    assert result.score_summary["average_score"] == 0.0
+    assert result.score_summary["average_score"] is None
     assert result.score_summary["scored_count"] == 0
     assert result.score_summary["review_count"] == 1
 

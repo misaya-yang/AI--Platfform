@@ -752,9 +752,9 @@ class EvaluatorExecutor:
             if not score_payloads or persisted_payload_count != len(score_payloads):
                 skipped_count += 1
 
-        avg_score = sum(scores) / len(scores) if scores else 0.0
+        avg_score = sum(scores) / len(scores) if scores else None
         summary = {
-            "average_score": round(avg_score, 4),
+            "average_score": round(avg_score, 4) if avg_score is not None else None,
             "scored_count": len(scores),
             "review_count": sum(1 for label in created_labels if label == "review"),
             "target_count": len(targets),
@@ -880,7 +880,18 @@ class EvaluatorExecutor:
                 if isinstance(run_case.get("observed_metrics"), dict)
                 else {}
             )
-            if run_case.get("status") == "succeeded" and observed:
+            observed = {
+                "case_id": run_case.get("case_id"),
+                "trial_index": int(run_case.get("trial_index") or 1),
+                "critical": bool((run_case.get("metadata") or {}).get("critical")),
+                **observed,
+            }
+            if run_case.get("status") == "succeeded":
+                trial_results.append(observed)
+                continue
+            if run_case.get("status") in {"failed", "skipped"}:
+                # A worker reclaim must not replay a trial whose side effects
+                # may already have happened. Explicit retry creates a new run.
                 trial_results.append(observed)
                 continue
             await self.repository.update_experiment_run_case(
@@ -888,6 +899,9 @@ class EvaluatorExecutor:
                 run_case_id=run_case_id,
                 status="running",
             )
+            trace_id: str | None = None
+            execution_succeeded = False
+            target: dict[str, Any] | None = None
             try:
                 candidate = await self.candidate_run(
                     tenant_id=tenant_id,
@@ -947,6 +961,9 @@ class EvaluatorExecutor:
                     target["total_tokens"] = None
                     target["total_cost_cents"] = None
                 trace_id = str(target["trace_id"])
+                execution_succeeded = target.get("status") == "succeeded"
+                if not execution_succeeded:
+                    raise RuntimeError(f"Candidate execution status: {target.get('status') or 'unknown'}")
                 contract = (
                     candidate.get("contract_result")
                     if isinstance(candidate.get("contract_result"), dict)
@@ -1079,7 +1096,7 @@ class EvaluatorExecutor:
                     "trial_index": int(run_case.get("trial_index") or 1),
                     "critical": bool((run_case.get("metadata") or {}).get("critical")),
                     "trace_id": trace_id,
-                    "execution_succeeded": target.get("status") == "succeeded",
+                    "execution_succeeded": execution_succeeded,
                     "deterministic_pass": contract_pass,
                     "trajectory_pass": contract.get("trajectory_pass") is True,
                     "stateful_expected": stateful_expected,
@@ -1124,27 +1141,36 @@ class EvaluatorExecutor:
                     "case_id": run_case.get("case_id"),
                     "trial_index": int(run_case.get("trial_index") or 1),
                     "critical": bool((run_case.get("metadata") or {}).get("critical")),
-                    "execution_succeeded": False,
-                    "trajectory_pass": False,
+                    "execution_succeeded": execution_succeeded,
+                    "trace_id": trace_id,
+                    "execution_outcome": "judge_failed" if execution_succeeded else "execution_failed",
+                    "tool_trajectory": _observed_trajectory(target)[0]
+                    if execution_succeeded and target else None,
+                    "exit_reason": (
+                        ((target.get("metadata") or {}).get("runtime_trajectory") or {}).get("exit_reason")
+                        if execution_succeeded and target else None
+                    ),
+                    "trajectory_pass": None,
                     "stateful_expected": isinstance(
                         (run_case.get("expected_trajectory") or {}).get("stateful"), dict
                     ),
-                    "stateful_pass": False,
-                    "behavior_pass": False,
+                    "stateful_pass": None,
+                    "behavior_pass": None,
                     "error": message,
                 }
                 await self.repository.update_experiment_run_case(
                     tenant_id=tenant_id,
                     run_case_id=run_case_id,
                     status="failed",
+                    candidate_trace_id=trace_id,
                     observed_metrics=trial,
                     error_message=message,
                 )
                 trial_results.append(trial)
 
         attempted = len(trial_results)
-        completed = sum(1 for item in trial_results if item.get("execution_succeeded"))
-        executed_results = [item for item in trial_results if item.get("execution_succeeded")]
+        completed = sum(1 for item in trial_results if item.get("execution_succeeded") is True)
+        executed_results = [item for item in trial_results if item.get("execution_succeeded") is True]
         latencies = (
             [float(item["latency_ms"]) for item in executed_results]
             if executed_results
@@ -1154,8 +1180,20 @@ class EvaluatorExecutor:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in trial_results:
             grouped.setdefault(str(item.get("case_id") or ""), []).append(item)
+        valid_groups = {
+            case_id: items
+            for case_id, items in grouped.items()
+            if items and all(
+                item.get("execution_succeeded") is True
+                and isinstance(item.get("behavior_pass"), bool)
+                and isinstance(item.get("aggregate_score"), int | float)
+                and math.isfinite(float(item["aggregate_score"]))
+                for item in items
+            )
+        }
+        excluded_cases = sorted(set(grouped) - set(valid_groups))
         case_scores: list[float] = []
-        for items in grouped.values():
+        for items in valid_groups.values():
             values = [
                 float(item["aggregate_score"])
                 for item in items
@@ -1163,19 +1201,19 @@ class EvaluatorExecutor:
                 and not isinstance(item.get("aggregate_score"), bool)
                 and math.isfinite(float(item["aggregate_score"]))
             ]
-            case_scores.append(sum(values) / len(values) if values else 0.0)
+            case_scores.append(sum(values) / len(values))
         behavior_passed_cases = sum(
             1
-            for items in grouped.values()
+            for items in valid_groups.values()
             if items and all(item.get("behavior_pass") is True for item in items)
         )
         flaky_cases = sum(
             1
-            for items in grouped.values()
+            for items in valid_groups.values()
             if len({bool(item.get("behavior_pass")) for item in items}) > 1
         )
         critical_cases = [
-            items for items in grouped.values() if any(item.get("critical") for item in items)
+            items for items in valid_groups.values() if any(item.get("critical") for item in items)
         ]
         critical_passed = sum(
             1
@@ -1184,11 +1222,11 @@ class EvaluatorExecutor:
         )
         trajectory_failed = sum(
             1
-            for items in grouped.values()
+            for items in valid_groups.values()
             if not items or not all(item.get("trajectory_pass") is True for item in items)
         )
         stateful_cases = [
-            items for items in grouped.values() if any(item.get("stateful_expected") for item in items)
+            items for items in valid_groups.values() if any(item.get("stateful_expected") for item in items)
         ]
         stateful_failed = sum(
             1
@@ -1196,8 +1234,8 @@ class EvaluatorExecutor:
             if not items or not all(item.get("stateful_pass") is True for item in items)
         )
         hard_blocker_results = {
-            case_id: bool(grouped.get(case_id))
-            and all(item.get("behavior_pass") is True for item in grouped[case_id])
+            case_id: bool(valid_groups.get(case_id))
+            and all(item.get("behavior_pass") is True for item in valid_groups[case_id])
             for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
         }
         hard_blockers_passed = all(hard_blocker_results.values())
@@ -1234,8 +1272,9 @@ class EvaluatorExecutor:
                 else (sorted_latencies[midpoint - 1] + sorted_latencies[midpoint]) / 2
             )
         score_sum = sum(case_scores)
-        overall_score = score_sum / len(grouped) if grouped else 0.0
-        behavior_pass_rate = behavior_passed_cases / len(grouped) if grouped else 0.0
+        quality_case_count = len(valid_groups)
+        overall_score = score_sum / quality_case_count if quality_case_count else None
+        behavior_pass_rate = behavior_passed_cases / quality_case_count if quality_case_count else None
         summary = {
             "schema_version": EVAL_GATE_METRICS_SCHEMA_VERSION,
             "score_sum": score_sum,
@@ -1243,19 +1282,23 @@ class EvaluatorExecutor:
             "average_score": overall_score,
             "behavior_pass_rate": behavior_pass_rate,
             "pass_rate": behavior_pass_rate,
-            "trajectory_case_count": len(grouped),
+            "trajectory_case_count": quality_case_count,
             "trajectory_failed_count": trajectory_failed,
             "trajectory_pass_rate": (
-                (len(grouped) - trajectory_failed) / len(grouped) if grouped else 0.0
+                (quality_case_count - trajectory_failed) / quality_case_count
+                if quality_case_count else None
             ),
             "critical_pass_rate": critical_passed / len(critical_cases)
             if critical_cases
             else None,
             "critical_case_count": len(critical_cases),
             "critical_failed_count": len(critical_cases) - critical_passed,
-            "flaky_rate": round(flaky_cases / len(grouped), 4) if grouped else 0.0,
-            "case_count": len(grouped),
-            "failed_case_count": len(grouped) - behavior_passed_cases,
+            "flaky_rate": round(flaky_cases / quality_case_count, 4) if quality_case_count else None,
+            "case_count": quality_case_count,
+            "expected_case_count": len(grouped),
+            "excluded_case_count": len(excluded_cases),
+            "excluded_case_ids": excluded_cases,
+            "failed_case_count": quality_case_count - behavior_passed_cases,
             "stateful_case_count": len(stateful_cases),
             "stateful_failed_count": stateful_failed,
             "stateful_pass_rate": (
@@ -1269,13 +1312,25 @@ class EvaluatorExecutor:
         metrics = {
             "attempted_trials": attempted,
             "completed_trials": completed,
-            "failed_trials": attempted - completed,
+            "failed_trials": sum(
+                1 for item in trial_results if not isinstance(item.get("behavior_pass"), bool)
+            ),
+            "judge_failed_trials": sum(
+                1 for item in trial_results if item.get("execution_outcome") == "judge_failed"
+            ),
+            "execution_failed_trials": sum(
+                1 for item in trial_results if item.get("execution_outcome") == "execution_failed"
+            ),
             "total_trials": len(run_cases),
+            "unscored_trials": sum(
+                1 for item in trial_results if not isinstance(item.get("behavior_pass"), bool)
+            ),
             "execution_error_rate": round((attempted - completed) / attempted, 4)
             if attempted
             else 1.0,
             "behavior_failure_rate": (
-                round((len(grouped) - behavior_passed_cases) / len(grouped), 4) if grouped else 1.0
+                round((quality_case_count - behavior_passed_cases) / quality_case_count, 4)
+                if quality_case_count else None
             ),
             "latency_p50_ms": round(latency_p50, 2) if latency_p50 is not None else None,
             "latency_p95_ms": round(sorted_latencies[p95_index], 2) if sorted_latencies else None,
@@ -1296,8 +1351,8 @@ class EvaluatorExecutor:
             else {},
             "scores_written": scores_written,
             "gate": {
-                "status": "pass"
-                if _critical_cases_gate_passes(
+                "status": "unavailable" if excluded_cases or not quality_case_count
+                else "pass" if _critical_cases_gate_passes(
                     case_count=len(critical_cases),
                     passed_count=critical_passed,
                 )
@@ -1310,8 +1365,11 @@ class EvaluatorExecutor:
                 else "fail"
             },
         }
-        status = "succeeded" if completed else "failed"
-        error_message = None if status == "succeeded" else "; ".join(infrastructure_errors)[:4000]
+        status = "succeeded" if attempted == len(run_cases) and not excluded_cases else "failed"
+        error_message = None if status == "succeeded" else (
+            "; ".join(infrastructure_errors)[:4000]
+            or f"{len(excluded_cases)} case(s) have no valid quality result"
+        )
         await self.repository.update_experiment_run(
             tenant_id=tenant_id,
             run_id=run_id,
@@ -1354,8 +1412,15 @@ class EvaluatorExecutor:
         if not dataset_id:
             return _TargetResolution()
 
+        target_snapshot = job_payload.get("target_snapshot")
+        frozen_manifest = job_payload.get("dataset_manifest")
+        if frozen_manifest is None and isinstance(target_snapshot, dict):
+            frozen_manifest = target_snapshot.get("dataset_manifest")
         manifest_loader = getattr(self.repository, "list_example_manifest", None)
-        if callable(manifest_loader):
+        if isinstance(frozen_manifest, list):
+            manifest = frozen_manifest
+            expected_count = len(manifest)
+        elif callable(manifest_loader):
             manifest = list(
                 await manifest_loader(
                     tenant_id=tenant_id,

@@ -106,6 +106,44 @@ def test_channel_policy_changes_runtime_gate_but_not_version_identity() -> None:
     assert first["release_identity_hash"] == second["release_identity_hash"]
 
 
+def test_public_expiry_is_bound_to_release_fingerprint_and_normalized_to_utc() -> None:
+    snapshot = _snapshot()
+    snapshot["publication"]["auth_mode"] = "public"
+    snapshot["channel_policy"]["expires_at"] = "2027-01-01T05:00:00+05:00"
+    first = build_agent_version_candidate(
+        resolution=_resolution(),
+        runtime_snapshot=snapshot,
+        channel="hosted",
+        auth_mode="public",
+        channel_policy=snapshot["channel_policy"],
+        dataset_id=None,
+    )
+    normalized = copy.deepcopy(snapshot)
+    normalized["channel_policy"]["expires_at"] = "2027-01-01T00:00:00Z"
+    second = build_agent_version_candidate(
+        resolution=_resolution(),
+        runtime_snapshot=normalized,
+        channel="hosted",
+        auth_mode="public",
+        channel_policy=normalized["channel_policy"],
+        dataset_id=None,
+    )
+    assert first["channel_policy_hash"] == second["channel_policy_hash"]
+    assert first["channel_policy"]["expires_at"] == "2027-01-01T00:00:00+00:00"
+
+    later = copy.deepcopy(snapshot)
+    later["channel_policy"]["expires_at"] = "2027-01-02T00:00:00Z"
+    third = build_agent_version_candidate(
+        resolution=_resolution(),
+        runtime_snapshot=later,
+        channel="hosted",
+        auth_mode="public",
+        channel_policy=later["channel_policy"],
+        dataset_id=None,
+    )
+    assert first["runtime_fingerprint_hash"] != third["runtime_fingerprint_hash"]
+
+
 def test_eval_dataset_content_and_model_authorization_bind_release_identity() -> None:
     model_authorization = build_model_authorization_evidence(
         source="database",

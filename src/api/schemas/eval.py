@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 TraceFamily = Literal["assistant", "langgraph_proxy", "rag"]
 TraceStatus = Literal["running", "succeeded", "failed", "cancelled", "timeout"]
@@ -451,6 +451,11 @@ class EvalExperimentRunCreate(BaseModel):
 
 class EvalExperimentRunBatchResponse(BaseModel):
     jobs: list[EvalAsyncJobResponse] = Field(default_factory=list)
+
+
+class EvalExperimentRetryRequest(BaseModel):
+    case_ids: list[str] = Field(min_length=1, max_length=100)
+    acknowledge_replay: StrictBool
 
 
 class EvalExperimentRunComparisonResponse(BaseModel):

@@ -4,17 +4,25 @@ import copy
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from ai_gateway_contracts.agent_runtime import runtime_sha256
-from ai_gateway_core.eval.agent_version_candidate import build_model_authorization_evidence
+from ai_gateway_core.eval.agent_version_candidate import (
+    AgentReleaseCandidateError,
+    build_model_authorization_evidence,
+)
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentNotFoundError,
     AgentReleaseEvaluationStaleError,
+    AgentReleaseGateError,
     AgentReleaseIdempotencyConflictError,
+    AgentRuntimeUnavailableError,
+    DatabaseAgentRepository,
+    require_public_release_expiry,
 )
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -35,6 +43,61 @@ EVENT_ID = "77777777-7777-4777-8777-777777777777"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def test_public_release_expiry_requires_a_future_aware_deadline() -> None:
+    now = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    assert require_public_release_expiry("private", {}, now=now) is None
+    with pytest.raises(AgentReleaseGateError, match="AGENT_PUBLIC_EXPIRY_REQUIRED"):
+        require_public_release_expiry("public", {}, now=now)
+    with pytest.raises(AgentReleaseGateError, match="AGENT_PUBLIC_EXPIRY_REQUIRED"):
+        require_public_release_expiry("public", {"expires_at": "2026-09-29T00:00:00"}, now=now)
+    with pytest.raises(AgentReleaseGateError, match="AGENT_PUBLIC_EXPIRY_EXPIRED"):
+        require_public_release_expiry("public", {"expires_at": now.isoformat()}, now=now)
+    future = now + timedelta(hours=1)
+    assert require_public_release_expiry(
+        "public", {"expires_at": future.isoformat()}, now=now
+    ) == future
+
+
+async def test_public_runtime_rejects_expired_publication_and_allows_legacy_null() -> None:
+    publication = {
+        "tenant_id": "tenant-a",
+        "agent_id": uuid.UUID(AGENT_ID),
+        "channel": "hosted",
+        "auth_mode": "public",
+        "status": "active",
+        "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+    }
+
+    class Connection:
+        async def fetchrow(self, *_args: Any) -> dict[str, Any]:
+            return publication
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Connection()
+
+    repository = DatabaseAgentRepository(SimpleNamespace(enabled=True, _pool=Pool()))
+
+    async def resolved(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"publication": publication}
+
+    repository._load_channel_runtime_material = resolved  # type: ignore[method-assign]
+    kwargs = {
+        "public_id": str(uuid.uuid4()),
+        "channel": "hosted",
+        "caller_tenant_id": "public",
+        "user_id": "anonymous",
+        "authenticated": False,
+        "is_tenant_admin": False,
+    }
+    with pytest.raises(AgentRuntimeUnavailableError, match="PUBLICATION_EXPIRED"):
+        await repository.resolve_public_channel_runtime(**kwargs)
+
+    publication["expires_at"] = None
+    assert (await repository.resolve_public_channel_runtime(**kwargs))["publication"] is publication
 
 
 def _plain_hash(value: Any) -> str:
@@ -467,9 +530,24 @@ def release_client(monkeypatch: pytest.MonkeyPatch):
     async def build_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
             "schema_version": "agent-runtime/v1",
+            "tenant_id": "tenant-a",
             "agent_id": AGENT_ID,
+            "publication": {"channel": "hosted", "auth_mode": "private"},
             "model": {"id": "qwen3.7-plus", "provider": "dashscope"},
-            "fingerprints": {"spec": "sha256:" + "a" * 64},
+            "instructions": {"prompt_hash": "sha256:" + "b" * 64},
+            "capabilities": [],
+            "knowledge": {"datasets": []},
+            "channel_policy": {
+                "attachments": False,
+                "high_risk_tools": False,
+                "allowed_origins": [],
+            },
+            "fingerprints": {
+                "spec": "sha256:" + "a" * 64,
+                "tool_schema": "sha256:" + "c" * 64,
+                "skills": "sha256:" + "d" * 64,
+                "knowledge_revision": "sha256:" + "e" * 64,
+            },
         }
 
     async def resolve_model_authorization(**_kwargs: Any) -> dict[str, Any]:
@@ -512,6 +590,37 @@ def test_eval_request_rejects_client_owned_gate_fields(release_client) -> None:
 
     assert response.status_code == 422
     assert repository.last_gate is None
+
+
+def test_public_eval_requires_explicit_future_expiry(release_client) -> None:
+    client, repository, _ = release_client
+    path = f"/agents/{AGENT_ID}/evals"
+    public_request = {"draft_revision": 3, "channel": "hosted", "auth_mode": "public"}
+    missing = client.post(path, json=public_request)
+    expired = client.post(
+        path,
+        json={
+            **public_request,
+            "channel_policy": {
+                "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+            },
+        },
+    )
+    internal_with_expiry = client.post(
+        path,
+        json={
+            "draft_revision": 3,
+            "channel_policy": {
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            },
+        },
+    )
+    assert [response.status_code for response in (missing, expired, internal_with_expiry)] == [
+        422,
+        422,
+        422,
+    ]
+    assert repository.candidate_resolution_calls == 0
 
 
 @pytest.mark.asyncio
@@ -563,15 +672,55 @@ async def test_release_authorization_receives_the_resolved_default_model() -> No
     assert evidence["provider_id"] == "resolved-provider"
 
 
+async def test_tenant_reader_cannot_authorize_owner_premium_model() -> None:
+    class Resolver:
+        def resolve(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "id": kwargs["model"]["model_id"],
+                "provider": kwargs["model"]["provider_id"],
+                "access_level": "premium",
+            }
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(agent_runtime_model_resolver=Resolver()))
+    )
+    reader = agents_module._release_audience_user(
+        _user(), agent_id=AGENT_ID, channel="hosted", auth_mode="tenant"
+    )
+    with pytest.raises(AgentReleaseCandidateError, match="AGENT_RUNTIME_MODEL_FORBIDDEN"):
+        await agents_module._resolve_release_model_authorization(
+            request=request,
+            user=reader,
+            resolution={"spec": {"model": {"model_id": "premium-model"}}},
+            model_id="premium-model",
+            provider_id="provider-a",
+        )
+
+
+@pytest.mark.parametrize(
+    ("channel", "auth_mode"),
+    [
+        ("hosted", "private"),
+        ("hosted", "tenant"),
+        ("hosted", "public"),
+        ("embed", "token"),
+        ("api", "token"),
+    ],
+)
 def test_eval_api_binds_authorized_eval_dataset_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+    auth_mode: str,
 ) -> None:
     class DatasetReleaseRepository(_ReleaseRepository):
         def __init__(self) -> None:
             super().__init__()
             self.dataset_requests: list[str] = []
+            self.preview_request_users: list[str] = []
+            self.dataset_request_users: list[str] = []
 
-        async def resolve_preview_runtime(self, **_kwargs: Any) -> dict[str, Any]:
+        async def resolve_preview_runtime(self, **kwargs: Any) -> dict[str, Any]:
+            self.preview_request_users.append(str(kwargs["user_id"]))
             return {
                 "agent": {"tenant_id": "tenant-a", "agent_id": AGENT_ID},
                 "draft": {
@@ -597,6 +746,7 @@ def test_eval_api_binds_authorized_eval_dataset_snapshot(
 
         async def resolve_eval_dataset_snapshot(self, **kwargs: Any) -> dict[str, Any]:
             self.dataset_requests.append(str(kwargs["dataset_id"]))
+            self.dataset_request_users.append(str(kwargs["user_id"]))
             return {
                 "dataset_id": str(kwargs["dataset_id"]),
                 "tenant_id": str(kwargs["tenant_id"]),
@@ -610,14 +760,21 @@ def test_eval_api_binds_authorized_eval_dataset_snapshot(
     app.state.agent_repository = repository
     app.include_router(router)
     app.dependency_overrides[get_user_context] = lambda: _user()
+    audience_users: list[UserContext] = []
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    policy = {"attachments": False, "high_risk_tools": False, "allowed_origins": []}
+    if auth_mode == "public":
+        policy["expires_at"] = expires_at
 
-    async def build_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        policy = {"attachments": False, "high_risk_tools": False, "allowed_origins": []}
+    async def build_snapshot(
+        _request: Any, _resolution: Any, audience_user: UserContext, **_kwargs: Any
+    ) -> dict[str, Any]:
+        audience_users.append(audience_user)
         return {
             "schema_version": "agent-runtime/v1",
             "tenant_id": "tenant-a",
             "agent_id": AGENT_ID,
-            "publication": {"channel": "hosted", "auth_mode": "private"},
+            "publication": {"channel": channel, "auth_mode": auth_mode},
             "model": {
                 "id": "qwen3.7-plus",
                 "provider": "dashscope",
@@ -635,7 +792,8 @@ def test_eval_api_binds_authorized_eval_dataset_snapshot(
             },
         }
 
-    async def model_authorization(**_kwargs: Any) -> dict[str, Any]:
+    async def model_authorization(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["user"] is audience_users[-1]
         return build_model_authorization_evidence(
             source="agent_runtime_resolver",
             model_id="qwen3.7-plus",
@@ -659,7 +817,9 @@ def test_eval_api_binds_authorized_eval_dataset_snapshot(
             f"/agents/{AGENT_ID}/evals",
             json={
                 "draft_revision": 3,
-                "channel": "hosted",
+                "channel": channel,
+                "auth_mode": auth_mode,
+                "channel_policy": policy,
                 "dataset_id": "99999999-9999-4999-8999-999999999999",
             },
         )
@@ -670,6 +830,24 @@ def test_eval_api_binds_authorized_eval_dataset_snapshot(
     assert body["dataset_version"] == "release-v3"
     assert body["dataset_manifest_hash"] == "7" * 64
     assert repository.dataset_requests == ["99999999-9999-4999-8999-999999999999"]
+    assert repository.preview_request_users == ["owner-a"]
+    assert repository.dataset_request_users == ["owner-a"]
+    assert audience_users[0].is_authenticated is (
+        auth_mode != "public" and channel != "embed"
+    )
+    if auth_mode == "tenant":
+        assert audience_users[0].user_id != "owner-a"
+        assert audience_users[0].tier == "normal"
+        assert audience_users[0].roles == ["user"]
+    elif auth_mode == "private":
+        assert audience_users[0].user_id == "owner-a"
+    elif channel == "embed":
+        assert audience_users[0].user_type == "anonymous"
+        assert audience_users[0].roles == ["guest"]
+    elif channel == "api":
+        assert audience_users[0].user_type == "service"
+        assert audience_users[0].roles == ["agent_runtime"]
+        assert audience_users[0].user_id != "owner-a"
 
 
 @pytest.mark.parametrize(
