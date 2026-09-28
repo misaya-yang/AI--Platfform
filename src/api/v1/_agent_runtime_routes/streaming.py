@@ -347,6 +347,12 @@ async def _start_runtime_stream(
         session_id=str(body["session_id"]),
         message=str(body["message"]),
         snapshot=snapshot,
+        terminal_replay_source=lambda: control.stream_events(
+            turn=turn,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=str(body["session_id"]),
+        ),
     )
     return StreamingResponse(
         stream,

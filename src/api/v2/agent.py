@@ -12,14 +12,20 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from ai_gateway_core.exceptions import SessionAlreadyExistsError
+from ai_gateway_contracts.agent_runtime import runtime_sha256
+from ai_gateway_core.exceptions import PermissionDeniedError, SessionAlreadyExistsError
+from ai_gateway_core.persistence.repositories.agent_repository import (
+    AgentNotFoundError,
+    AgentRepositoryError,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...core.auth.user_resolver import UserContext
+from ...services.agent_runtime.control.snapshot_builder import snapshot_capability_allowlist
 from ...services.agent_runtime.control_plane import AgentRuntimeControlError
 from ...services.agent_runtime.thread_store import (
     AgentThreadStore,
@@ -45,6 +51,12 @@ from ..v1._assistant_routes.attachment_refs import (
     bind_assistant_attachment_refs,
     selected_image_inputs,
 )
+from ..v1.agent_runtime import (
+    _build_snapshot,
+    _is_tenant_admin,
+    _map_repository_error,
+    _repository,
+)
 
 router = APIRouter(prefix="/agent", tags=["Agent Runtime V2"])
 logger = logging.getLogger(__name__)
@@ -55,12 +67,22 @@ class ThreadCreateRequest(BaseModel):
 
     session_id: str | None = Field(default=None, min_length=1, max_length=255)
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
+    agent_id: UUID | None = None
+    agent_version_id: UUID | None = None
     expected_tenant_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=255,
         description="Optional tenant precondition; never an authentication source.",
     )
+
+    @model_validator(mode="after")
+    def require_complete_version_target(self) -> ThreadCreateRequest:
+        if (self.agent_id is None) != (self.agent_version_id is None):
+            raise ValueError("agent_id and agent_version_id must be provided together")
+        if self.agent_id is not None and self.model_id is not None:
+            raise ValueError("model_id cannot override a fixed Agent Version")
+        return self
 
 
 class TurnCreateRequest(BaseModel):
@@ -154,6 +176,150 @@ def _reject_unmigrated_turn_capabilities(body: TurnCreateRequest) -> None:
         )
 
 
+async def _version_snapshot(
+    request: Request, user: UserContext, *, agent_id: str, agent_version_id: str
+) -> dict[str, Any]:
+    """Recheck viewer ACL and materialize the exact saved Version for Preview."""
+
+    try:
+        resolution = await _repository(request).resolve_version_runtime(
+            tenant_id=user.tenant_id,
+            agent_id=agent_id,
+            agent_version_id=agent_version_id,
+            user_id=user.user_id,
+            is_tenant_admin=_is_tenant_admin(user),
+        )
+    except (AgentRepositoryError, AgentNotFoundError) as exc:
+        _map_repository_error(request, exc)
+        raise AssertionError("unreachable") from exc
+    snapshot = await _build_snapshot(request, resolution, user, channel="preview")
+    expected_capabilities = sum(
+        str(item.get("capability_type") or item.get("type") or "") != "knowledge"
+        for item in resolution.get("capabilities") or []
+        if isinstance(item, dict)
+    )
+    if len(snapshot.get("capabilities") or []) != expected_capabilities:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"},
+        )
+    if (
+        str(snapshot.get("agent_id") or "") != agent_id
+        or str(snapshot.get("agent_version_id") or "") != agent_version_id
+    ):
+        raise HTTPException(status_code=409, detail={"code": "AGENT_RUNTIME_VERSION_MISMATCH"})
+    return snapshot
+
+
+async def _pinned_version_session(
+    request: Request, user: UserContext, session_id: str
+) -> Any | None:
+    manager = getattr(request.app.state, "session_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail={"code": "SESSION_STORAGE_UNAVAILABLE"})
+    session = await manager.get(session_id)
+    if session is None or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND"})
+    agent_id = getattr(session, "agent_id", None)
+    agent_version_id = getattr(session, "agent_version_id", None)
+    channel = getattr(session, "channel", None)
+    publication_id = getattr(session, "publication_id", None)
+    draft_revision = getattr(session, "agent_draft_revision", None)
+    if not any((agent_id, agent_version_id, channel, publication_id, draft_revision)):
+        return None
+    if (
+        not agent_id
+        or not agent_version_id
+        or channel != "preview"
+        or publication_id is not None
+        or draft_revision is not None
+    ):
+        raise HTTPException(status_code=409, detail={"code": "AGENT_RUNTIME_PIN_INVALID"})
+    return session
+
+
+async def _pinned_snapshot(
+    request: Request, user: UserContext, session: Any
+) -> dict[str, Any]:
+    snapshot = await _version_snapshot(
+        request,
+        user,
+        agent_id=str(session.agent_id),
+        agent_version_id=str(session.agent_version_id),
+    )
+    if (
+        str(session.agent_spec_hash) != str(snapshot["fingerprints"]["spec"])
+        or str(session.runtime_fingerprint) != runtime_sha256(snapshot)
+    ):
+        raise HTTPException(status_code=409, detail={"code": "AGENT_RUNTIME_PIN_STALE"})
+    return snapshot
+
+
+def _reject_pinned_turn_overrides(body: TurnCreateRequest) -> None:
+    if body.model_fields_set - {"message"}:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "AGENT_RUNTIME_VERSION_OVERRIDES_FORBIDDEN"},
+        )
+
+
+async def _start_version_turn(
+    request: Request,
+    user: UserContext,
+    *,
+    session_id: str,
+    body: TurnCreateRequest,
+    snapshot: dict[str, Any],
+    control: Any,
+) -> Any:
+    model = snapshot["model"]
+    parameters = model.get("parameters") or {}
+    knowledge = snapshot.get("knowledge") or {}
+    retrieval = knowledge.get("retrieval") or {}
+    readonly = {
+        "knowledge": {
+            "dataset_ids": list(knowledge.get("datasets") or []),
+            "mode": str(retrieval.get("mode") or "off"),
+            "top_k": int(retrieval.get("top_k") or 5),
+            "score_threshold": float(retrieval.get("threshold") or 0.4),
+        },
+        "attachments": {"refs": []},
+    }
+    thinking_mode = str(parameters.get("thinking_mode") or "") or None
+    max_tokens = parameters.get("max_tokens")
+    temperature = parameters.get("temperature")
+    memory_mode = str((snapshot.get("memory") or {}).get("mode") or "session")
+    launch = await resolve_agent_launch(
+        entrypoint="studio_preview",
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+        model_id=str(model["id"]),
+        model_service=assistant_model_service(request) or getattr(control, "model_service", None),
+        readonly_capabilities=readonly,
+        legacy_thinking_level=thinking_mode,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        memory_mode=memory_mode,
+        legacy_snapshot=snapshot,
+    )
+    return await control.start_turn(
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+        message=body.message,
+        image_inputs=[],
+        model_id=str(model["id"]),
+        reasoning_option=None,
+        legacy_thinking_level=thinking_mode,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        memory_mode=memory_mode,
+        style_guidance=None,
+        resolved_agent_launch=launch,
+    )
+
+
 async def _assignment(request: Request, user: UserContext, session_id: str) -> Any:
     assignments = getattr(request.app.state, "assistant_runtime_assignments", None)
     if assignments is None:
@@ -201,6 +367,24 @@ def _thread_payload(thread: RuntimeThread) -> dict[str, Any]:
     }
 
 
+def _version_target_payload(snapshot: dict[str, Any]) -> dict[str, str]:
+    return {
+        "agent_id": str(snapshot["agent_id"]),
+        "agent_version_id": str(snapshot["agent_version_id"]),
+        "agent_spec_hash": str(snapshot["fingerprints"]["spec"]).removeprefix("sha256:"),
+        "runtime_snapshot_hash": runtime_sha256(snapshot),
+    }
+
+
+def _pinned_target_payload(session: Any) -> dict[str, str]:
+    return {
+        "agent_id": str(session.agent_id),
+        "agent_version_id": str(session.agent_version_id),
+        "agent_spec_hash": str(session.agent_spec_hash).removeprefix("sha256:"),
+        "runtime_snapshot_hash": str(session.runtime_fingerprint),
+    }
+
+
 @router.post("/threads", status_code=201)
 async def create_thread(
     body: ThreadCreateRequest,
@@ -217,9 +401,56 @@ async def create_thread(
     if session_manager is None:
         raise HTTPException(status_code=503, detail={"code": "SESSION_STORAGE_UNAVAILABLE"})
 
+    target_snapshot = (
+        await _version_snapshot(
+            request,
+            user,
+            agent_id=str(body.agent_id),
+            agent_version_id=str(body.agent_version_id),
+        )
+        if body.agent_id is not None and body.agent_version_id is not None
+        else None
+    )
     session_id = body.session_id
     created_here = False
-    if session_id:
+    if target_snapshot is not None:
+        session_id = session_id or str(uuid4())
+        existing_session = await session_manager.get(session_id)
+        if existing_session and (
+            existing_session.user_id != user.user_id
+            or existing_session.tenant_id != user.tenant_id
+        ):
+            raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND"})
+        created_here = existing_session is None
+        try:
+            await session_manager.bind_agent_runtime(
+                session_id=session_id,
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                agent_id=str(target_snapshot["agent_id"]),
+                agent_version_id=str(target_snapshot["agent_version_id"]),
+                agent_draft_revision=None,
+                publication_id=None,
+                channel="preview",
+                runtime_fingerprint=runtime_sha256(target_snapshot),
+                agent_spec_hash=str(target_snapshot["fingerprints"]["spec"]),
+            )
+        except PermissionDeniedError as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "AGENT_RUNTIME_PIN_CONFLICT"}
+            ) from exc
+        try:
+            assignment = await _bind_new_assignment(request, user, session_id)
+            if assignment.runtime_owner != "agent_runtime":
+                raise ValueError("Agent Runtime assignment owner mismatch")
+        except Exception as exc:
+            if created_here:
+                await session_manager.delete(session_id)
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "AGENT_RUNTIME_ASSIGNMENT_CONFLICT"},
+            ) from exc
+    elif session_id:
         session = await session_manager.get(session_id)
         if session and (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
             raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND"})
@@ -275,7 +506,11 @@ async def create_thread(
     )
     control = getattr(request.app.state, "agent_runtime_control", None)
     settings = getattr(request.app.state, "settings", None)
-    model_id = body.model_id or str(getattr(settings, "default_model", "") or "").strip()
+    model_id = (
+        str(target_snapshot["model"]["id"])
+        if target_snapshot is not None
+        else body.model_id or str(getattr(settings, "default_model", "") or "").strip()
+    )
     if not model_id:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     if existing:
@@ -291,15 +526,24 @@ async def create_thread(
             )
         except AgentRuntimeControlError as exc:
             raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
-        return {"thread": _thread_payload(existing)}
+        payload = _thread_payload(existing)
+        if target_snapshot is not None:
+            payload["agent_version_target"] = _version_target_payload(target_snapshot)
+        return {"thread": payload}
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
+        thread_options = (
+            {"capability_allowlist": snapshot_capability_allowlist(target_snapshot)}
+            if target_snapshot is not None
+            else {}
+        )
         runtime_thread = await control.ensure_thread(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
             session_id=session_id,
             model_id=model_id,
+            **thread_options,
         )
     except AgentRuntimeControlError as exc:
         raise HTTPException(
@@ -322,7 +566,10 @@ async def create_thread(
             session_id=session_id,
             runtime_thread_id=kernel_thread_id,
         )
-    return {"thread": _thread_payload(thread)}
+    payload = _thread_payload(thread)
+    if target_snapshot is not None:
+        payload["agent_version_target"] = _version_target_payload(target_snapshot)
+    return {"thread": payload}
 
 
 async def _get_thread(request: Request, user: UserContext, thread_id: str) -> RuntimeThread:
@@ -339,6 +586,7 @@ async def _get_thread(request: Request, user: UserContext, thread_id: str) -> Ru
 async def get_thread(thread_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
+    pin = await _pinned_version_session(request, user, thread.session_id)
     sources = await conversation_sources(request, user, thread.session_id)
     visible = await visible_dataset_names(request, user) if sources.dataset_ids else {}
     visible_documents = await visible_document_keys(request, user, sources.document_ids)
@@ -349,7 +597,10 @@ async def get_thread(thread_id: str, request: Request, user: UserContext = Depen
         or not (sources.documents_by_run or {}).get(run_id, frozenset()) <= visible_documents
         or not (sources.versions_by_run or {}).get(run_id, frozenset()) <= visible_versions
     ]
-    return {"thread": {**_thread_payload(thread), "restricted_source_run_ids": restricted}}
+    payload = {**_thread_payload(thread), "restricted_source_run_ids": restricted}
+    if pin is not None:
+        payload["agent_version_target"] = _pinned_target_payload(pin)
+    return {"thread": payload}
 
 
 @router.post("/threads/{thread_id}/turns", status_code=202)
@@ -362,10 +613,39 @@ async def create_turn(
     _require_actor(user)
     _reject_unmigrated_turn_capabilities(body)
     thread = await _get_thread(request, user, thread_id)
+    pin = await _pinned_version_session(request, user, thread.session_id)
+    if pin is not None:
+        _reject_pinned_turn_overrides(body)
     await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
     control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
+    if pin is not None:
+        try:
+            snapshot = await _pinned_snapshot(request, user, pin)
+            turn = await _start_version_turn(
+                request,
+                user,
+                session_id=thread.session_id,
+                body=body,
+                snapshot=snapshot,
+                control=control,
+            )
+        except AgentLaunchResolutionError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+        except AgentRuntimeControlError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+        return {
+            "schema_version": "agent-turn/v2",
+            "turn": {
+                "id": turn.run_id,
+                "thread_id": thread.runtime_thread_id,
+                "status": "in_progress",
+                "requested_reasoning_option": turn.requested_reasoning_option,
+                "effective_reasoning_option": turn.effective_reasoning_option,
+                "events_url": f"/api/v2/agent/threads/{thread.runtime_thread_id}/events?after_sequence={turn.after_sequence}&turn_id={turn.run_id}",
+            },
+        }
     settings = getattr(request.app.state, "settings", None)
     model_id = body.model_id or str(getattr(settings, "default_model", "") or "").strip()
     if not model_id:
@@ -494,6 +774,9 @@ async def interrupt_turn(
 async def recover_turn(thread_id: str, turn_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
+    pin = await _pinned_version_session(request, user, thread.session_id)
+    if pin is not None:
+        await _pinned_snapshot(request, user, pin)
     await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
     control = getattr(request.app.state, "agent_runtime_control", None)
     recover = getattr(control, "recover_turn", None)
@@ -522,6 +805,12 @@ async def get_thread_approval(
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
     source_revoked = False
+    pin = await _pinned_version_session(request, user, thread.session_id)
+    if pin is not None:
+        try:
+            await _pinned_snapshot(request, user, pin)
+        except HTTPException:
+            source_revoked = True
     try:
         await require_conversation_source_access(request, user, thread.session_id)
     except HTTPException as exc:
@@ -582,6 +871,9 @@ async def decide_thread_approval(
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         if body.approved:
+            pin = await _pinned_version_session(request, user, thread.session_id)
+            if pin is not None:
+                await _pinned_snapshot(request, user, pin)
             await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
             approval = await control.get_approval(
                 approval_id=approval_id,

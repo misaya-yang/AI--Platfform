@@ -1,9 +1,10 @@
-import { Alert, Button, Empty, Segmented, Tag } from "antd";
+import { Alert, Button, Descriptions, Empty, Segmented, Tag } from "antd";
 import { ExternalLink, GitCompare, TrendingUp } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { EvalExperimentRun, EvalExperimentRunComparisonResponse } from "@/api/eval";
+import { agentVersionTarget } from "../agentVersionTarget";
 
 type WindowDays = 7 | 30 | 90;
 
@@ -172,6 +173,14 @@ export function ExperimentRunComparison({
     const rank = (item: Record<string, unknown>) => /regress|fail/i.test(String(item.status || item.classification || "")) ? 0 : 1;
     return rank(left) - rank(right);
   });
+  const comparedVersions = comparison ? [
+    { label: t("eval.comparison.baselineShort", "Baseline"), runId: comparison.baseline_run_id },
+    { label: t("eval.workbench.candidateRun", "Candidate run"), runId: comparison.candidate_run_id },
+  ].map(({ label, runId }) => ({
+    label,
+    runId,
+    target: agentVersionTarget(runs.find((run) => run.run_id === runId)?.target_snapshot),
+  })) : [];
 
   return (
     <section className="eval-comparison-panel" aria-live="polite">
@@ -185,10 +194,24 @@ export function ExperimentRunComparison({
 
       {comparison ? (
         <>
+          {comparedVersions.some(({ target }) => target) ? <Descriptions
+            size="small"
+            bordered
+            column={1}
+            items={comparedVersions.map(({ label, runId, target }) => ({
+              key: runId,
+              label,
+              children: target
+                ? `${target.agent_id} · ${target.agent_version_id} · ${target.model_id || "model unknown"} · KB ${target.knowledge_dataset_ids?.join(", ") || "—"}`
+                : t("eval.comparison.targetUnavailable", "Target identity unavailable for this run"),
+            }))}
+          /> : null}
           <Alert
             type={gateAlertType}
             showIcon
-            title={`${t("eval.comparison.gate")}: ${gateStatus || t("eval.comparison.notAvailable")}`}
+            title={`${comparedVersions.some(({ target }) => target)
+              ? t("eval.comparison.candidateGate", "Candidate comparison gate")
+              : t("eval.comparison.gate")}: ${gateStatus || t("eval.comparison.notAvailable")}`}
             description={[
               compatibilityText ? `${t("eval.comparison.compatibility")}: ${compatibilityText}` : "",
               compatibilityReasons.length ? `${t("eval.comparison.reasons")}: ${compatibilityReasons.join(", ")}` : "",

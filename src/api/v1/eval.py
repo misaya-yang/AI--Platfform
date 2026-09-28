@@ -3,9 +3,15 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Any
 
+from ai_gateway_contracts.agent_runtime import runtime_sha256
 from ai_gateway_core.eval.evaluator_executor import (
     REQUIRED_ASSISTANT_HARD_BLOCKERS,
     is_runnable_dataset_example,
+)
+from ai_gateway_core.persistence.repositories.agent_repository import (
+    AgentNotFoundError,
+    AgentRuntimeUnavailableError,
+    DatabaseAgentRepository,
 )
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
@@ -15,6 +21,7 @@ from pydantic import ValidationError
 
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.permissions import Capability, build_permission_denied_detail
+from ...core.auth.user_resolver import UserContext
 from ...persistence.database import DatabaseStorage
 from ...services.eval.golden import apply_gate, validate_case
 from ...services.eval.kb_ragas_service import (
@@ -63,6 +70,7 @@ from ..schemas.eval import (
     KbRagasScoreRetrievalResult,
     TraceExportFormat,
 )
+from ._agent_runtime_routes.snapshot import _build_snapshot
 from ._eval_dataset_routes import (
     EvalDatasetRouteDependencies,
     build_eval_dataset_routes,
@@ -167,6 +175,73 @@ async def _hydrate_live_run(
     gate = metrics.get("gate") if isinstance(metrics.get("gate"), dict) else {}
     run["gate_status"] = gate.get("status")
     return run
+
+
+async def _resolve_agent_version_candidate(
+    request: Request, auth: AuthContext, *, agent_id: str, agent_version_id: str,
+) -> dict[str, Any]:
+    """Resolve an authorized immutable Version into a prompt-free Eval identity."""
+    if not auth.is_authenticated or not auth.user_id:
+        raise HTTPException(status_code=403, detail="Authenticated Agent viewer required")
+    repository = getattr(request.app.state, "agent_repository", None)
+    if repository is None:
+        repository = DatabaseAgentRepository(
+            _get_database(request),
+            knowledge_resolver=getattr(request.app.state, "agent_runtime_knowledge_resolver", None),
+        )
+    cached_user = getattr(request.state, "_cached_user_context", None)
+    user = cached_user if (
+        isinstance(cached_user, UserContext)
+        and cached_user.user_id == auth.user_id
+        and cached_user.tenant_id == auth.tenant_id
+    ) else UserContext(
+        user_id=auth.user_id,
+        tenant_id=auth.tenant_id,
+        roles=auth.roles,
+        tier="admin" if {role.lower() for role in auth.roles} & {"admin", "tenant_admin"}
+        else "normal",
+        is_authenticated=True,
+    )
+    is_tenant_admin = bool(
+        {role.lower() for role in user.roles} & {"admin", "tenant_admin"}
+    ) or user.tier.lower() == "admin"
+    try:
+        resolution = await repository.resolve_version_runtime(
+            tenant_id=auth.tenant_id,
+            agent_id=agent_id,
+            agent_version_id=agent_version_id,
+            user_id=auth.user_id,
+            is_tenant_admin=is_tenant_admin,
+        )
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Agent Version not found") from exc
+    except AgentRuntimeUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    snapshot = await _build_snapshot(request, resolution, user, channel="preview")
+    version = resolution.get("version") if isinstance(resolution.get("version"), dict) else {}
+    spec_hash = str(version.get("spec_hash") or "")
+    snapshot_spec_hash = str((snapshot.get("fingerprints") or {}).get("spec") or "")
+    if (
+        str(snapshot.get("agent_id") or "") != agent_id
+        or str(snapshot.get("agent_version_id") or "") != agent_version_id
+        or not spec_hash
+        or snapshot_spec_hash.removeprefix("sha256:") != spec_hash
+    ):
+        raise HTTPException(status_code=409, detail="Agent Version snapshot identity mismatch")
+    model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
+    knowledge = snapshot.get("knowledge") if isinstance(snapshot.get("knowledge"), dict) else {}
+    if not model.get("id") or not model.get("provider"):
+        raise HTTPException(status_code=409, detail="Agent Version model unavailable")
+    return {
+        "candidate_type": "agent_version",
+        "agent_id": agent_id,
+        "agent_version_id": agent_version_id,
+        "agent_spec_hash": spec_hash,
+        "agent_runtime_snapshot_hash": runtime_sha256(snapshot),
+        "model_id": str(model["id"]),
+        "provider_id": str(model["provider"]),
+        "knowledge_dataset_ids": sorted(str(item) for item in knowledge.get("datasets") or []),
+    }
 
 
 @router.get("/summary", response_model=EvalTraceMonitoringSummary)
@@ -692,6 +767,19 @@ async def run_eval_experiment(
             detail="Dataset and trace targets are mutually exclusive",
         )
     if body.run_mode == "live_candidate":
+        agent_identity_keys = {
+            "candidate_type", "agent_id", "agent_version_id", "agent_spec_hash",
+            "agent_runtime_snapshot_hash",
+        }
+        if body.candidate_config.agent_id is None and any(
+            key in source for source in (
+                experiment.get("target_config") or {}, body.target_snapshot,
+            ) for key in agent_identity_keys
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Agent Version identity requires typed candidate_config",
+            )
         if not dataset_id:
             raise HTTPException(status_code=422, detail="live_candidate requires a dataset")
         dataset = await repo.get_dataset(tenant_id=auth.tenant_id, dataset_id=str(dataset_id))
@@ -744,29 +832,56 @@ async def run_eval_experiment(
             evaluators.append(evaluator)
 
         repetitions = body.repetitions or 3
-        prompt_override = body.candidate_config.system_prompt_override
-        prompt_override_hash = (
-            hashlib.sha256(prompt_override.encode("utf-8")).hexdigest() if prompt_override else None
-        )
-        execution_config = {
-            **(experiment.get("target_config") or {}),
-            **body.target_snapshot,
-            "system_prompt_override": prompt_override,
-        }
-        if str(execution_config.get("model_id") or "").strip() in {"", "current"}:
-            from ...services.assistant_entry import effective_chat_model_id
-
-            execution_config["model_id"] = effective_chat_model_id(request, None)
-        public_target = {
-            key: value
-            for key, value in body.target_snapshot.items()
-            if key
-            not in {
-                "system_prompt",
-                "system_prompt_override",
-                "eval_system_prompt_override",
+        agent_version_requested = body.candidate_config.agent_id is not None
+        if agent_version_requested:
+            if body.target_snapshot:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Agent Version candidates do not accept target_snapshot overrides",
+                )
+            resolved = await _resolve_agent_version_candidate(
+                request, auth,
+                agent_id=str(body.candidate_config.agent_id),
+                agent_version_id=str(body.candidate_config.agent_version_id),
+            )
+            execution_config = dict(resolved)
+            public_target = dict(resolved)
+            candidate_fingerprint = {
+                key: resolved[key] for key in (
+                    "candidate_type", "agent_id", "agent_version_id", "agent_spec_hash",
+                    "agent_runtime_snapshot_hash", "model_id", "provider_id",
+                )
             }
-        }
+            candidate_fingerprint["verification"] = "pending"
+        else:
+            prompt_override = body.candidate_config.system_prompt_override
+            prompt_override_hash = (
+                hashlib.sha256(prompt_override.encode("utf-8")).hexdigest() if prompt_override else None
+            )
+            execution_config = {
+                **(experiment.get("target_config") or {}),
+                **body.target_snapshot,
+                "system_prompt_override": prompt_override,
+            }
+            if str(execution_config.get("model_id") or "").strip() in {"", "current"}:
+                from ...services.assistant_entry import effective_chat_model_id
+
+                execution_config["model_id"] = effective_chat_model_id(request, None)
+            public_target = {
+                key: value
+                for key, value in body.target_snapshot.items()
+                if key not in {
+                    "system_prompt", "system_prompt_override", "eval_system_prompt_override",
+                }
+            }
+            candidate_fingerprint = {
+                "prompt_override_hash": prompt_override_hash,
+                "requested_model_id": execution_config.get("model_id"),
+                "requested_temperature": execution_config.get("temperature"),
+                "requested_execution_profile": execution_config.get("execution_profile"),
+                "verification": "pending",
+            }
+            public_target["prompt_override_hash"] = prompt_override_hash
         public_target.update(
             {
                 "dataset_id": str(dataset_id),
@@ -776,16 +891,8 @@ async def run_eval_experiment(
                 "approved_case_count": len(examples),
                 "candidate_label": body.candidate_label,
                 "baseline_label": body.baseline_label,
-                "prompt_override_hash": prompt_override_hash,
             }
         )
-        candidate_fingerprint = {
-            "prompt_override_hash": prompt_override_hash,
-            "requested_model_id": execution_config.get("model_id"),
-            "requested_temperature": execution_config.get("temperature"),
-            "requested_execution_profile": execution_config.get("execution_profile"),
-            "verification": "pending",
-        }
         try:
             job = await repo.enqueue_live_experiment_run(
                 tenant_id=auth.tenant_id,
@@ -804,6 +911,8 @@ async def run_eval_experiment(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return EvalExperimentRunBatchResponse(jobs=[EvalAsyncJobResponse(**job)])
 
+    if body.candidate_config.agent_id is not None:
+        raise HTTPException(status_code=422, detail="Agent Version candidates require live_candidate")
     jobs = []
     for evaluator_id in body.evaluator_ids:
         try:

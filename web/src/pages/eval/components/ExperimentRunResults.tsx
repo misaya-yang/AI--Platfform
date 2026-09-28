@@ -8,6 +8,7 @@ import type {
   EvalExperimentRun,
   EvalExperimentRunResultsResponse,
 } from "@/api/eval";
+import { agentVersionTarget } from "../agentVersionTarget";
 
 type ResultFilter = "all" | "failed" | "review" | "passed" | "unscored";
 
@@ -133,6 +134,7 @@ export function ExperimentRunResults({
   const expectedCaseCount = numberValue(summary.expected_case_count);
   const excludedCaseCount = numberValue(summary.excluded_case_count);
   const targetSnapshot = recordValue(run.target_snapshot);
+  const agentTarget = agentVersionTarget(run.target_snapshot);
   const candidateFingerprint = recordValue(run.candidate_fingerprint);
   const modelRef = recordValue(candidateFingerprint.model_ref);
   const gate = recordValue(run.metrics?.gate);
@@ -179,7 +181,7 @@ export function ExperimentRunResults({
             {run.repetitions && run.repetitions > 1 ? ` · ${run.repetitions} attempts per case` : ""}
           </div>
           {run.dataset_manifest_hash ? <div>Dataset snapshot: <code>{run.dataset_manifest_hash.slice(0, 12)}</code></div> : null}
-          <div>Execution: {run.status} · Quality: {qualityStatus} · Gate: {gateStatus}</div>
+          <div>Execution: {run.status} · Quality: {qualityStatus} · {agentTarget ? "Candidate gate" : "Gate"}: {gateStatus}</div>
           {expectedCaseCount !== null ? (
             <div>Quality coverage: {qualityCaseCount ?? 0}/{expectedCaseCount} cases
               {excludedCaseCount ? ` · ${excludedCaseCount} excluded from scoring` : ""}
@@ -199,6 +201,17 @@ export function ExperimentRunResults({
           </Button>
         </Space>
       </div>
+      {agentTarget ? <Alert
+        type="info"
+        showIcon
+        title={t("eval.workbench.agentCandidateNotRelease", "Candidate run results are not release approval")}
+        description={t("eval.workbench.agentCandidateCoverage", {
+          scored: qualityCaseCount ?? scoredCount ?? "unknown",
+          expected: expectedCaseCount ?? "unknown",
+          excluded: excludedCaseCount ?? "unknown",
+          defaultValue: "Scored {{scored}} of {{expected}} expected cases; excluded {{excluded}}. Formal publication validation remains separate.",
+        })}
+      /> : null}
 
       {isPending ? (
         <div className="eval-run-progress" role="status">

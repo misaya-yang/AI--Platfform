@@ -982,6 +982,162 @@ test.describe("Eval trace console", () => {
     await expect(page.getByText("Context recall").first()).toBeVisible();
   });
 
+  test("runs immutable Agent versions A and B without replacing their model and reads back exact publication", async ({ page }) => {
+    const assertNoRuntimeFailures = watchRuntimeFailures(page);
+    await installEvalHarness(page);
+    page.setDefaultTimeout(15_000);
+    const agentId = "10101010-1010-4010-8010-101010101010";
+    const versionA = "20202020-2020-4020-8020-202020202020";
+    const versionB = "30303030-3030-4030-8030-303030303030";
+    const experimentId = "40404040-4040-4040-8040-404040404040";
+    const datasetId = "50505050-5050-4050-8050-505050505050";
+    const evaluatorId = "60606060-6060-4060-8060-606060606060";
+    const runIds = ["70707070-7070-4070-8070-707070707071", "70707070-7070-4070-8070-707070707072"];
+    const versions = [
+      { id: versionA, number: 1, model: "model-A", knowledge: ["kb-A"] },
+      { id: versionB, number: 2, model: "model-B", knowledge: ["kb-B"] },
+    ];
+    let experimentCreated = false;
+    let savedTargetConfig: Record<string, unknown> = {};
+    const runs: Array<Record<string, unknown>> = [];
+    const submittedCandidates: Array<Record<string, unknown>> = [];
+    const experiment = () => ({
+      experiment_id: experimentId, tenant_id: "tenant-a", dataset_id: datasetId,
+      name: "Agent A/B", description: "", target_config: savedTargetConfig,
+      metadata: {}, created_by: "eval-user", created_at: nowIso(), updated_at: nowIso(),
+      baseline_run_id: null, runs,
+    });
+
+    await page.route("**/api/v1/agents**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "GET" && pathname === "/api/v1/agents") {
+        return route.fulfill(jsonResponse({ items: [{
+          agent_id: agentId, tenant_id: "tenant-a", slug: "agent-ab", name: "Agent A/B",
+          description: "", owner_id: "eval-user", caller_role: "owner", status: "draft",
+          draft_revision: 2, created_at: nowIso(), updated_at: nowIso(),
+        }], next_cursor: null }));
+      }
+      if (request.method() === "GET" && pathname === `/api/v1/agents/${agentId}/versions`) {
+        return route.fulfill(jsonResponse(versions.map((version) => ({
+          tenant_id: "tenant-a", agent_id: agentId, agent_version_id: version.id,
+          version_number: version.number, schema_version: "agent-spec/v1", spec_hash: `sha256:spec-${version.number}`,
+          source_draft_id: "draft-a", source_draft_revision: version.number,
+          spec: { model: { model_id: version.model }, knowledge: version.knowledge.map((id) => ({ dataset_id: id })) },
+          created_by: "eval-user", created_at: nowIso(),
+        }))));
+      }
+      if (request.method() === "GET" && pathname === `/api/v1/agents/${agentId}/publications`) {
+        return route.fulfill(jsonResponse([{ publication_id: "publication-b", version_id: versionB, status: "active", channel: "hosted" }]));
+      }
+      throw new Error(`Unexpected Agent request: ${request.method()} ${pathname}`);
+    });
+
+    await page.route("**/api/v1/eval/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const pathname = url.pathname;
+      if (request.method() === "GET" && pathname === "/api/v1/eval/datasets") {
+        return route.fulfill(jsonResponse({ datasets: [{ dataset_id: datasetId, tenant_id: "tenant-a", name: "Fixed five", version: "v1", description: "", schema: {}, metadata: {} }], total: 1, limit: 200, offset: 0 }));
+      }
+      if (request.method() === "GET" && pathname === "/api/v1/eval/evaluators") {
+        return route.fulfill(jsonResponse({ evaluators: [{ evaluator_id: evaluatorId, tenant_id: "tenant-a", name: "quality", evaluator_type: "rule", rubric: "", version: "v1", sampling_config: {}, filter_config: {}, metadata: {} }], total: 1, limit: 50, offset: 0 }));
+      }
+      if (request.method() === "GET" && pathname === `/api/v1/eval/datasets/${datasetId}/examples`) {
+        return route.fulfill(jsonResponse({ examples: [], total: 0, limit: 200, offset: 0 }));
+      }
+      if (pathname === "/api/v1/eval/experiments" && request.method() === "GET") {
+        return route.fulfill(jsonResponse({ experiments: experimentCreated ? [experiment()] : [], total: experimentCreated ? 1 : 0, limit: 50, offset: 0 }));
+      }
+      if (pathname === "/api/v1/eval/experiments" && request.method() === "POST") {
+        const payload = request.postDataJSON();
+        savedTargetConfig = payload.target_config;
+        experimentCreated = true;
+        return route.fulfill(jsonResponse(experiment(), 201));
+      }
+      if (pathname === `/api/v1/eval/experiments/${experimentId}` && request.method() === "GET") {
+        return route.fulfill(jsonResponse(experiment()));
+      }
+      if (pathname === `/api/v1/eval/experiments/${experimentId}:run` && request.method() === "POST") {
+        const payload = request.postDataJSON();
+        expect(payload.run_mode).toBe("live_candidate");
+        expect(payload.target_snapshot).toBeUndefined();
+        expect(payload.candidate_config.system_prompt_override).toBeUndefined();
+        const version = versions.find((item) => item.id === payload.candidate_config.agent_version_id);
+        expect(payload.candidate_config.agent_id).toBe(agentId);
+        expect(version).toBeDefined();
+        submittedCandidates.push(payload.candidate_config);
+        const runId = runIds[runs.length];
+        runs.unshift({
+          run_id: runId, experiment_id: experimentId, tenant_id: "tenant-a", evaluator_id: evaluatorId,
+          dataset_id: datasetId, status: "succeeded", run_mode: "live_candidate", repetitions: 1,
+          target_snapshot: {
+            candidate_type: "agent_version", agent_id: agentId, agent_version_id: version!.id,
+            agent_spec_hash: `sha256:spec-${version!.number}`,
+            agent_runtime_snapshot_hash: `sha256:runtime-${version!.number}`,
+            model_id: version!.model, knowledge_dataset_ids: version!.knowledge,
+          },
+          score_summary: {}, metrics: {}, created_by: "eval-user", created_at: nowIso(), updated_at: nowIso(),
+        });
+        return route.fulfill(jsonResponse({ jobs: [{ job_id: `job-${runs.length}`, run_id: runId, status: "succeeded" }] }, 202));
+      }
+      const runMatch = pathname.match(/^\/api\/v1\/eval\/experiment-runs\/([^/]+)(\/results)?$/);
+      if (runMatch && request.method() === "GET") {
+        const run = runs.find((item) => item.run_id === runMatch[1]);
+        if (!run) throw new Error(`Unknown Eval run ${runMatch[1]}`);
+        return route.fulfill(jsonResponse(runMatch[2] ? { run, cases: [], total: 0, limit: 200, offset: 0 } : run));
+      }
+      if (pathname === "/api/v1/eval/experiment-runs:compare" && request.method() === "GET") {
+        return route.fulfill(jsonResponse({
+          baseline_run_id: url.searchParams.get("baseline_run_id"),
+          candidate_run_id: url.searchParams.get("candidate_run_id"),
+          baseline_summary: {}, candidate_summary: {}, deltas: {}, changed_dimensions: ["agent_version_id", "model_id", "knowledge_dataset_ids"],
+          regression_summary: { improved_case_count: 1, regressed_case_count: 0, same_failure_case_count: 0, unscored_case_count: 0 },
+          gate: { status: "warning", warnings: ["small_sample"], failures: [] },
+          compatibility: { compatible: true }, case_diffs: [],
+        }));
+      }
+      return route.fallback();
+    });
+
+    await page.goto("/eval?tab=runs", { waitUntil: "domcontentloaded" });
+    await page.getByRole("tab", { name: "Run & Results", exact: true }).click();
+    await page.locator(".eval-field").filter({ hasText: "Select dataset" }).locator(".ant-select").click();
+    await page.locator(".ant-select-dropdown .ant-select-item-option").filter({ hasText: "Fixed five" }).click();
+    await page.locator(".eval-field").filter({ hasText: "Select evaluator" }).locator(".ant-select").click();
+    await page.locator(".ant-select-dropdown .ant-select-item-option").filter({ hasText: "quality" }).click();
+    await page.getByText("Create or configure an experiment").click();
+    await page.getByLabel("Target config JSON").fill('{"trace_family":"assistant","model_id":"custom-built-in-model"}');
+    await page.getByRole("button", { name: "Create experiment" }).click();
+    await expect(page.getByText("Experiment created")).toBeVisible();
+    expect(savedTargetConfig.model_id).toBe("custom-built-in-model");
+
+    await page.getByLabel("Candidate source").click();
+    await page.locator(".ant-select-dropdown .ant-select-item-option").filter({ hasText: "Immutable Agent version" }).click();
+    await page.getByLabel("Agent", { exact: true }).click();
+    await page.locator(".ant-select-dropdown .ant-select-item-option").filter({ hasText: "Agent A/B" }).click();
+    await page.getByLabel("Immutable version").click();
+    await page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: /^v1 ·/ }).click();
+    await expect(page.getByText("model-A")).toBeVisible();
+    await page.getByRole("button", { name: "Run immutable Agent version" }).click();
+    await expect(page.getByText("sha256:runtime-1")).toBeVisible();
+
+    await page.getByLabel("Immutable version").click();
+    await page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: /^v2 ·/ }).click();
+    await page.getByRole("button", { name: "Run immutable Agent version" }).click();
+    await expect(page.getByText("sha256:runtime-2")).toBeVisible();
+    await expect(page.getByText("hosted: publication-b")).toBeVisible();
+    expect(submittedCandidates).toEqual([
+      { agent_id: agentId, agent_version_id: versionA },
+      { agent_id: agentId, agent_version_id: versionB },
+    ]);
+    await page.getByRole("button", { name: "Compare runs" }).click();
+    await expect(page.getByText("agent_version_id, model_id, knowledge_dataset_ids")).toBeVisible();
+    await expect(page.getByText(`model-A · KB kb-A`, { exact: false })).toBeVisible();
+    await expect(page.getByText(`model-B · KB kb-B`, { exact: false })).toBeVisible();
+    assertNoRuntimeFailures();
+  });
+
   test("renders assistant traces, family tabs, focus path, and score submission", async ({
     page,
   }) => {

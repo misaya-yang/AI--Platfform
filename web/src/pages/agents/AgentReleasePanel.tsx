@@ -48,6 +48,7 @@ import {
   rotateAgentApiToken,
   runAgentReleaseEvaluation,
 } from "@/api/agents";
+import { getEvalExperimentRun, type EvalExperimentRun } from "@/api/eval";
 import type {
   AgentAuthMode,
   AgentApiToken,
@@ -89,6 +90,31 @@ function releaseStatusColor(status: AgentReleaseStatus): string {
   if (status === "queued" || status === "running") return "processing";
   if (status === "stale" || status === "cancelled") return "warning";
   return "error";
+}
+
+function releaseRunMismatch(
+  run: EvalExperimentRun,
+  evaluation: AgentReleaseEvaluation,
+  versions: AgentVersion[],
+): string | null {
+  const target = run.target_snapshot ?? {};
+  if (run.status !== "succeeded" || run.run_mode !== "live_candidate" || target.candidate_type !== "agent_version") {
+    return "Choose a successful live Agent Version run.";
+  }
+  if (target.agent_id !== evaluation.agent_id || target.agent_spec_hash !== evaluation.spec_hash) {
+    return "The run was executed against a different Agent or draft spec.";
+  }
+  if (run.dataset_id !== evaluation.dataset_id || (evaluation.dataset_manifest_hash && run.dataset_manifest_hash !== evaluation.dataset_manifest_hash)) {
+    return "The run's test set does not match this release evaluation.";
+  }
+  if (!versions.some((version) => version.agent_version_id === target.agent_version_id
+    && version.agent_id === evaluation.agent_id
+    && version.source_draft_id === evaluation.draft_id
+    && version.source_draft_revision === evaluation.draft_revision
+    && version.spec_hash === evaluation.spec_hash)) {
+    return "The run's immutable Version does not match this evaluated draft revision.";
+  }
+  return null;
 }
 
 function FindingList({
@@ -310,6 +336,8 @@ export function AgentReleasePanel({
   const [publicExpiresAt, setPublicExpiresAt] = useState("");
   const [selectedEvaluation, setSelectedEvaluation] = useState<AgentReleaseEvaluation | null>(null);
   const [publishReason, setPublishReason] = useState("");
+  const [runIdDraft, setRunIdDraft] = useState("");
+  const [verifiedRunId, setVerifiedRunId] = useState<string | null>(null);
   const [rollbackTarget, setRollbackTarget] = useState<{
     publication: AgentPublication;
     version: AgentVersion;
@@ -342,6 +370,12 @@ export function AgentReleasePanel({
     queryKey: ["agent", agentId, "release-diff", selectedEvaluation?.evaluation_id],
     queryFn: () => getAgentReleaseDiff(agentId, selectedEvaluation!.evaluation_id),
     enabled: Boolean(selectedEvaluation),
+    retry: false,
+  });
+  const releaseRunQuery = useQuery({
+    queryKey: ["agent", agentId, "release-run", selectedEvaluation?.evaluation_id, verifiedRunId],
+    queryFn: () => getEvalExperimentRun(verifiedRunId!),
+    enabled: Boolean(selectedEvaluation && verifiedRunId),
     retry: false,
   });
 
@@ -386,6 +420,8 @@ export function AgentReleasePanel({
     onSuccess: async (evaluation) => {
       await refreshReleaseState();
       setSelectedEvaluation(evaluation.status === "passed" ? evaluation : null);
+      setRunIdDraft("");
+      setVerifiedRunId(null);
       messageApi.success(t(
         evaluation.status === "cancelled"
           ? "agents.studio.release.evalCancelled"
@@ -415,16 +451,19 @@ export function AgentReleasePanel({
     return key;
   };
 
+  const publishScope = (evaluationId: string, runId?: string) =>
+    `publish:${evaluationId}:${runId || "provider-free"}`;
   const publishMutation = useMutation({
     retry: false,
-    mutationFn: (evaluation: AgentReleaseEvaluation) => publishAgent(
+    mutationFn: ({ evaluation, runId }: { evaluation: AgentReleaseEvaluation; runId?: string }) => publishAgent(
       agentId,
       evaluation.evaluation_id,
-      keyFor(`publish:${evaluation.evaluation_id}`),
+      keyFor(publishScope(evaluation.evaluation_id, runId)),
       publishReason.trim(),
+      runId,
     ),
-    onSuccess: async (_result, evaluation) => {
-      idempotencyKeys.current.delete(`publish:${evaluation.evaluation_id}`);
+    onSuccess: async (_result, { evaluation, runId }) => {
+      idempotencyKeys.current.delete(publishScope(evaluation.evaluation_id, runId));
       await refreshReleaseState();
       messageApi.success(t("agents.studio.release.publishSuccess"));
     },
@@ -460,6 +499,13 @@ export function AgentReleasePanel({
   const errorDetail = latestError ? agentErrorDetail(latestError) : null;
   const selectedDiff = diffQuery.data?.diff;
   const selectedGate = selectedEvaluation?.gate_snapshot;
+  const releaseRun = verifiedRunId && releaseRunQuery.data?.run_id === verifiedRunId
+    ? releaseRunQuery.data : null;
+  const runMismatch = releaseRun && selectedEvaluation
+    ? releaseRunMismatch(releaseRun, selectedEvaluation, versions) : null;
+  const selectedRun = releaseRun && !runMismatch ? releaseRun : null;
+  const wantsRun = Boolean(runIdDraft.trim());
+  const runAudienceSupported = selectedEvaluation?.auth_mode === "private" || selectedEvaluation?.auth_mode === "tenant";
   const publicExpiry = selectedEvaluation?.auth_mode === "public"
     ? selectedEvaluation.channel_policy.expires_at : null;
   const publicExpiryValid = selectedEvaluation?.auth_mode !== "public"
@@ -472,6 +518,7 @@ export function AgentReleasePanel({
     || dirty
     || !publicExpiryValid
     || (selectedGate?.blocking_findings?.length ?? 0) > 0
+    || (wantsRun && (!runAudienceSupported || !selectedRun))
   );
   const evidenceEvent = evidenceVersionId
     ? events.find((event) => event.to_version_id === evidenceVersionId)
@@ -543,7 +590,7 @@ export function AgentReleasePanel({
               evaluation={evaluation}
               canRelease={canRelease}
               dirty={dirty}
-              onReview={() => { setSelectedEvaluation(evaluation); setPublishReason(""); }}
+              onReview={() => { setSelectedEvaluation(evaluation); setPublishReason(""); setRunIdDraft(""); setVerifiedRunId(null); }}
               onRetry={() => runEvalMutation.mutate()}
               onCancel={() => cancelEvalMutation.mutate(evaluation.evaluation_id)}
             />
@@ -555,11 +602,11 @@ export function AgentReleasePanel({
           size={640}
           title={t("agents.studio.release.publishTitle")}
           open={Boolean(selectedEvaluation)}
-          onClose={() => { setSelectedEvaluation(null); publishMutation.reset(); }}
+          onClose={() => { setSelectedEvaluation(null); setRunIdDraft(""); setVerifiedRunId(null); publishMutation.reset(); }}
           footer={selectedEvaluation && (
             <div className="agent-publish-footer">
               <Button onClick={() => setSelectedEvaluation(null)}>{t("agents.common.cancel")}</Button>
-              <Button type="primary" icon={<Rocket size={15} />} disabled={publishDisabled} loading={publishMutation.isPending} onClick={() => publishMutation.mutate(selectedEvaluation)}>{t("agents.studio.release.publish")}</Button>
+              <Button type="primary" icon={<Rocket size={15} />} disabled={publishDisabled} loading={publishMutation.isPending} onClick={() => publishMutation.mutate({ evaluation: selectedEvaluation, runId: selectedRun?.run_id })}>{t("agents.studio.release.publish")}</Button>
             </div>
           )}
         >
@@ -594,6 +641,30 @@ export function AgentReleasePanel({
                     {section.changed_paths.length > 0 && <small>{section.changed_paths.join(", ")}</small>}
                   </article>
                 ))}
+              </section>
+              <section className="agent-publish-run-evidence" data-testid="agent-publish-run-evidence">
+                <Title level={5}>{t("agents.studio.release.selectedRunTitle", { defaultValue: "Selected Agent Version run" })}</Title>
+                {runAudienceSupported ? <>
+                  <Paragraph type="secondary">{t("agents.studio.release.selectedRunHint", { defaultValue: "Optional: enter a successful live run ID from Eval. Verify its immutable Version and test set before linking it to this publication." })}</Paragraph>
+                  <Input.Search
+                    aria-label={t("agents.studio.release.runId", { defaultValue: "Experiment run ID" })}
+                    value={runIdDraft}
+                    placeholder={t("agents.studio.release.runId", { defaultValue: "Experiment run ID" })}
+                    enterButton={t("agents.studio.release.verifyRun", { defaultValue: "Verify run" })}
+                    loading={releaseRunQuery.isFetching}
+                    onChange={(event) => { setRunIdDraft(event.target.value); setVerifiedRunId(null); }}
+                    onSearch={() => setVerifiedRunId(runIdDraft.trim() || null)}
+                  />
+                  {releaseRunQuery.isError && verifiedRunId && <Alert type="error" showIcon title={t("agents.studio.release.runUnavailable", { defaultValue: "This run could not be loaded. Check its ID and access." })} />}
+                  {runMismatch && <Alert type="error" showIcon title={runMismatch} />}
+                  {selectedRun && <div className="agent-publish-facts" data-testid="agent-publish-selected-run">
+                    <span><small>{t("agents.studio.release.runId", { defaultValue: "Experiment run ID" })}</small>{selectedRun.run_id}</span>
+                    <span><small>{t("agents.studio.release.runVersion", { defaultValue: "Evaluated Version" })}</small>{String(selectedRun.target_snapshot?.agent_version_id)}</span>
+                    <span><small>{t("agents.studio.release.runDataset", { defaultValue: "Evaluated test set" })}</small>{selectedRun.dataset_id || "—"}</span>
+                    <span><small>{t("agents.studio.release.runModel", { defaultValue: "Resolved model" })}</small>{String(selectedRun.target_snapshot?.model_id || "—")}</span>
+                    <span><small>{t("agents.studio.release.runKnowledge", { defaultValue: "Resolved knowledge IDs" })}</small>{Array.isArray(selectedRun.target_snapshot?.knowledge_dataset_ids) ? selectedRun.target_snapshot.knowledge_dataset_ids.join(", ") : "—"}</span>
+                  </div>}
+                </> : <Alert type="info" showIcon title={t("agents.studio.release.runAudienceHint", { defaultValue: "Linked model-quality runs are available for private and tenant releases." })} />}
               </section>
               <label className="agent-release-reason"><span>{t("agents.studio.release.reason")}</span><Input.TextArea rows={3} maxLength={1000} value={publishReason} onChange={(event) => setPublishReason(event.target.value)} placeholder={t("agents.studio.release.reasonPlaceholder")} /></label>
               <Alert type="warning" showIcon title={t("agents.studio.release.sessionPinningTitle")} description={t("agents.studio.release.sessionPinningDescription")} />

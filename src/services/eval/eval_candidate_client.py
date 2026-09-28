@@ -148,6 +148,7 @@ class EvalCandidateClient:
         on_turn_created: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_cursor: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> EvalCandidateResult:
+        agent_version_candidate = config.get("candidate_type") == "agent_version"
         if not self.token and not self.api_key and not self.allow_service_identity:
             raise RuntimeError(
                 "AGENT_EVAL_AUTH_TOKEN/GATEWAY_TOKEN/GATEWAY_ADMIN_JWT or "
@@ -158,9 +159,16 @@ class EvalCandidateClient:
                 "V2 Agent Runtime does not support eval system_prompt_override; "
                 "refusing to evaluate a different prompt"
             )
+        if agent_version_candidate and not all(
+            isinstance(config.get(key), str) and config[key]
+            for key in ("agent_id", "agent_version_id", "agent_spec_hash", "agent_runtime_snapshot_hash")
+        ):
+            raise RuntimeError("AGENT_EVAL_VERSION_IDENTITY_INCOMPLETE")
         configured_model_id = str(config.get("model_id") or "").strip()
         model_id = configured_model_id if configured_model_id not in {"", "current"} else None
-        headers = self._auth_headers(tenant_id=tenant_id, delegation=delegation)
+        headers = self._auth_headers(
+            tenant_id=tenant_id, delegation=delegation, force_delegation=agent_version_candidate,
+        )
         headers.update(
             {
                 "Content-Type": "application/json",
@@ -171,7 +179,10 @@ class EvalCandidateClient:
             "session_id": run_case_id,
             "expected_tenant_id": tenant_id,
         }
-        if model_id is not None:
+        if agent_version_candidate:
+            thread_body["agent_id"] = config["agent_id"]
+            thread_body["agent_version_id"] = config["agent_version_id"]
+        elif model_id is not None:
             thread_body["model_id"] = model_id
 
         trace_id = ""
@@ -214,6 +225,25 @@ class EvalCandidateClient:
             runtime = thread.get("runtime") if isinstance(thread, dict) else None
             if not isinstance(runtime, dict) or runtime.get("owner") != "agent_runtime":
                 raise RuntimeError("Agent Eval candidate is not owned by agent_runtime")
+            if agent_version_candidate:
+                target = thread.get("agent_version_target") if isinstance(thread, dict) else None
+                expected = {
+                    "agent_id": config["agent_id"],
+                    "agent_version_id": config["agent_version_id"],
+                    "agent_spec_hash": config["agent_spec_hash"],
+                    "runtime_snapshot_hash": config["agent_runtime_snapshot_hash"],
+                }
+                if not isinstance(target, dict) or any(
+                    str(target.get(key) or "") != str(value) for key, value in expected.items()
+                ):
+                    raise RuntimeError("AGENT_EVAL_VERSION_PIN_MISMATCH")
+                fingerprint.update({
+                    "candidate_type": "agent_version",
+                    "agent_id": expected["agent_id"],
+                    "agent_version_id": expected["agent_version_id"],
+                    "agent_spec_hash": expected["agent_spec_hash"],
+                    "agent_runtime_snapshot_hash": expected["runtime_snapshot_hash"],
+                })
             thread_id = str((thread or {}).get("thread_id") or (thread or {}).get("id") or "")
             if not thread_id:
                 raise RuntimeError("Agent Runtime thread response has no thread_id")
@@ -233,6 +263,10 @@ class EvalCandidateClient:
                 "web_search_enabled": bool(config.get("web_search_enabled", False)),
                 "web_search_max_results": config.get("web_search_max_results") or 5,
             }
+            if agent_version_candidate:
+                # The bound Version is the sole authority for model, prompt,
+                # knowledge, and capabilities. The turn accepts only input.
+                turn_body = {"message": message}
             turn_body = {key: value for key, value in turn_body.items() if value is not None}
             handle = {
                 "tenant_id": tenant_id, "user_id": identity["user_id"],
@@ -364,11 +398,15 @@ class EvalCandidateClient:
                 session_id=run_case_id,
                 message=message,
                 snapshot={
+                    **({
+                        "agent_id": config["agent_id"],
+                        "agent_version_id": config["agent_version_id"],
+                    } if agent_version_candidate else {}),
                     "model": {
                         "id": model_id or fingerprint.get("model_id"),
                         "provider": fingerprint.get("provider"),
                     },
-                    "publication": {"channel": "builtin"},
+                    "publication": {"channel": "preview" if agent_version_candidate else "builtin"},
                 },
                 status=terminal_status,
                 started_at=started_at,
@@ -396,7 +434,16 @@ class EvalCandidateClient:
         )
 
     def _auth_headers(self, *, tenant_id: str | None = None,
-                      delegation: dict[str, str] | None = None) -> dict[str, str]:
+                      delegation: dict[str, str] | None = None,
+                      force_delegation: bool = False) -> dict[str, str]:
+        if force_delegation:
+            if not self.allow_service_identity or delegation is None or not tenant_id:
+                raise RuntimeError("AGENT_EVAL_DELEGATION_REQUIRED")
+            from .eval_llm_client import _build_internal_jwt
+
+            return {"Authorization": "Bearer " + _build_internal_jwt(
+                tenant_id=tenant_id, delegation=delegation,
+            )}
         if self.token:
             return {"Authorization": f"Bearer {self.token}"}
         if self.api_key:

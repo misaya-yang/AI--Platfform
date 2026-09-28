@@ -195,3 +195,22 @@ async def test_retry_fails_closed_when_kb_dataset_link_or_provenance_is_uncertai
             case_ids=["failed"], created_by="operator", idempotency_key="request-legacy",
         )
     assert conn.run_insert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_snapshot_freezes_server_model_ref() -> None:
+    repo = AgentTraceRepository(SimpleNamespace(_pool=None, enabled=False))
+
+    async def model_ref(**_kwargs: Any) -> dict[str, Any]:
+        return {"model_id": "judge-model", "provider_id": "judge-provider", "price_version": "v1"}
+
+    repo.freeze_eval_model_ref = model_ref  # type: ignore[method-assign]
+    frozen = await repo.freeze_eval_judge(
+        tenant_id="tenant-a",
+        evaluator={
+            "evaluator_id": "judge-a", "evaluator_type": "llm_judge",
+            "metadata": {"judge_model_id": "judge-model"},
+        },
+    )
+
+    assert frozen["metadata"]["judge_model_ref"]["provider_id"] == "judge-provider"

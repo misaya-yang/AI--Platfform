@@ -1,6 +1,6 @@
 {
   "baseline_id": "2026_08_post_kb_v1",
-  "epoch": 7,
+  "epoch": 10,
   "changes": [
     {
       "sequence": 1,
@@ -152,6 +152,69 @@
       "resume_handler": null,
       "repair_handler": null,
       "notes": "R3 D03/AG-06: additive authoritative expiry for future public Agent publications; legacy/internal NULL remains compatible. Migrate before starting new Gateway readers."
+    },
+    {
+      "sequence": 8,
+      "name": "agent_version_preview_pin",
+      "file": "008_agent_version_preview_pin.sql",
+      "sha256": "e5d3dc757d908e08d06a8f83802f990abe52506a36a74cb72b0148f0c5f8583e",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('assistant.sessions') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='assistant.sessions'::regclass AND conname='sessions_agent_runtime_shape_check')"
+      ],
+      "postconditions": [
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='assistant.sessions'::regclass AND conname='sessions_agent_runtime_shape_check' AND convalidated)"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R3 AG-03: permit exact immutable Version Preview pins without a Draft revision or Publication; preserve existing builtin, Draft Preview, and published session shapes."
+    },
+    {
+      "sequence": 9,
+      "name": "agent_preview_shape_total",
+      "file": "009_agent_preview_shape_total.sql",
+      "sha256": "6df4cfa2532457e35fa5204934f14aee90f4d52e731a5bd9502793df8f45b947",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('assistant.sessions') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='assistant.sessions'::regclass AND conname='sessions_agent_runtime_shape_check')"
+      ],
+      "postconditions": [
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='assistant.sessions'::regclass AND conname='sessions_agent_runtime_shape_check' AND convalidated AND position('agent_draft_revision IS NOT NULL' in pg_get_constraintdef(oid)) > 0 AND position('channel IS NOT NULL' in pg_get_constraintdef(oid)) > 0)"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R3 AG-03: close PostgreSQL CHECK UNKNOWN acceptance for empty Preview targets and NULL channels while preserving both Draft and immutable Version Preview pins."
+    },
+    {
+      "sequence": 10,
+      "name": "agent_runtime_publication_pin_fk",
+      "file": "010_agent_runtime_publication_pin_fk.sql",
+      "sha256": "1b1cda6570185efff0402e9dbed58d894650f00251f94e04af235bbb2199b8cf",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT count(*)=4 FROM pg_constraint WHERE conname IN ('sessions_runtime_publication_identity_fk','assistant_runs_runtime_publication_identity_fk','assistant_run_checkpoints_runtime_publication_identity_fk','agent_traces_runtime_publication_identity_fk')"
+      ],
+      "postconditions": [
+        "SELECT count(*)=4 FROM pg_constraint WHERE conname IN ('sessions_runtime_publication_agent_fk','assistant_runs_runtime_publication_agent_fk','assistant_run_checkpoints_runtime_publication_agent_fk','agent_traces_runtime_publication_agent_fk') AND convalidated",
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('sessions_runtime_publication_identity_fk','assistant_runs_runtime_publication_identity_fk','assistant_run_checkpoints_runtime_publication_identity_fk','agent_traces_runtime_publication_identity_fk'))",
+        "SELECT count(*)=4 FROM pg_constraint WHERE conname IN ('sessions_runtime_publication_fk','assistant_runs_runtime_publication_fk','assistant_run_checkpoints_runtime_publication_fk','agent_traces_runtime_publication_fk') AND convalidated",
+        "SELECT count(*)=4 FROM pg_constraint WHERE conname IN ('sessions_runtime_agent_version_fk','assistant_runs_runtime_agent_version_fk','assistant_run_checkpoints_runtime_agent_version_fk','agent_traces_runtime_agent_version_fk') AND convalidated"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "R3 AG-08: let Publication pointers change while existing sessions, runs, checkpoints and traces retain their immutable Version pin and Publication/Agent association."
     }
   ]
 }

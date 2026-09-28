@@ -516,6 +516,56 @@ async def _resolve_release_candidate(
     return candidate
 
 
+async def _resolve_selected_run_version(
+    *,
+    request: Request,
+    user: UserContext,
+    repository: Any,
+    agent_id: str,
+    run_id: str,
+) -> tuple[str, str]:
+    """Rebuild the evaluated Version's Preview identity from server-owned state."""
+
+    from ai_gateway_contracts.agent_runtime import runtime_sha256
+
+    from .agent_runtime import _build_snapshot
+
+    run = await _get_trace_repository(request).get_experiment_run(
+        tenant_id=user.tenant_id, run_id=run_id
+    )
+    target = run.get("target_snapshot") if isinstance(run, dict) else None
+    target = target if isinstance(target, dict) else {}
+    if (
+        not run
+        or run.get("status") != "succeeded"
+        or run.get("run_mode") != "live_candidate"
+        or target.get("candidate_type") != "agent_version"
+        or str(target.get("agent_id") or "") != agent_id
+    ):
+        raise AgentReleaseGateError("AGENT_EVAL_RUN_UNAVAILABLE")
+    version_id = str(target.get("agent_version_id") or "")
+    try:
+        uuid.UUID(version_id)
+    except ValueError as exc:
+        raise AgentReleaseGateError("AGENT_EVAL_RUN_IDENTITY_MISMATCH") from exc
+    resolution = await repository.resolve_version_runtime(
+        tenant_id=user.tenant_id,
+        agent_id=agent_id,
+        agent_version_id=version_id,
+        user_id=user.user_id,
+        is_tenant_admin=_is_tenant_admin(user),
+    )
+    snapshot = await _build_snapshot(request, resolution, user, channel="preview")
+    snapshot_hash = runtime_sha256(snapshot)
+    if (
+        str(resolution["version"].get("spec_hash") or "")
+        != str(target.get("agent_spec_hash") or "")
+        or snapshot_hash != str(target.get("agent_runtime_snapshot_hash") or "")
+    ):
+        raise AgentReleaseGateError("AGENT_EVAL_RUN_IDENTITY_MISMATCH")
+    return version_id, snapshot_hash
+
+
 async def _decorate_release_evaluation_freshness(
     *,
     request: Request,
@@ -1637,6 +1687,7 @@ async def publish_agent(
             is_tenant_admin=_is_tenant_admin(user),
             reason=payload.reason,
             evaluation_id=str(payload.evaluation_id),
+            experiment_run_id=(str(payload.experiment_run_id) if payload.experiment_run_id else None),
         )
         if replay is not None:
             return AgentReleaseMutationResponse(request_id=_request_id(request), **replay)
@@ -1661,6 +1712,16 @@ async def publish_agent(
             channel_policy=dict(evaluation.get("channel_policy") or {}),
             dataset_id=(str(evaluation["dataset_id"]) if evaluation.get("dataset_id") else None),
         )
+        selected_version_id = None
+        selected_version_snapshot_hash = None
+        if payload.experiment_run_id is not None:
+            selected_version_id, selected_version_snapshot_hash = await _resolve_selected_run_version(
+                request=request,
+                user=user,
+                repository=repository,
+                agent_id=str(agent_id),
+                run_id=str(payload.experiment_run_id),
+            )
         result = await repository.publish_agent(
             tenant_id=user.tenant_id,
             agent_id=str(agent_id),
@@ -1669,6 +1730,9 @@ async def publish_agent(
             is_tenant_admin=_is_tenant_admin(user),
             idempotency_key=key,
             reason=payload.reason,
+            experiment_run_id=(str(payload.experiment_run_id) if payload.experiment_run_id else None),
+            selected_version_id=selected_version_id,
+            selected_version_snapshot_hash=selected_version_snapshot_hash,
             current_candidate=candidate,
             actor_model_access_levels=_model_access_levels(user),
             model_authorization_revalidator=candidate.get("_model_authorization_revalidator"),

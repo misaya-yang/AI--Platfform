@@ -166,6 +166,85 @@ async def test_candidate_runner_persists_v2_trace_before_loading_detail(
     assert repository.ingested[0]["enqueue"] is False
 
 
+@pytest.mark.asyncio
+async def test_agent_version_worker_uses_creator_delegation_even_with_admin_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace_id = str(uuid.uuid4())
+    actor = {
+        "actor": "eval-worker", "subject": "creator", "tenant_id": "tenant-a",
+        "run_id": "run", "job_id": "job",
+    }
+    expected_ref = {
+        "tenant_id": "tenant-a", "provider_id": "provider", "model_id": "model",
+        "capability_revision": 1, "price_version": "price-v1",
+    }
+    identity = {
+        "agent_id": "agent-a", "agent_version_id": "version-a",
+        "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+    }
+
+    class Repository:
+        def __init__(self) -> None:
+            self.persisted = False
+            self.actor_calls = 0
+
+        async def get_trace_detail(self, **_kwargs: Any) -> dict[str, Any] | None:
+            if not self.persisted:
+                return None
+            return {"trace": {
+                "trace_id": trace_id, "status": "succeeded", "model_id": "model",
+                "provider": "provider", "output_preview": "ok", "metadata": {},
+            }, "spans": [], "events": []}
+
+        async def list_traces(self, **_kwargs: Any) -> tuple[list[dict[str, Any]], int]:
+            return [], 0
+
+        async def resolve_eval_job_actor(self, **_kwargs: Any) -> dict[str, str]:
+            self.actor_calls += 1
+            return actor
+
+        async def get_candidate_runtime_evidence(self, **_kwargs: Any) -> dict[str, Any]:
+            return {}
+
+        async def ingest_trace(self, **_kwargs: Any) -> None:
+            self.persisted = True
+
+    class Candidate:
+        token = "worker-admin-token"
+        api_key = ""
+        allow_service_identity = True
+
+        async def run(self, **kwargs: Any) -> EvalCandidateResult:
+            assert kwargs["delegation"] == actor
+            return EvalCandidateResult(
+                trace_id=trace_id, output="ok", fingerprint=identity,
+                trace_payload={"user_id": "creator", "spans": []},
+            )
+
+    repository = Repository()
+    monkeypatch.setattr(outbox_module, "_eval_candidate_client", Candidate())
+    monkeypatch.setattr(outbox_module, "runtime_model_evidence", lambda **_kwargs: ({
+        "model_id": "model", "provider": "provider", "runtime_revision": "runtime-a",
+        "model_ref": expected_ref, "model_ref_verified": True,
+    }, {}, []))
+    result = await outbox_module._build_candidate_runner(repository)(
+        tenant_id="tenant-a",
+        run_case={
+            "run_case_id": "case-a", "case_id": "case-a", "input": {"message": "hello"},
+            "expected_output": {}, "expected_trajectory": {}, "assertions": [], "metadata": {},
+        },
+        execution_config={
+            "candidate_type": "agent_version", **identity, "model_ref": expected_ref,
+        },
+    )
+
+    assert repository.actor_calls == 1
+    assert result["fingerprint"]["agent_version_id"] == "version-a"
+    assert result["fingerprint"]["model_ref_verified"] is True
+
+
 class _LiveRepository:
     def __init__(self, cases: list[dict[str, Any]]) -> None:
         self.cases = cases
@@ -359,6 +438,88 @@ async def test_live_judge_failure_keeps_execution_separate_from_quality() -> Non
     assert result.metrics["completed_trials"] == 1
     assert result.metrics["unscored_trials"] == 1
     assert repository.cases[0]["observed_metrics"]["execution_outcome"] == "judge_failed"
+
+
+@pytest.mark.asyncio
+async def test_live_agent_version_mismatch_cannot_be_scored() -> None:
+    repository = _LiveRepository([_run_case("critical", 1)])
+    repository.run["execution_config"].update({
+        "candidate_type": "agent_version", "agent_id": "agent-a",
+        "agent_version_id": "version-a", "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+    })
+
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        return _candidate_result(kwargs["run_case"])
+
+    result = await EvaluatorExecutor(
+        repository, candidate_run=run_candidate,  # type: ignore[arg-type]
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+
+    assert result.status == "failed"
+    assert result.score_summary["case_count"] == 0
+    assert "AGENT_EVAL_VERSION_FINGERPRINT_MISMATCH" in str(result.error_message)
+    assert repository.scores == []
+
+
+@pytest.mark.asyncio
+async def test_typed_agent_suite_is_warning_without_builtin_hard_blocker_cases() -> None:
+    repository = _LiveRepository([_run_case("critical", 1)])
+    identity = {
+        "candidate_type": "agent_version", "agent_id": "agent-a",
+        "agent_version_id": "version-a", "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+    }
+    repository.run["execution_config"].update(identity)
+
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        result = _candidate_result(kwargs["run_case"])
+        result["fingerprint"].update(identity)
+        return result
+
+    result = await EvaluatorExecutor(
+        repository, candidate_run=run_candidate,  # type: ignore[arg-type]
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+
+    assert result.status == "succeeded"
+    assert result.metrics["gate"] == {
+        "profile": "agent_version_task_suite", "reason": "fixed_sample_only", "status": "warning",
+    }
+    assert result.metrics["hard_blockers_passed"] is None
+    assert result.metrics["unknown_side_effect_trial_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_typed_agent_unknown_side_effect_is_hard_failure() -> None:
+    repository = _LiveRepository([_run_case("critical", 1)])
+    identity = {
+        "candidate_type": "agent_version", "agent_id": "agent-a",
+        "agent_version_id": "version-a", "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+    }
+    repository.run["execution_config"].update(identity)
+
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        result = _candidate_result(kwargs["run_case"])
+        result["fingerprint"].update(identity)
+        result["detail"]["trace"]["metadata"]["runtime_trajectory"]["exit_reason"] = "side_effect_unknown"
+        return result
+
+    result = await EvaluatorExecutor(
+        repository, candidate_run=run_candidate,  # type: ignore[arg-type]
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-live", "evaluator_id": "rule-a", "run_mode": "live_candidate"},
+    )
+
+    assert result.metrics["unknown_side_effect_trial_count"] == 1
+    assert result.metrics["gate"]["status"] == "fail"
 
 
 @pytest.mark.asyncio

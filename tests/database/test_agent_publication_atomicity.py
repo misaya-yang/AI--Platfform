@@ -141,7 +141,15 @@ async def release_pool() -> AsyncIterator[asyncpg.Pool]:
                 );
                 CREATE TABLE eval_experiment_runs (
                     run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tenant_id VARCHAR(255) NOT NULL
+                    tenant_id VARCHAR(255) NOT NULL,
+                    dataset_id UUID,
+                    run_mode VARCHAR(32) NOT NULL DEFAULT 'rescore_trace',
+                    status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                    target_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    score_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    dataset_manifest_hash VARCHAR(64),
+                    evaluator_suite_hash VARCHAR(64)
                 );
                 CREATE TABLE llm_providers (
                     tenant_id VARCHAR(255) NOT NULL,
@@ -336,6 +344,7 @@ async def _record_evaluation(
     user_id: str,
     agent_id: str,
     channel: str = "api",
+    dataset_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     draft = await repository.get_draft(
         tenant_id=tenant_id,
@@ -344,6 +353,17 @@ async def _record_evaluation(
         is_tenant_admin=False,
     )
     policy = {"attachments": False, "high_risk_tools": False, "allowed_origins": []}
+    dataset_snapshot = (
+        await repository.resolve_eval_dataset_snapshot(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            dataset_id=dataset_id,
+            user_id=user_id,
+            is_tenant_admin=False,
+        )
+        if dataset_id is not None
+        else None
+    )
     model_authorization = await _model_authorization(
         repository._pool,  # noqa: SLF001 - disposable real-PostgreSQL fixture
         tenant_id=tenant_id,
@@ -357,7 +377,10 @@ async def _record_evaluation(
         "tool_schema_hash": "sha256:" + "2" * 64,
         "skill_manifest_hash": "sha256:" + "3" * 64,
         "knowledge_revision": "sha256:" + "4" * 64,
-        "eval_dataset_manifest_hash": _plain_hash({"dataset_id": None}),
+        "eval_dataset_manifest_hash": (
+            dataset_snapshot["manifest_hash"]
+            if dataset_snapshot else _plain_hash({"dataset_id": None})
+        ),
         "runtime_version": "agent-runtime/v1",
         "snapshot_hash": "sha256:" + "5" * 64,
         "channel_policy_hash": "sha256:" + "6" * 64,
@@ -378,9 +401,9 @@ async def _record_evaluation(
         "auth_mode": "private",
         "channel_policy": policy,
         "channel_policy_hash": _plain_hash(policy),
-        "dataset_id": None,
-        "dataset_version": None,
-        "dataset_manifest_hash": None,
+        "dataset_id": dataset_id,
+        "dataset_version": dataset_snapshot["version"] if dataset_snapshot else None,
+        "dataset_manifest_hash": dataset_snapshot["manifest_hash"] if dataset_snapshot else None,
         "model_authorization": model_authorization,
         "runtime_fingerprint": fingerprint,
         "runtime_fingerprint_hash": _plain_hash(fingerprint),
@@ -1054,6 +1077,220 @@ async def test_publish_serializes_eval_manifest_against_example_mutation(
         "events": 1,
         "requests": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_selected_live_run_promotes_its_existing_version_and_audits_limited_evidence(
+    release_pool: asyncpg.Pool,
+) -> None:
+    repository, tenant_id, user_id, agent_id = await _create_agent(
+        release_pool, suffix="selected-run"
+    )
+    version = await repository.create_version(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=user_id,
+        is_tenant_admin=False,
+        expected_revision=1,
+    )
+    dataset_id = uuid.uuid4()
+    async with release_pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO eval_datasets (dataset_id, tenant_id, name, created_by)
+               VALUES ($1, $2, 'selected run dataset', $3)""",
+            dataset_id, tenant_id, user_id,
+        )
+    evaluation, candidate = await _record_evaluation(
+        repository, tenant_id=tenant_id, user_id=user_id, agent_id=agent_id,
+        dataset_id=str(dataset_id),
+    )
+    version_id = str(version["agent_version_id"])
+    snapshot_hash = "sha256:" + "9" * 64
+    identity = {
+        "agent_id": agent_id,
+        "agent_version_id": version_id,
+        "agent_spec_hash": version["spec_hash"],
+        "agent_runtime_snapshot_hash": snapshot_hash,
+    }
+    metrics = {
+        "attempted_trials": 3,
+        "completed_trials": 3,
+        "total_trials": 3,
+        "failed_trials": 0,
+        "execution_failed_trials": 0,
+        "judge_failed_trials": 0,
+        "unscored_trials": 0,
+        "unknown_side_effect_trial_count": 0,
+        "actual_fingerprint": identity,
+        "gate": {"profile": "agent_version_task_suite", "status": "warning", "reason": "fixed_sample_only"},
+    }
+    run_id = uuid.uuid4()
+    async with release_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO eval_experiment_runs (
+                run_id, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                score_summary, metrics, dataset_manifest_hash, evaluator_suite_hash
+            ) VALUES ($1, $2, $3, 'live_candidate', 'succeeded', $4::jsonb,
+                      $5::jsonb, $6::jsonb, $7, $8)
+            """,
+            run_id,
+            tenant_id,
+            dataset_id,
+            json.dumps({**identity, "candidate_type": "agent_version"}),
+            json.dumps({"critical_failed_count": 0, "excluded_case_count": 0}),
+            json.dumps(metrics),
+            candidate["dataset_manifest_hash"],
+            "8" * 64,
+        )
+    result = await repository.publish_agent(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        evaluation_id=str(evaluation["evaluation_id"]),
+        user_id=user_id,
+        is_tenant_admin=False,
+        idempotency_key="publish-selected-run-0001",
+        reason="selected fixed Version",
+        current_candidate=candidate,
+        experiment_run_id=str(run_id),
+        selected_version_id=version_id,
+        selected_version_snapshot_hash=snapshot_hash,
+        actor_model_access_levels={"public"},
+        model_authorization_revalidator=_model_authorization_revalidator(
+            candidate["model_authorization"]
+        ),
+    )
+    assert result["version"]["agent_version_id"] == version_id
+    assert result["publication"]["version_id"] == version_id
+    audit = result["event"]["validation_snapshot"]
+    assert audit["experiment_run_id"] == str(run_id)
+    assert audit["quality_gate_status"] == "warning"
+    assert audit["quality_evidence_scope"] == "fixed_sample_only"
+    assert audit["general_quality_proven"] is False
+    async with release_pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_versions WHERE tenant_id = $1 AND agent_id = $2",
+            tenant_id, uuid.UUID(agent_id),
+        ) == 1
+
+    replay = await repository.replay_release_request(
+        tenant_id=tenant_id,
+        operation="promote",
+        idempotency_key="publish-selected-run-0001",
+        agent_id=agent_id,
+        user_id=user_id,
+        is_tenant_admin=False,
+        reason="selected fixed Version",
+        evaluation_id=str(evaluation["evaluation_id"]),
+        experiment_run_id=str(run_id),
+    )
+    assert replay is not None and replay["idempotent_replay"] is True
+    with pytest.raises(AgentReleaseIdempotencyConflictError):
+        await repository.replay_release_request(
+            tenant_id=tenant_id,
+            operation="promote",
+            idempotency_key="publish-selected-run-0001",
+            agent_id=agent_id,
+            user_id=user_id,
+            is_tenant_admin=False,
+            reason="selected fixed Version",
+            evaluation_id=str(evaluation["evaluation_id"]),
+            experiment_run_id=str(uuid.uuid4()),
+        )
+    with pytest.raises(AgentReleaseGateError, match="AGENT_EVAL_RUN_IDENTITY_MISMATCH"):
+        await repository.publish_agent(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            evaluation_id=str(evaluation["evaluation_id"]),
+            user_id=user_id,
+            is_tenant_admin=False,
+            idempotency_key="publish-selected-run-wrong-hash",
+            reason="selected fixed Version",
+            current_candidate=candidate,
+            experiment_run_id=str(run_id),
+            selected_version_id=version_id,
+            selected_version_snapshot_hash="sha256:" + "0" * 64,
+            actor_model_access_levels={"public"},
+            model_authorization_revalidator=_model_authorization_revalidator(
+                candidate["model_authorization"]
+            ),
+        )
+    bad_run_id = uuid.uuid4()
+    async with release_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO eval_experiment_runs (
+                run_id, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                score_summary, metrics, dataset_manifest_hash, evaluator_suite_hash
+            )
+            SELECT $1, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                   score_summary,
+                   jsonb_set(metrics, '{unknown_side_effect_trial_count}', '1'::jsonb),
+                   dataset_manifest_hash, evaluator_suite_hash
+            FROM eval_experiment_runs WHERE run_id = $2
+            """,
+            bad_run_id, run_id,
+        )
+    with pytest.raises(AgentReleaseGateError, match="AGENT_EVAL_RUN_HARD_FAILURE"):
+        await repository.publish_agent(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            evaluation_id=str(evaluation["evaluation_id"]),
+            user_id=user_id,
+            is_tenant_admin=False,
+            idempotency_key="publish-selected-run-unknown-effect",
+            reason="selected fixed Version",
+            current_candidate=candidate,
+            experiment_run_id=str(bad_run_id),
+            selected_version_id=version_id,
+            selected_version_snapshot_hash=snapshot_hash,
+            actor_model_access_levels={"public"},
+            model_authorization_revalidator=_model_authorization_revalidator(
+                candidate["model_authorization"]
+            ),
+        )
+    other_dataset_id, other_run_id = uuid.uuid4(), uuid.uuid4()
+    async with release_pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO eval_datasets (dataset_id, tenant_id, name, created_by)
+               VALUES ($1, $2, 'different dataset', $3)""",
+            other_dataset_id, tenant_id, user_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO eval_experiment_runs (
+                run_id, tenant_id, dataset_id, run_mode, status, target_snapshot,
+                score_summary, metrics, dataset_manifest_hash, evaluator_suite_hash
+            )
+            SELECT $1, tenant_id, $2, run_mode, status, target_snapshot,
+                   score_summary, metrics, dataset_manifest_hash, evaluator_suite_hash
+            FROM eval_experiment_runs WHERE run_id = $3
+            """,
+            other_run_id, other_dataset_id, run_id,
+        )
+    with pytest.raises(AgentReleaseGateError, match="AGENT_EVAL_RUN_DATASET_MISMATCH"):
+        await repository.publish_agent(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            evaluation_id=str(evaluation["evaluation_id"]),
+            user_id=user_id,
+            is_tenant_admin=False,
+            idempotency_key="publish-selected-run-other-dataset",
+            reason="selected fixed Version",
+            current_candidate=candidate,
+            experiment_run_id=str(other_run_id),
+            selected_version_id=version_id,
+            selected_version_snapshot_hash=snapshot_hash,
+            actor_model_access_levels={"public"},
+            model_authorization_revalidator=_model_authorization_revalidator(
+                candidate["model_authorization"]
+            ),
+        )
+    async with release_pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_publish_events WHERE tenant_id = $1 AND agent_id = $2",
+            tenant_id, uuid.UUID(agent_id),
+        ) == 1
 
 
 @pytest.mark.asyncio

@@ -219,6 +219,7 @@ class AgentPublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     evaluation_id: uuid.UUID
+    experiment_run_id: uuid.UUID | None = None
     reason: str = Field("", max_length=1000)
 
     @field_validator("reason")

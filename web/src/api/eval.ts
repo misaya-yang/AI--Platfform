@@ -326,6 +326,20 @@ export interface EvalExperiment {
 
 export type EvalExperimentRunMode = "rescore_trace" | "live_candidate";
 
+export type EvalCandidateConfig =
+  | { agent_id: string; agent_version_id: string; system_prompt_override?: never }
+  | { system_prompt_override?: string; agent_id?: never; agent_version_id?: never };
+
+export interface EvalAgentVersionTargetSnapshot {
+  candidate_type: "agent_version";
+  agent_id: string;
+  agent_version_id: string;
+  agent_spec_hash?: string;
+  agent_runtime_snapshot_hash?: string;
+  model_id?: string;
+  knowledge_dataset_ids?: string[];
+}
+
 export interface EvalExperimentRunProgress {
   completed?: number;
   failed?: number;
@@ -863,10 +877,7 @@ export async function runEvalExperiment(
     run_mode?: EvalExperimentRunMode;
     repetitions?: number;
     baseline_run_id?: string | null;
-    candidate_config?: {
-      system_prompt_override?: string;
-      [key: string]: unknown;
-    };
+    candidate_config?: EvalCandidateConfig;
     target_snapshot?: Record<string, unknown>;
     candidate_label?: string;
     baseline_label?: string | null;

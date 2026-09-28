@@ -44,7 +44,7 @@ import {
   agentPreviewEventText,
   agentPreviewToolActivityId,
 } from "./agentPreviewEvents";
-import { downloadPreviewArtifact, latestPreviewRunId, pollPreviewOutcome, previewArtifactCanDownload, previewHistoryMessages, previewLocator, previewLocatorKey, previewRunIsTerminal, previewSessionActionsBlocked, readPreviewLocator } from "./agentPreviewRecovery";
+import { downloadPreviewArtifact, latestPreviewRunId, pollPreviewOutcome, previewArtifactCanDownload, previewCanStartCurrentDraft, previewHistoryMessages, previewLocator, previewLocatorKey, previewRunIsTerminal, previewSessionActionsBlocked, readPreviewLocator } from "./agentPreviewRecovery";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -220,6 +220,11 @@ export function AgentPreviewPanel({
   const sessionActionsBlocked = previewSessionActionsBlocked({
     restoring, starting, sending, runUnsettled, decidingApproval, cancelling, refreshingRun,
   });
+  const canStartCurrentDraft = previewCanStartCurrentDraft({
+    target, pinnedDraftRevision: session?.draft_revision ?? null, currentDraftRevision: draftRevision,
+    restoring, starting, sending, decidingApproval, cancelling, refreshingRun,
+    approvalPending: Boolean(approval),
+  });
   const previousDrafts = Array.from(new Set([
     ...Object.keys(history).filter((key) => key.startsWith("draft:")),
     ...(target.startsWith("draft:") ? [target] : []),
@@ -350,7 +355,7 @@ export function AgentPreviewPanel({
   }, [session, restoring, sending, runUnsettled, approval, refreshingRun, decidingApproval, cancelling, runId, refreshArtifactFacts, t]);
 
   const startSession = async () => {
-    if (sessionActionsBlocked) return;
+    if (sessionActionsBlocked && !canStartCurrentDraft) return;
     setStarting(true);
     setError(null);
     abortRef.current?.abort();
@@ -646,7 +651,7 @@ export function AgentPreviewPanel({
           <Title id="agent-preview-title" level={3}>{t("agents.common.preview")}</Title>
           <Text type="secondary">{t("agents.preview.subtitle")}</Text>
         </div>
-        <Button icon={<MessageSquarePlus size={16} />} onClick={() => void startSession()} loading={starting} disabled={sessionActionsBlocked}>
+        <Button icon={<MessageSquarePlus size={16} />} onClick={() => void startSession()} loading={starting} disabled={sessionActionsBlocked && !canStartCurrentDraft}>
           {target.startsWith("draft:") ? t("agents.preview.currentDraft", "Preview current draft") : t("agents.preview.newSession")}
         </Button>
       </header>

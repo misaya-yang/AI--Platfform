@@ -188,6 +188,15 @@ export async function listAgentVersions(agentId: string): Promise<AgentVersion[]
   return data;
 }
 
+export async function createAgentVersion(agentId: string, draftRevision: number): Promise<AgentVersion> {
+  const { data } = await api.post<{ version: AgentVersion }>(
+    `/api/v1/agents/${agentId}/versions`,
+    {},
+    { headers: { "If-Match": `"${draftRevision}"` } },
+  );
+  return data.version;
+}
+
 export async function runAgentReleaseEvaluation(
   agentId: string,
   input: {
@@ -256,10 +265,11 @@ export async function publishAgent(
   evaluationId: string,
   idempotencyKey: string,
   reason: string,
+  experimentRunId?: string,
 ): Promise<AgentReleaseMutation> {
   const { data } = await api.post<AgentReleaseMutation>(
     `/api/v1/agents/${agentId}/publish`,
-    { evaluation_id: evaluationId, reason },
+    { evaluation_id: evaluationId, reason, ...(experimentRunId ? { experiment_run_id: experimentRunId } : {}) },
     { headers: { "Idempotency-Key": idempotencyKey } },
   );
   return data;

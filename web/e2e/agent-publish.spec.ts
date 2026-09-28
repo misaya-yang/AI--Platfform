@@ -69,6 +69,7 @@ interface HarnessState {
   publishCalls: number;
   rollbackCalls: number;
   publishKeys: string[];
+  publishRunIds: Array<string | null>;
   successfulPublishKeys: Set<string>;
   rollbackKeys: string[];
   selectedEvalDatasetIds: Array<string | null>;
@@ -408,7 +409,8 @@ async function handleAgentApi(
     if (state.role !== "owner") {
       return route.fulfill(response({ detail: { code: "AGENT_ROLE_FORBIDDEN", message: "Owner role required." } }, 403));
     }
-    const body = request.postDataJSON() as { evaluation_id: string; reason: string };
+    const body = request.postDataJSON() as { evaluation_id: string; reason: string; experiment_run_id?: string };
+    state.publishRunIds.push(body.experiment_run_id ?? null);
     const selected = state.evaluations.find((item) => item.evaluation_id === body.evaluation_id);
     if (!selected || selected.status !== "passed" || selected.stale || selected.gate_snapshot.blocking_findings.length > 0) {
       return route.fulfill(response({ detail: { code: "AGENT_EVAL_STALE", message: "Evaluation is not publishable." } }, 409));
@@ -498,6 +500,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     publishCalls: 0,
     rollbackCalls: 0,
     publishKeys: [],
+    publishRunIds: [],
     successfulPublishKeys: new Set(),
     rollbackKeys: [],
     selectedEvalDatasetIds: [],
@@ -730,6 +733,58 @@ test.describe("Agent release evaluation", () => {
 });
 
 test.describe("Agent publish and rollback", () => {
+  test("links only an explicitly verified successful Agent Version run for this release dataset", async ({ page }) => {
+    page.setDefaultTimeout(15_000);
+    const state = await installHarness(page, { statuses: ["passed"], withDataset: true });
+    const selectedEvaluation = state.evaluations[0];
+    selectedEvaluation.dataset_id = DATASET_ID;
+    selectedEvaluation.dataset_manifest_hash = "7".repeat(64);
+    state.versions.push({ ...version(VERSION_THREE_ID, 3, 8, null), spec_hash: selectedEvaluation.spec_hash });
+    const matchingRunId = "81818181-8181-4181-8181-818181818181";
+    const wrongDatasetRunId = "82828282-8282-4282-8282-828282828282";
+    await page.route("**/api/v1/eval/experiment-runs/*", async (route) => {
+      const runId = new URL(route.request().url()).pathname.split("/").at(-1);
+      return route.fulfill(response({
+        run_id: runId,
+        experiment_id: "83838383-8383-4383-8383-838383838383",
+        tenant_id: "tenant-a",
+        dataset_id: runId === wrongDatasetRunId ? "other-dataset" : DATASET_ID,
+        dataset_manifest_hash: "7".repeat(64),
+        status: "succeeded",
+        run_mode: "live_candidate",
+        target_snapshot: {
+          candidate_type: "agent_version",
+          agent_id: AGENT_ID,
+          agent_version_id: VERSION_THREE_ID,
+          agent_spec_hash: selectedEvaluation.spec_hash,
+          model_id: spec.model.model_id,
+          knowledge_dataset_ids: [],
+        },
+        score_summary: {}, metrics: {}, created_by: "owner-user", created_at: NOW,
+      }));
+    });
+    await page.goto(`/agents/${AGENT_ID}/evals`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Review and publish" }).click();
+    const sheet = page.getByTestId("agent-publish-sheet");
+    const runInput = sheet.getByRole("searchbox", { name: "Experiment run ID" });
+    const publishButton = page.getByRole("button", { name: "Publish Version" });
+
+    await runInput.fill(wrongDatasetRunId);
+    await sheet.getByRole("button", { name: "Verify run" }).click();
+    await expect(sheet.getByText("The run's test set does not match this release evaluation.")).toBeVisible();
+    await expect(publishButton).toBeDisabled();
+    expect(state.publishCalls).toBe(0);
+
+    await runInput.fill(matchingRunId);
+    await sheet.getByRole("button", { name: "Verify run" }).click();
+    await expect(sheet.getByTestId("agent-publish-selected-run")).toContainText(VERSION_THREE_ID);
+    await expect(sheet.getByTestId("agent-publish-selected-run")).toContainText(DATASET_ID);
+    await expect(publishButton).toBeEnabled();
+    await publishButton.click();
+    await expect(sheet.getByText("Version published")).toBeVisible();
+    expect(state.publishRunIds).toEqual([matchingRunId]);
+  });
+
   test("reuses the idempotency key, promotes once, preserves session pinning, and rolls back", async ({ page }) => {
     const assertTraffic = watchTraffic(page, [/^503 \/api\/v1\/agents\/.*\/publish$/]);
     await page.setViewportSize({ width: 1440, height: 900 });

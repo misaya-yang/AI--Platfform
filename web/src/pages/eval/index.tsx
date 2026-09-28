@@ -15,7 +15,10 @@ import {
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
+
+import { createAgentVersion, listAgentPublications, listAgents, listAgentVersions } from "@/api/agents";
+import type { AgentSummary } from "@/types/agents";
 
 import {
   cancelEvalExperimentRun,
@@ -75,6 +78,7 @@ import { ExperimentRunResults } from "./components/ExperimentRunResults";
 import { KbRagasPanel } from "./components/KbRagasPanel";
 import { TraceExplorerShell } from "./components/TraceExplorerShell";
 import { canApproveReviewExample, kbDeepLinkNavigationKey, kbFailureSourceVersions, latestReviewCandidates } from "./reviewQueue";
+import { agentVersionTarget, buildExperimentTargetConfig } from "./agentVersionTarget";
 
 import "./styles.css";
 
@@ -366,7 +370,7 @@ export function EvalPage() {
   const [experimentDraft, setExperimentDraft] = useState({
     name: "assistant-baseline",
     description: "",
-    targetConfigText: JSON.stringify({ trace_family: "assistant", model_id: "qwen3.7-plus" }, null, 2),
+    targetConfigText: JSON.stringify({ trace_family: "assistant" }, null, 2),
   });
   const [exportPreview, setExportPreview] = useState<EvalTraceExportResponse | null>(null);
   const [examplesExport, setExamplesExport] = useState<EvalExamplesExportResponse | null>(null);
@@ -375,6 +379,9 @@ export function EvalPage() {
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
   const retryRequestKeysRef = useRef<Map<string, string>>(new Map());
   const [runMode, setRunMode] = useState<EvalExperimentRunMode>("live_candidate");
+  const [candidateSource, setCandidateSource] = useState<"builtin" | "agent_version">("builtin");
+  const [selectedAgentId, setSelectedAgentId] = useState<string>();
+  const [selectedAgentVersionId, setSelectedAgentVersionId] = useState<string>();
   const [repetitions, setRepetitions] = useState(3);
   const [systemPromptOverride, setSystemPromptOverride] = useState("");
   const [baselineRunId, setBaselineRunId] = useState<string>();
@@ -505,6 +512,18 @@ export function EvalPage() {
     queryFn: () => listEvalExperiments(),
     staleTime: 30_000,
   });
+  const agentsQuery = useQuery({
+    queryKey: ["eval", "agent-candidates"],
+    queryFn: () => listAgents({ limit: 100 }),
+    enabled: runMode === "live_candidate" && candidateSource === "agent_version",
+    staleTime: 30_000,
+  });
+  const agentVersionsQuery = useQuery({
+    queryKey: ["eval", "agent-versions", selectedAgentId],
+    queryFn: () => listAgentVersions(selectedAgentId || ""),
+    enabled: runMode === "live_candidate" && candidateSource === "agent_version" && Boolean(selectedAgentId),
+    staleTime: 10_000,
+  });
   const experimentDetailQuery = useQuery({
     queryKey: ["eval", "experiment", selectedExperimentId],
     queryFn: () => getEvalExperiment(selectedExperimentId || ""),
@@ -540,6 +559,8 @@ export function EvalPage() {
     [t],
   );
   const experiments = useMemo(() => experimentsQuery.data?.experiments || [], [experimentsQuery.data?.experiments]);
+  const selectedAgent: AgentSummary | undefined = agentsQuery.data?.items.find((agent) => agent.agent_id === selectedAgentId);
+  const selectedAgentVersion = agentVersionsQuery.data?.find((version) => version.agent_version_id === selectedAgentVersionId);
   const activeDataset = useMemo(() => {
     if (selectedDatasetId) {
       return datasets.find((dataset) => dataset.dataset_id === selectedDatasetId)
@@ -585,6 +606,16 @@ export function EvalPage() {
     retry: 2,
   });
   const latestRun = selectedRunQuery.data || selectedRunSummary;
+  const latestRunAgentTarget = agentVersionTarget(latestRun?.target_snapshot);
+  const agentPublicationsQuery = useQuery({
+    queryKey: ["eval", "agent-publications", latestRunAgentTarget?.agent_id],
+    queryFn: () => listAgentPublications(latestRunAgentTarget!.agent_id),
+    enabled: Boolean(latestRunAgentTarget?.agent_id),
+    staleTime: 10_000,
+  });
+  const exactVersionPublications = (agentPublicationsQuery.data || []).filter((publication) =>
+    publication.status === "active" && publication.version_id === latestRunAgentTarget?.agent_version_id,
+  );
   const terminalRunId = latestRun && latestRun.status !== "queued" && latestRun.status !== "running"
     ? latestRun.run_id
     : undefined;
@@ -798,11 +829,9 @@ export function EvalPage() {
         name: experimentDraft.name.trim() || "assistant-baseline",
         description: experimentDraft.description.trim(),
         dataset_id: activeDataset?.dataset_id || null,
-        target_config: {
-          ...parseJsonObjectDraft(experimentDraft.targetConfigText, {}),
-          trace_family: activeTraceFamily,
-          model_id: serverFilters.model_id || "qwen3.7-plus",
-        },
+        target_config: buildExperimentTargetConfig(
+          parseJsonObjectDraft(experimentDraft.targetConfigText, {}), activeTraceFamily,
+        ),
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
       }),
     onSuccess: async (experiment) => {
@@ -810,6 +839,21 @@ export function EvalPage() {
       setSelectedExperimentId(experiment.experiment_id);
       message.success(t("eval.workbench.experimentCreated"));
       await queryClient.invalidateQueries({ queryKey: ["eval", "experiments"] });
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const versionMutation = useMutation({
+    mutationFn: () => {
+      if (!selectedAgentId || !selectedAgent?.draft_revision || selectedAgent.caller_role !== "owner") {
+        throw new Error(t("eval.workbench.agentVersionUnavailable", "Only the Agent owner can snapshot a saved draft."));
+      }
+      return createAgentVersion(selectedAgentId, selectedAgent.draft_revision);
+    },
+    onSuccess: async (version) => {
+      setSelectedAgentVersionId(version.agent_version_id);
+      await queryClient.invalidateQueries({ queryKey: ["eval", "agent-versions", version.agent_id] });
+      message.success(t("eval.workbench.agentVersionCreated", { version: version.version_number, defaultValue: "Immutable Agent version {{version}} created." }));
     },
     onError: (error) => message.error(toError(error).message),
   });
@@ -871,6 +915,10 @@ export function EvalPage() {
     mutationFn: async () => {
       if (!activeExperiment) throw new Error(t("eval.workbench.createExperimentFirst", "Create an experiment first"));
       if (!activeEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
+      const agentCandidate = runMode === "live_candidate" && candidateSource === "agent_version";
+      if (agentCandidate && (!selectedAgentId || !selectedAgentVersionId)) {
+        throw new Error(t("eval.workbench.selectAgentVersion", "Select an immutable Agent version before running."));
+      }
       const datasetId = activeDataset?.dataset_id || activeExperiment.dataset_id || null;
       return runEvalExperiment(activeExperiment.experiment_id, {
         dataset_id: datasetId,
@@ -878,17 +926,18 @@ export function EvalPage() {
         run_mode: runMode,
         repetitions: runMode === "live_candidate" ? repetitions : 1,
         baseline_run_id: baselineRunId || activeExperiment.baseline_run_id || null,
-        candidate_config: systemPromptOverride.trim()
-          ? { system_prompt_override: systemPromptOverride.trim() }
-          : undefined,
-        candidate_label: "candidate",
+        candidate_config: agentCandidate
+          ? { agent_id: selectedAgentId!, agent_version_id: selectedAgentVersionId! }
+          : runMode === "live_candidate" && systemPromptOverride.trim()
+            ? { system_prompt_override: systemPromptOverride.trim() } : undefined,
+        candidate_label: agentCandidate ? `${selectedAgent?.name || "Agent"} v${selectedAgentVersion?.version_number || "?"}` : "candidate",
         baseline_label: "baseline",
-        target_snapshot: {
+        ...(!agentCandidate ? { target_snapshot: {
           trace_family: activeTraceFamily,
           dataset_id: datasetId,
           trace_id: datasetId ? null : selectedTraceId || null,
           run_mode: runMode,
-        },
+        } } : {}),
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
       });
     },
@@ -1069,10 +1118,12 @@ export function EvalPage() {
     && typeof latestScoreSummary.stateful_pass_rate === "number"
   );
   const effectiveRunDatasetId = activeDataset?.dataset_id || activeExperiment?.dataset_id || null;
+  const needsAgentVersion = runMode === "live_candidate" && candidateSource === "agent_version";
   const canRunExperiment = Boolean(
     canRunEvaluations
     && activeExperiment
     && activeEvaluator
+    && (!needsAgentVersion || (selectedAgent && selectedAgentVersion))
     && (runMode === "live_candidate"
       ? effectiveRunDatasetId
       : effectiveRunDatasetId || selectedTraceId)
@@ -1080,6 +1131,7 @@ export function EvalPage() {
   const missingRunInputs = [
     !activeExperiment ? "experiment" : null,
     !activeEvaluator ? "evaluator" : null,
+    needsAgentVersion && (!selectedAgent || !selectedAgentVersion) ? "immutable Agent version" : null,
     runMode === "live_candidate"
       ? !effectiveRunDatasetId ? "test set" : null
       : !effectiveRunDatasetId && !selectedTraceId ? "test set or trace" : null,
@@ -1565,6 +1617,48 @@ export function EvalPage() {
             onChange={(value) => setRunMode(value)}
           />
         </label>
+        {runMode === "live_candidate" ? <label className="eval-field">
+          <span>{t("eval.workbench.candidateSource", "Candidate source")}</span>
+          <Select
+            aria-label={t("eval.workbench.candidateSource", "Candidate source")}
+            value={candidateSource}
+            options={[
+              { label: t("eval.workbench.builtinCandidate", "Built-in Assistant"), value: "builtin" },
+              { label: t("eval.workbench.agentVersionCandidate", "Immutable Agent version"), value: "agent_version" },
+            ]}
+            onChange={setCandidateSource}
+          />
+        </label> : null}
+        {needsAgentVersion ? <>
+          <label className="eval-field">
+            <span>{t("eval.workbench.agent", "Agent")}</span>
+            <Select
+              aria-label={t("eval.workbench.agent", "Agent")}
+              showSearch
+              optionFilterProp="label"
+              loading={agentsQuery.isLoading}
+              value={selectedAgentId}
+              options={(agentsQuery.data?.items || []).map((agent) => ({ label: agent.name, value: agent.agent_id }))}
+              onChange={(value) => { setSelectedAgentId(value); setSelectedAgentVersionId(undefined); }}
+            />
+          </label>
+          <label className="eval-field">
+            <span>{t("eval.workbench.agentVersion", "Immutable version")}</span>
+            <Select
+              aria-label={t("eval.workbench.agentVersion", "Immutable version")}
+              showSearch
+              optionFilterProp="label"
+              loading={agentVersionsQuery.isLoading}
+              disabled={!selectedAgentId}
+              value={selectedAgentVersionId}
+              options={(agentVersionsQuery.data || []).map((version) => ({
+                label: `v${version.version_number} · ${version.spec_hash.slice(0, 12)}`,
+                value: version.agent_version_id,
+              }))}
+              onChange={setSelectedAgentVersionId}
+            />
+          </label>
+        </> : null}
         <label className="eval-field">
           <span>{t("eval.workbench.repetitions", "Repetitions")}</span>
           <InputNumber min={1} max={10} value={runMode === "live_candidate" ? repetitions : 1} disabled={runMode !== "live_candidate"} onChange={(value) => setRepetitions(value ?? 3)} />
@@ -1573,13 +1667,32 @@ export function EvalPage() {
           <span>{t("eval.workbench.promptOverride", "System prompt override (optional)")}</span>
           <Input.TextArea
             value={systemPromptOverride}
-            disabled={runMode !== "live_candidate"}
+            disabled={runMode !== "live_candidate" || needsAgentVersion}
             placeholder={t("eval.workbench.promptOverrideHint", "Leave empty to evaluate the deployed prompt")}
             autoSize={{ minRows: 2, maxRows: 6 }}
             onChange={(event) => setSystemPromptOverride(event.target.value)}
           />
         </label>
       </div>
+      {needsAgentVersion ? <>
+        {agentsQuery.error || agentVersionsQuery.error ? <Alert type="error" showIcon title={t("eval.workbench.agentCatalogUnavailable", "Agent versions could not be loaded")}
+          description={toError(agentsQuery.error || agentVersionsQuery.error).message}
+          action={<Button onClick={() => void Promise.all([agentsQuery.refetch(), agentVersionsQuery.refetch()])}>{t("common.retry", "Retry")}</Button>} /> : null}
+        <Space size={8} wrap>
+          <Button
+            disabled={!selectedAgent || selectedAgent.caller_role !== "owner" || !selectedAgent.draft_revision || selectedAgent.status === "archived"}
+            loading={versionMutation.isPending}
+            onClick={() => versionMutation.mutate()}
+          >{t("eval.workbench.snapshotDraft", "Snapshot saved draft as immutable version")}</Button>
+          {selectedAgentId ? <Link to={`/agents/${selectedAgentId}`}>{t("eval.workbench.editAgentDraft", "Edit and save Agent draft")}</Link> : null}
+        </Space>
+        {selectedAgentVersion ? <Descriptions size="small" bordered column={{ xs: 1, sm: 2 }} items={[
+          { key: "version", label: t("eval.workbench.agentVersion", "Immutable version"), children: `v${selectedAgentVersion.version_number} · ${selectedAgentVersion.agent_version_id}` },
+          { key: "model", label: t("eval.workbench.configuredModel", "Configured model"), children: selectedAgentVersion.spec.model.model_id || t("agents.common.serverDefault", "Server default") },
+          { key: "knowledge", label: t("eval.workbench.configuredKnowledge", "Configured knowledge"), children: selectedAgentVersion.spec.knowledge.map((item) => item.dataset_id).join(", ") || "—" },
+          { key: "scope", label: t("eval.workbench.scopeNote", "Runtime scope"), children: t("eval.workbench.scopeRechecked", "Model and knowledge access are resolved again when the run starts.") },
+        ]} /> : null}
+      </> : null}
       {missingRunInputs.length ? (
         <Alert
           type="warning"
@@ -1595,7 +1708,8 @@ export function EvalPage() {
           loading={experimentBatchMutation.isPending}
           disabled={!canRunExperiment}
         >
-          {runMode === "live_candidate" ? t("eval.workbench.runCurrentAgent", "Run current Agent") : t("eval.workbench.rescoreStored", "Re-score stored traces")}
+          {needsAgentVersion ? t("eval.workbench.runAgentVersion", "Run immutable Agent version")
+            : runMode === "live_candidate" ? t("eval.workbench.runCurrentAgent", "Run current Agent") : t("eval.workbench.rescoreStored", "Re-score stored traces")}
         </Button>
       </Space>
       <Descriptions
@@ -1679,6 +1793,26 @@ export function EvalPage() {
         baselineRunId={activeExperiment?.baseline_run_id || baselineRunId}
         onOpenTrace={openComparedTrace}
       />
+      {latestRunAgentTarget ? <Descriptions
+        className="eval-workbench-descriptions"
+        size="small"
+        bordered
+        column={{ xs: 1, sm: 2 }}
+        items={[
+          { key: "agent", label: t("eval.workbench.actualAgent", "Executed Agent"), children: <Link to={`/agents/${latestRunAgentTarget.agent_id}/versions`}>{latestRunAgentTarget.agent_id}</Link> },
+          { key: "version", label: t("eval.workbench.actualVersion", "Executed immutable version"), children: latestRunAgentTarget.agent_version_id },
+          { key: "model", label: t("eval.workbench.actualModel", "Resolved model"), children: latestRunAgentTarget.model_id || "—" },
+          { key: "knowledge", label: t("eval.workbench.actualKnowledge", "Resolved knowledge IDs"), children: latestRunAgentTarget.knowledge_dataset_ids?.join(", ") || "—" },
+          { key: "spec", label: t("eval.workbench.actualSpecHash", "Executed spec hash"), children: latestRunAgentTarget.agent_spec_hash || "—" },
+          { key: "runtime", label: t("eval.workbench.actualRuntimeHash", "Runtime snapshot hash"), children: latestRunAgentTarget.agent_runtime_snapshot_hash || "—" },
+          { key: "publication", label: t("eval.workbench.publicationReadback", "Publication readback"), children: agentPublicationsQuery.isLoading
+            ? t("eval.workbench.checkingPublication", "Checking exact version…")
+            : agentPublicationsQuery.isError ? t("eval.workbench.publicationUnavailable", "Publication state unavailable")
+              : exactVersionPublications.length ? exactVersionPublications.map((publication) => (
+                <span key={publication.publication_id}>{publication.channel}: {publication.publication_id} </span>
+              )) : t("eval.workbench.notPublishedVersion", "No active publication points to this exact version") },
+        ]}
+      /> : null}
       <ExperimentRunResults
         run={latestRun?.run_id === queuedRunId ? latestRun : null}
         results={latestRun?.run_id === queuedRunId ? runResultsQuery.data || null : null}

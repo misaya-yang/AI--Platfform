@@ -64,6 +64,8 @@ class _FakeClient:
 
     async def get(self, path: str, **kwargs: Any) -> _FakeResponse:
         self.captured.append({"method": "GET", "path": path, **kwargs})
+        if path.startswith("/api/v2/agent/threads/"):
+            return self.responses.pop(0)
         return _FakeResponse({"user_id": "eval-user", "tenant_id": "tenant-a"})
 
     async def post(self, path: str, **kwargs: Any) -> _FakeResponse:
@@ -211,6 +213,161 @@ async def test_candidate_client_rejects_non_runtime_owner(monkeypatch: pytest.Mo
         await EvalCandidateClient().run(
             tenant_id="tenant-a", run_case_id="run-case-1", message="hello", config={}
         )
+
+
+@pytest.mark.asyncio
+async def test_agent_version_candidate_sends_only_ids_and_message_with_creator_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.eval import eval_llm_client
+
+    monkeypatch.setattr(eval_llm_client, "_build_internal_jwt", lambda **_kwargs: "delegated-jwt")
+    agent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    version_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    config = {
+        "candidate_type": "agent_version", "agent_id": agent_id,
+        "agent_version_id": version_id, "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+        "model_id": "frozen-model", "provider_id": "frozen-provider",
+        "knowledge_dataset_ids": ["server-kb"],
+    }
+    target = {
+        "agent_id": agent_id, "agent_version_id": version_id,
+        "agent_spec_hash": config["agent_spec_hash"],
+        "runtime_snapshot_hash": config["agent_runtime_snapshot_hash"],
+    }
+    captured: list[dict[str, Any]] = []
+    _install_fake_client(monkeypatch, captured, [
+        _FakeResponse({"thread": {
+            "thread_id": "thread-1", "runtime": {"owner": "agent_runtime"},
+            "agent_version_target": target,
+        }}),
+        _FakeResponse({"turn": {
+            "id": "turn-1", "events_url": "/api/v2/agent/threads/thread-1/events",
+        }}),
+        _FakeResponse(lines=[
+            _v2_event("run_started", {"run_id": "turn-1"}, 1),
+            _v2_event("text_delta", {"content": "answer"}, 2),
+            _v2_event("run_finished", {"status": "succeeded"}, 3),
+        ]),
+    ])
+    candidate = EvalCandidateClient(allow_service_identity=True)
+    candidate.token = "admin-token"
+    result = await candidate.run(
+        tenant_id="tenant-a", run_case_id="run-case-1", message="hello", config=config,
+        delegation={
+            "actor": "eval-worker", "subject": "eval-user", "tenant_id": "tenant-a",
+            "run_id": "run", "job_id": "job",
+        },
+    )
+
+    assert all(item["headers"]["Authorization"] == "Bearer delegated-jwt" for item in captured)
+    assert captured[1]["json"] == {
+        "session_id": "run-case-1", "expected_tenant_id": "tenant-a",
+        "agent_id": agent_id, "agent_version_id": version_id,
+    }
+    assert captured[2]["json"] == {"message": "hello"}
+    assert result.fingerprint["agent_version_id"] == version_id
+
+
+@pytest.mark.asyncio
+async def test_agent_version_candidate_rejects_mismatched_pin_before_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.eval import eval_llm_client
+
+    monkeypatch.setattr(eval_llm_client, "_build_internal_jwt", lambda **_kwargs: "delegated-jwt")
+    captured: list[dict[str, Any]] = []
+    _install_fake_client(monkeypatch, captured, [
+        _FakeResponse({"thread": {
+            "thread_id": "thread-1", "runtime": {"owner": "agent_runtime"},
+            "agent_version_target": {
+                "agent_id": "agent-a", "agent_version_id": "version-b",
+                "agent_spec_hash": "wrong", "runtime_snapshot_hash": "sha256:wrong",
+            },
+        }}),
+    ])
+    candidate = EvalCandidateClient(allow_service_identity=True)
+    candidate.token = "admin-token"
+    with pytest.raises(RuntimeError, match="AGENT_EVAL_VERSION_PIN_MISMATCH"):
+        await candidate.run(
+            tenant_id="tenant-a", run_case_id="run-case-1", message="hello",
+            config={
+                "candidate_type": "agent_version", "agent_id": "agent-a",
+                "agent_version_id": "version-a", "agent_spec_hash": "a" * 64,
+                "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+            },
+            delegation={
+                "actor": "eval-worker", "subject": "eval-user", "tenant_id": "tenant-a",
+                "run_id": "run", "job_id": "job",
+            },
+        )
+    assert [item["path"] for item in captured] == [
+        "/api/v1/auth/me", "/api/v2/agent/threads",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_version_candidate_cannot_use_worker_admin_token() -> None:
+    candidate = EvalCandidateClient(allow_service_identity=True)
+    candidate.token = "worker-admin-token"
+    with pytest.raises(RuntimeError, match="AGENT_EVAL_DELEGATION_REQUIRED"):
+        await candidate.run(
+            tenant_id="tenant-a", run_case_id="run-case-1", message="hello",
+            config={
+                "candidate_type": "agent_version", "agent_id": "agent-a",
+                "agent_version_id": "version-a", "agent_spec_hash": "a" * 64,
+                "agent_runtime_snapshot_hash": "sha256:" + "b" * 64,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_version_resume_rechecks_exact_thread_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.eval import eval_llm_client
+
+    monkeypatch.setattr(eval_llm_client, "_build_internal_jwt", lambda **_kwargs: "delegated-jwt")
+    target = {
+        "agent_id": "agent-a", "agent_version_id": "version-a",
+        "agent_spec_hash": "a" * 64, "runtime_snapshot_hash": "sha256:" + "b" * 64,
+    }
+    captured: list[dict[str, Any]] = []
+    _install_fake_client(monkeypatch, captured, [
+        _FakeResponse({"thread": {
+            "thread_id": "thread-1", "runtime": {"owner": "agent_runtime"},
+            "agent_version_target": target,
+        }}),
+        _FakeResponse(lines=[
+            _v2_event("run_started", {"run_id": "turn-1"}, 1),
+            _v2_event("text_delta", {"content": "answer"}, 2),
+            _v2_event("run_finished", {"status": "succeeded"}, 3),
+        ]),
+    ])
+    candidate = EvalCandidateClient(allow_service_identity=True)
+    result = await candidate.run(
+        tenant_id="tenant-a", run_case_id="run-case-1", message="hello",
+        config={
+            "candidate_type": "agent_version", "agent_id": target["agent_id"],
+            "agent_version_id": target["agent_version_id"],
+            "agent_spec_hash": target["agent_spec_hash"],
+            "agent_runtime_snapshot_hash": target["runtime_snapshot_hash"],
+        },
+        delegation={
+            "actor": "eval-worker", "subject": "eval-user", "tenant_id": "tenant-a",
+            "run_id": "run", "job_id": "job",
+        },
+        resume_handle={
+            "tenant_id": "tenant-a", "user_id": "eval-user", "run_case_id": "run-case-1",
+            "thread_id": "thread-1", "turn_id": "turn-1",
+            "events_url": "/api/v2/agent/threads/thread-1/events",
+        },
+    )
+
+    assert result.fingerprint["agent_version_id"] == "version-a"
+    assert not any(item["method"] == "POST" for item in captured)
+    assert captured[1]["path"] == "/api/v2/agent/threads/thread-1"
 
 
 @pytest.mark.asyncio

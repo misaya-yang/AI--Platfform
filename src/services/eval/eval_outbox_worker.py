@@ -157,7 +157,11 @@ def _build_candidate_runner(repository: AgentTraceRepository):
                 )
 
             delegation = None
-            if (getattr(_eval_candidate_client, "allow_service_identity", False)
+            if execution_config.get("candidate_type") == "agent_version":
+                # Studio ACLs are evaluated for the persisted run creator,
+                # never for the worker's privileged gateway credential.
+                delegation = await repository.resolve_eval_job_actor(tenant_id=tenant_id)
+            elif (getattr(_eval_candidate_client, "allow_service_identity", False)
                     and not _eval_candidate_client.token and not _eval_candidate_client.api_key):
                 delegation = await repository.resolve_eval_job_actor(tenant_id=tenant_id)
             result = await _eval_candidate_client.run(
@@ -172,10 +176,11 @@ def _build_candidate_runner(repository: AgentTraceRepository):
                 evidence = await repository.get_candidate_runtime_evidence(
                     tenant_id=tenant_id, run_case_id=run_case_id, run_id=trace_id,
                 )
-                fingerprint, usage, model_spans = runtime_model_evidence(
+                runtime_fingerprint, usage, model_spans = runtime_model_evidence(
                     evidence=evidence, tenant_id=tenant_id, run_case_id=run_case_id,
                     run_id=trace_id, expected_model_ref=expected_ref,
                 )
+                fingerprint = {**result.fingerprint, **runtime_fingerprint}
                 trace_payload = dict(result.trace_payload or {})
                 if not trace_payload:
                     raise RuntimeError("AGENT_EVAL_TRACE_CAPTURE_UNAVAILABLE")

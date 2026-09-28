@@ -989,6 +989,74 @@ def test_publish_requires_key_and_replays_same_result(release_client) -> None:
     assert repository.candidate_resolution_calls == 1
 
 
+def test_publish_selected_run_uses_server_resolved_version_preview(
+    release_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, repository, _ = release_client
+    run_id = str(uuid.uuid4())
+    snapshot = {
+        "schema_version": "agent-runtime/v1",
+        "tenant_id": "tenant-a",
+        "agent_id": AGENT_ID,
+        "agent_version_id": OLD_VERSION_ID,
+        "publication": {"id": None, "channel": "preview", "auth_mode": "private"},
+        "model": {"id": "qwen3.7-plus", "provider": "dashscope", "parameters": {}},
+        "knowledge": {"datasets": []},
+        "capabilities": [],
+        "fingerprints": {"spec": "sha256:" + "a" * 64},
+    }
+    target = {
+        "candidate_type": "agent_version",
+        "agent_id": AGENT_ID,
+        "agent_version_id": OLD_VERSION_ID,
+        "agent_spec_hash": "a" * 64,
+        "agent_runtime_snapshot_hash": runtime_sha256(snapshot),
+    }
+
+    class TraceRepository:
+        async def get_experiment_run(self, **kwargs: Any) -> dict[str, Any]:
+            assert kwargs == {"tenant_id": "tenant-a", "run_id": run_id}
+            return {
+                "status": "succeeded", "run_mode": "live_candidate",
+                "target_snapshot": target,
+            }
+
+    async def build_snapshot(_request: Any, _resolution: Any, _user: Any, *, channel: str):
+        assert channel == "preview"
+        return snapshot
+
+    import src.api.v1.agent_runtime as agent_runtime_module
+
+    monkeypatch.setattr(agent_runtime_module, "_build_snapshot", build_snapshot)
+    client.app.state.agent_trace_repository = TraceRepository()
+    captured: dict[str, Any] = {}
+    publish = repository.publish_agent
+
+    async def capture_publish(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return await publish(**kwargs)
+
+    repository.publish_agent = capture_publish  # type: ignore[method-assign]
+    response = client.post(
+        f"/agents/{AGENT_ID}/publish",
+        json={"evaluation_id": EVALUATION_ID, "experiment_run_id": run_id},
+        headers={"Idempotency-Key": "selected-run-api-0001"},
+    )
+    assert response.status_code == 200, response.text
+    assert captured["experiment_run_id"] == run_id
+    assert captured["selected_version_id"] == OLD_VERSION_ID
+    assert captured["selected_version_snapshot_hash"] == runtime_sha256(snapshot)
+
+    target["agent_runtime_snapshot_hash"] = "sha256:" + "0" * 64
+    stale = client.post(
+        f"/agents/{AGENT_ID}/publish",
+        json={"evaluation_id": EVALUATION_ID, "experiment_run_id": run_id},
+        headers={"Idempotency-Key": "selected-run-api-stale"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "AGENT_EVAL_RUN_IDENTITY_MISMATCH"
+
+
 def test_conflicting_idempotency_key_and_stale_eval_are_stable_conflicts(
     release_client,
 ) -> None:

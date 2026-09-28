@@ -2961,6 +2961,7 @@ class DatabaseAgentRepository(BaseRepository):
         is_tenant_admin: bool,
         reason: str,
         evaluation_id: str | None = None,
+        experiment_run_id: str | None = None,
         publication_id: str | None = None,
         target_version_id: str | None = None,
     ) -> dict[str, Any] | None:
@@ -2994,7 +2995,7 @@ class DatabaseAgentRepository(BaseRepository):
                 return None
             event = await conn.fetchrow(
                 """
-                SELECT operation, reason
+                SELECT operation, reason, validation_snapshot
                 FROM agent_publish_events
                 WHERE tenant_id = $1 AND event_id = $2
                 """,
@@ -3008,10 +3009,17 @@ class DatabaseAgentRepository(BaseRepository):
                 and str(event["reason"] or "") == reason
             )
             if operation == "promote":
+                snapshot = _row_to_dict(event).get("validation_snapshot") if event else {}
+                recorded_run_id = (
+                    str(snapshot.get("experiment_run_id"))
+                    if isinstance(snapshot, dict) and snapshot.get("experiment_run_id")
+                    else None
+                )
                 matches = (
                     matches
                     and evaluation_id is not None
                     and (str(request_row["evaluation_id"]) == evaluation_id)
+                    and recorded_run_id == experiment_run_id
                 )
             else:
                 matches = (
@@ -3041,6 +3049,9 @@ class DatabaseAgentRepository(BaseRepository):
         idempotency_key: str,
         reason: str,
         current_candidate: dict[str, Any],
+        experiment_run_id: str | None = None,
+        selected_version_id: str | None = None,
+        selected_version_snapshot_hash: str | None = None,
         actor_model_access_levels: set[str] | None = None,
         model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
@@ -3060,6 +3071,9 @@ class DatabaseAgentRepository(BaseRepository):
             "channel": current_candidate.get("channel"),
             "channel_policy_hash": current_candidate.get("channel_policy_hash"),
             "reason": reason,
+            "experiment_run_id": experiment_run_id,
+            "selected_version_id": selected_version_id,
+            "selected_version_snapshot_hash": selected_version_snapshot_hash,
         }
         request_hash = hashlib.sha256(canonical_spec(request_identity).encode("utf-8")).hexdigest()
         async with self._pool.acquire() as conn, conn.transaction():
@@ -3190,6 +3204,122 @@ class DatabaseAgentRepository(BaseRepository):
                     "manifest_hash"
                 ] != str(evaluation["dataset_manifest_hash"] or ""):
                     raise AgentReleaseEvaluationStaleError(int(draft["revision"]))
+            selected_version = None
+            run_evidence: dict[str, Any] = {}
+            if experiment_run_id is not None:
+                if (
+                    str(evaluation["auth_mode"]) not in {"private", "tenant"}
+                    or not selected_version_id
+                    or not selected_version_snapshot_hash
+                ):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_AUDIENCE_UNSUPPORTED")
+                run = await conn.fetchrow(
+                    """
+                    SELECT * FROM eval_experiment_runs
+                    WHERE tenant_id = $1 AND run_id = $2
+                    FOR SHARE
+                    """,
+                    tenant_id,
+                    uuid.UUID(experiment_run_id),
+                )
+                if not run or run["status"] != "succeeded" or run["run_mode"] != "live_candidate":
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_UNAVAILABLE")
+                if (
+                    (str(run["dataset_id"]) if run["dataset_id"] else None)
+                    != (str(evaluation["dataset_id"]) if evaluation["dataset_id"] else None)
+                    or str(run["dataset_manifest_hash"] or "")
+                    != str(evaluation["dataset_manifest_hash"] or "")
+                ):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_DATASET_MISMATCH")
+                target = self._json_mapping(run["target_snapshot"])
+                metrics = self._json_mapping(run["metrics"])
+                summary = self._json_mapping(run["score_summary"])
+                actual = metrics.get("actual_fingerprint")
+                if not isinstance(actual, dict):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_IDENTITY_MISMATCH")
+                expected_identity = {
+                    "agent_id": agent_id,
+                    "agent_version_id": selected_version_id,
+                    "agent_spec_hash": str(draft["spec_hash"]),
+                    "agent_runtime_snapshot_hash": selected_version_snapshot_hash,
+                }
+                if (
+                    target.get("candidate_type") != "agent_version"
+                    or any(
+                        target.get(key) != value or actual.get(key) != value
+                        for key, value in expected_identity.items()
+                    )
+                ):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_IDENTITY_MISMATCH")
+                counts = {
+                    key: metrics.get(key)
+                    for key in (
+                        "attempted_trials", "completed_trials", "total_trials",
+                        "failed_trials", "execution_failed_trials", "judge_failed_trials",
+                        "unscored_trials", "unknown_side_effect_trial_count",
+                    )
+                }
+                if (
+                    any(isinstance(value, bool) or not isinstance(value, int) for value in counts.values())
+                    or counts["total_trials"] <= 0
+                    or counts["attempted_trials"] != counts["total_trials"]
+                    or counts["completed_trials"] != counts["total_trials"]
+                    or any(
+                        counts[key] != 0
+                        for key in (
+                            "failed_trials", "execution_failed_trials", "judge_failed_trials",
+                            "unscored_trials", "unknown_side_effect_trial_count",
+                        )
+                    )
+                    or summary.get("critical_failed_count") != 0
+                    or summary.get("excluded_case_count") != 0
+                ):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_HARD_FAILURE")
+                selected_version = await conn.fetchrow(
+                    """
+                    SELECT version.*,
+                           EXISTS (
+                               SELECT 1 FROM agent_version_revocations AS revoked
+                               WHERE revoked.tenant_id = version.tenant_id
+                                 AND revoked.agent_version_id = version.agent_version_id
+                           ) AS revoked
+                    FROM agent_versions AS version
+                    WHERE version.tenant_id = $1
+                      AND version.agent_id = $2
+                      AND version.agent_version_id = $3
+                    FOR SHARE OF version
+                    """,
+                    tenant_id,
+                    uuid.UUID(agent_id),
+                    uuid.UUID(selected_version_id),
+                )
+                if (
+                    not selected_version
+                    or selected_version["revoked"]
+                    or not selected_version["bindings_sealed"]
+                    or str(selected_version["source_draft_id"]) != str(draft["draft_id"])
+                    or int(selected_version["source_draft_revision"]) != int(draft["revision"])
+                    or str(selected_version["spec_hash"]) != str(draft["spec_hash"])
+                ):
+                    raise AgentReleaseGateError("AGENT_EVAL_RUN_VERSION_STALE")
+                await self._validate_existing_version_resources(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    is_tenant_admin=is_tenant_admin,
+                    version=selected_version,
+                )
+                run_evidence = {
+                    "experiment_run_id": experiment_run_id,
+                    "dataset_manifest_hash": str(run["dataset_manifest_hash"] or ""),
+                    "evaluator_suite_hash": str(run["evaluator_suite_hash"] or ""),
+                    "actual_fingerprint": expected_identity,
+                    "quality_gate_status": (metrics.get("gate") or {}).get("status")
+                    if isinstance(metrics.get("gate"), dict) else "unavailable",
+                    "quality_evidence_scope": "fixed_sample_only",
+                    "model_quality_evaluated": True,
+                    "general_quality_proven": False,
+                }
             material = await self._resolve_version_material(
                 conn,
                 tenant_id=tenant_id,
@@ -3198,15 +3328,17 @@ class DatabaseAgentRepository(BaseRepository):
                 draft=draft,
                 spec=spec,
             )
-            version = await conn.fetchrow(
-                """
-                SELECT * FROM agent_versions
-                WHERE tenant_id = $1 AND agent_id = $2 AND release_identity_hash = $3
-                """,
-                tenant_id,
-                uuid.UUID(agent_id),
-                str(evaluation["release_identity_hash"]),
-            )
+            version = selected_version
+            if version is None:
+                version = await conn.fetchrow(
+                    """
+                    SELECT * FROM agent_versions
+                    WHERE tenant_id = $1 AND agent_id = $2 AND release_identity_hash = $3
+                    """,
+                    tenant_id,
+                    uuid.UUID(agent_id),
+                    str(evaluation["release_identity_hash"]),
+                )
             if version:
                 version_result = _row_to_dict(version)
             else:
@@ -3308,6 +3440,7 @@ class DatabaseAgentRepository(BaseRepository):
                 "resource_authorization_rechecked": True,
                 "session_pinning": "existing_sessions_keep_version_new_sessions_use_pointer",
                 "diff": release_diff,
+                **run_evidence,
             }
             event = await conn.fetchrow(
                 """

@@ -7,7 +7,7 @@ import contextlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +16,11 @@ from .trace_capture import (
     schedule_gateway_trace_ingest,
     span_id_for,
 )
+
+# A browser may close its SSE observer while the Runtime turn continues. Keep
+# the terminal replay task alive until the durable Runtime cursor reaches a
+# terminal event; the task never starts a second turn.
+_terminal_replay_tasks: set[asyncio.Task[None]] = set()
 
 
 def _runtime_event(frame: bytes | str) -> tuple[str, dict[str, Any]]:
@@ -214,14 +219,19 @@ async def capture_assistant_runtime_stream(
     session_id: str,
     message: str,
     snapshot: dict[str, Any],
+    terminal_replay_source: Callable[[], AsyncIterator[bytes | str]] | None = None,
+    _started_at: float | None = None,
+    _first_token_latency_ms: int | None = None,
 ) -> AsyncIterator[bytes | str]:
     """Forward the stream byte-for-byte and schedule one terminal trace."""
 
-    started_at = time.time()
+    started_at = _started_at if _started_at is not None else time.time()
     first_token_at: float | None = None
     output: list[str] = []
     output_size = 0
-    status = "failed"
+    # The SSE connection is an observer. A closed browser stream does not
+    # cancel or fail the independently owned Runtime turn.
+    status = "running"
     usage: dict[str, Any] = {}
     event_counts: dict[str, int] = {}
     error_type: str | None = None
@@ -241,43 +251,86 @@ async def capture_assistant_runtime_stream(
             if isinstance(data.get("usage"), dict):
                 usage.update(data["usage"])
             terminal = _terminal_status(event_type, data)
-            if terminal is not None:
+            if terminal is not None and str(data.get("run_id") or "") == run_id:
                 status = terminal
             yield frame
     except BaseException as exc:
-        if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
-            status = "cancelled"
-        error_type = type(exc).__name__
+        if status == "running" or not isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            error_type = type(exc).__name__
         raise
     finally:
         ended_at = time.time()
-        with contextlib.suppress(Exception):
-            trace = build_assistant_runtime_trace(
-                run_id=run_id,
-                request_id=request_id,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=session_id,
-                message=message,
-                snapshot=snapshot,
-                status=status,
-                started_at=started_at,
-                ended_at=ended_at,
-                first_token_latency_ms=(
-                    int((first_token_at - started_at) * 1000) if first_token_at else 0
-                ),
-                output="".join(output),
-                event_counts=event_counts,
-                usage=usage,
-                error_type=error_type,
-            )
-            schedule_gateway_trace_ingest(
-                database,
-                tenant_id=tenant_id,
-                created_by=user_id,
-                trace=trace,
-                enqueue=True,
-            )
+        # A detached observer has no terminal fact. Ingesting a provisional
+        # trace here could race with and overwrite a terminal trace for this
+        # run, because the trace upsert accepts later status writes.
+        if status != "running":
+            with contextlib.suppress(Exception):
+                trace = build_assistant_runtime_trace(
+                    run_id=run_id,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    message=message,
+                    snapshot=snapshot,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    first_token_latency_ms=(
+                        _first_token_latency_ms
+                        if _first_token_latency_ms is not None
+                        else int((first_token_at - started_at) * 1000) if first_token_at else 0
+                    ),
+                    output="".join(output),
+                    event_counts=event_counts,
+                    usage=usage,
+                    error_type=error_type,
+                )
+                schedule_gateway_trace_ingest(
+                    database,
+                    tenant_id=tenant_id,
+                    created_by=user_id,
+                    trace=trace,
+                    enqueue=True,
+                )
+        elif terminal_replay_source is not None:
+            # The original observer has no terminal fact. A fresh read of the
+            # same durable cursor reconstructs the full output and terminal
+            # status without mutating or replaying the run. Keep the original
+            # start time; a replayed first token has no trustworthy latency.
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await source.aclose()  # type: ignore[attr-defined]
+
+            async def replay_terminal() -> None:
+                try:
+                    async def drain() -> None:
+                        async for _ in capture_assistant_runtime_stream(
+                            terminal_replay_source(),
+                            database=database,
+                            run_id=run_id,
+                            request_id=request_id,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            message=message,
+                            snapshot=snapshot,
+                            _started_at=started_at,
+                            _first_token_latency_ms=(
+                                int((first_token_at - started_at) * 1000)
+                                if first_token_at is not None else 0
+                            ),
+                        ):
+                            pass
+
+                    await asyncio.wait_for(drain(), timeout=900)
+                except Exception:
+                    # No guessed terminal Trace: the run ledger remains the
+                    # authority if its event source is unavailable.
+                    pass
+
+            task = asyncio.create_task(replay_terminal())
+            _terminal_replay_tasks.add(task)
+            task.add_done_callback(_terminal_replay_tasks.discard)
 
 
 __all__ = ["build_assistant_runtime_trace", "capture_assistant_runtime_stream"]

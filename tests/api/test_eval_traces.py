@@ -2168,6 +2168,120 @@ async def test_eval_experiment_live_run_freezes_private_prompt_and_defaults_repe
 
 
 @pytest.mark.asyncio
+async def test_eval_live_agent_version_candidate_uses_server_identity_only(monkeypatch) -> None:
+    agent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    version_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    spec_hash = "a" * 64
+    repo = FakeTraceRepository()
+    repo.example = {
+        **repo.example,
+        "input": {"message": "hello"},
+        "expected_output": {"contains": ["hello"]},
+        "metadata": {"case_id": "agent.case", "assertions": [], "critical": True},
+    }
+    request = _request()
+    calls: list[dict[str, Any]] = []
+
+    class AgentRepository:
+        async def resolve_version_runtime(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {
+                "agent": {"agent_id": agent_id},
+                "version": {"agent_version_id": version_id, "spec_hash": spec_hash},
+                "spec": {},
+            }
+
+    async def snapshot(_request, resolution, user, *, channel):
+        assert resolution["version"]["agent_version_id"] == version_id
+        assert user.user_id == "user-a" and channel == "preview"
+        return {
+            "agent_id": agent_id,
+            "agent_version_id": version_id,
+            "fingerprints": {"spec": f"sha256:{spec_hash}"},
+            "model": {"id": "server-model", "provider": "server-provider"},
+            "knowledge": {"datasets": ["server-kb"]},
+        }
+
+    request.app.state.agent_repository = AgentRepository()
+    monkeypatch.setattr(eval_routes, "_build_snapshot", snapshot)
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    result = await run_eval_experiment(
+        experiment_id=repo.experiment["experiment_id"],
+        body=EvalExperimentRunCreate(
+            evaluator_ids=[repo.evaluator["evaluator_id"]],
+            run_mode="live_candidate",
+            candidate_config={"agent_id": agent_id, "agent_version_id": version_id},
+        ),
+        request=request,
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    assert result.jobs[0].status == "queued"
+    assert calls == [{
+        "tenant_id": "tenant-a", "agent_id": agent_id, "agent_version_id": version_id,
+        "user_id": "user-a", "is_tenant_admin": False,
+    }]
+    payload = next(call[1] for call in repo.calls if call[0] == "live_experiment_run")
+    assert payload["execution_config"] == {
+        "candidate_type": "agent_version", "agent_id": agent_id,
+        "agent_version_id": version_id, "agent_spec_hash": spec_hash,
+        "agent_runtime_snapshot_hash": payload["target_snapshot"]["agent_runtime_snapshot_hash"],
+        "model_id": "server-model", "provider_id": "server-provider",
+        "knowledge_dataset_ids": ["server-kb"],
+    }
+    assert payload["target_snapshot"]["agent_version_id"] == version_id
+    assert payload["candidate_fingerprint"]["agent_spec_hash"] == spec_hash
+    assert "resolved_spec" not in json.dumps(payload["target_snapshot"])
+
+
+def test_eval_agent_version_candidate_rejects_partial_or_client_overrides() -> None:
+    agent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    version_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    with pytest.raises(ValidationError):
+        EvalExperimentRunCreate(
+            evaluator_ids=["evaluator"], candidate_config={"agent_id": agent_id},
+        )
+    with pytest.raises(ValidationError):
+        EvalExperimentRunCreate(
+            evaluator_ids=["evaluator"],
+            candidate_config={
+                "agent_id": agent_id, "agent_version_id": version_id,
+                "system_prompt_override": "forged",
+            },
+        )
+    with pytest.raises(ValidationError):
+        EvalExperimentRunCreate(
+            evaluator_ids=["evaluator"],
+            candidate_config={"agent_id": agent_id, "agent_version_id": version_id,
+                              "model_id": "forged"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_eval_live_rejects_agent_identity_forged_in_experiment_target(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.experiment["target_config"] = {
+        "candidate_type": "agent_version", "agent_id": "forged-agent",
+        "agent_version_id": "forged-version", "agent_spec_hash": "forged-hash",
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await run_eval_experiment(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalExperimentRunCreate(
+                evaluator_ids=[repo.evaluator["evaluator_id"]], run_mode="live_candidate",
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert "typed candidate_config" in str(error.value.detail)
+    assert not any(call[0] == "live_experiment_run" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_eval_experiment_live_run_rejects_unconfirmed_trace_case(monkeypatch) -> None:
     repo = FakeTraceRepository()
     repo.example = {

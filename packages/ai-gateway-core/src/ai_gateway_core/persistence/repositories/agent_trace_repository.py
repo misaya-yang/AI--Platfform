@@ -1831,7 +1831,7 @@ class AgentTraceRepository(BaseRepository):
                 "price_version": receipt["version"], "pricing_snapshot": receipt}
 
     async def freeze_eval_judge(self, *, tenant_id: str, evaluator: dict[str, Any]) -> dict[str, Any]:
-        if evaluator.get("evaluator_type") not in {"llm", "composite"}:
+        if evaluator.get("evaluator_type") not in {"llm", "llm_judge", "composite"}:
             return evaluator
         metadata = dict(evaluator.get("metadata") or {})
         ref = await self.freeze_eval_model_ref(
@@ -3104,8 +3104,28 @@ class AgentTraceRepository(BaseRepository):
             not candidate_fingerprint.get(key) for key in required_fingerprint_keys
         ):
             reasons.append("missing_runtime_fingerprint")
+        for run, fingerprint in ((baseline, baseline_fingerprint), (candidate, candidate_fingerprint)):
+            snapshot = run.get("target_snapshot") if isinstance(run.get("target_snapshot"), dict) else {}
+            if snapshot.get("candidate_type") != "agent_version":
+                continue
+            if any(
+                not snapshot.get(key) or snapshot.get(key) != fingerprint.get(key)
+                for key in (
+                    "agent_id", "agent_version_id", "agent_spec_hash",
+                    "agent_runtime_snapshot_hash",
+                )
+            ):
+                reasons.append("agent_version_fingerprint_mismatch")
+        if (baseline.get("target_snapshot") or {}).get("candidate_type") != (
+            candidate.get("target_snapshot") or {}
+        ).get("candidate_type"):
+            reasons.append("candidate_type_mismatch")
 
         fingerprint_dimensions = {
+            "agent_version": (
+                "agent_id", "agent_version_id", "agent_spec_hash",
+                "agent_runtime_snapshot_hash",
+            ),
             "prompt": ("system_prompt_hash",),
             "tools": ("tool_schema_hash",),
             "model": ("model_id",),
@@ -3335,6 +3355,12 @@ class AgentTraceRepository(BaseRepository):
             gate_warnings.append("noncritical_case_regressions")
         if any(item["flaky"] for item in case_diffs):
             gate_warnings.append("flaky_cases_present")
+        typed_agent_pair = all(
+            (run.get("target_snapshot") or {}).get("candidate_type") == "agent_version"
+            for run in (baseline, candidate)
+        )
+        if typed_agent_pair:
+            gate_warnings.append("fixed_sample_only")
         gate_failures = list(dict.fromkeys(gate_failures))
         gate_warnings = list(dict.fromkeys(gate_warnings))
         regressed_cases = [item for item in case_diffs if item["status"] == "regressed"]
@@ -3378,7 +3404,7 @@ class AgentTraceRepository(BaseRepository):
                 "seed": 42,
             },
             "gate": {
-                "status": "fail" if gate_failures else "pass",
+                "status": "fail" if gate_failures else "warning" if typed_agent_pair else "pass",
                 "failures": gate_failures,
                 "warnings": gate_warnings,
             },

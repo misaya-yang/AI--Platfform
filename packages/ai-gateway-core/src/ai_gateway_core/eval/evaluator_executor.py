@@ -908,6 +908,16 @@ class EvaluatorExecutor:
                     run_case=run_case,
                     execution_config=execution_config,
                 )
+                if execution_config.get("candidate_type") == "agent_version":
+                    actual = candidate.get("fingerprint") if isinstance(candidate, dict) else None
+                    required = (
+                        "agent_id", "agent_version_id", "agent_spec_hash",
+                        "agent_runtime_snapshot_hash",
+                    )
+                    if not isinstance(actual, dict) or any(
+                        actual.get(key) != execution_config.get(key) for key in required
+                    ):
+                        raise RuntimeError("AGENT_EVAL_VERSION_FINGERPRINT_MISMATCH")
                 detail = candidate.get("detail") if isinstance(candidate, dict) else None
                 target = _trace_target(detail if isinstance(detail, dict) else None)
                 if not target:
@@ -1071,6 +1081,13 @@ class EvaluatorExecutor:
                     if isinstance(target.get("metadata"), dict)
                     else {}
                 )
+                side_effect_unknown = (
+                    runtime_trajectory.get("exit_reason") == "side_effect_unknown"
+                    or any(
+                        item.get("status") == "side_effect_unknown"
+                        for item in tool_trajectory if isinstance(item, dict)
+                    )
+                )
                 performance_metrics = {
                     "latency_ms_lt": target.get("total_latency_ms"),
                     "total_tokens_lt": target.get("total_tokens"),
@@ -1117,6 +1134,7 @@ class EvaluatorExecutor:
                     "contract_failures": [str(item) for item in contract.get("failures") or []],
                     "explicit_performance_pass": explicit_performance_pass,
                     "tool_trajectory": tool_trajectory,
+                    "side_effect_unknown": side_effect_unknown,
                     "rag_evidence": rag_evidence,
                     "exit_reason": (
                         runtime_trajectory.get("exit_reason")
@@ -1134,6 +1152,21 @@ class EvaluatorExecutor:
                 trial_results.append(trial)
             except Exception as exc:  # noqa: BLE001 - isolate failed eval trials
                 message = str(exc)[:2000]
+                failed_runtime = (
+                    (target.get("metadata") or {}).get("runtime_trajectory")
+                    if isinstance(target, dict) else {}
+                )
+                runtime_trajectory = failed_runtime if isinstance(failed_runtime, dict) else {}
+                failed_tools = _observed_trajectory(target)[0] if target else None
+                side_effect_unknown = (
+                    runtime_trajectory.get("exit_reason") == "side_effect_unknown"
+                    or "SIDE_EFFECT_UNKNOWN" in message.upper()
+                    or "DISPATCH_RECONCILIATION_REQUIRED" in message
+                    or any(
+                        item.get("status") == "side_effect_unknown"
+                        for item in failed_tools or [] if isinstance(item, dict)
+                    )
+                )
                 infrastructure_errors.append(
                     f"{run_case.get('case_id')}#{run_case.get('trial_index')}: {message}"
                 )
@@ -1143,13 +1176,11 @@ class EvaluatorExecutor:
                     "critical": bool((run_case.get("metadata") or {}).get("critical")),
                     "execution_succeeded": execution_succeeded,
                     "trace_id": trace_id,
-                    "execution_outcome": "judge_failed" if execution_succeeded else "execution_failed",
-                    "tool_trajectory": _observed_trajectory(target)[0]
-                    if execution_succeeded and target else None,
-                    "exit_reason": (
-                        ((target.get("metadata") or {}).get("runtime_trajectory") or {}).get("exit_reason")
-                        if execution_succeeded and target else None
-                    ),
+                    "execution_outcome": "side_effect_unknown" if side_effect_unknown
+                    else "judge_failed" if execution_succeeded else "execution_failed",
+                    "tool_trajectory": failed_tools,
+                    "exit_reason": runtime_trajectory.get("exit_reason"),
+                    "side_effect_unknown": side_effect_unknown,
                     "trajectory_pass": None,
                     "stateful_expected": isinstance(
                         (run_case.get("expected_trajectory") or {}).get("stateful"), dict
@@ -1238,7 +1269,13 @@ class EvaluatorExecutor:
             and all(item.get("behavior_pass") is True for item in valid_groups[case_id])
             for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
         }
-        hard_blockers_passed = all(hard_blocker_results.values())
+        agent_version_candidate = execution_config.get("candidate_type") == "agent_version"
+        if agent_version_candidate:
+            hard_blocker_results = {}
+        hard_blockers_passed = None if agent_version_candidate else all(hard_blocker_results.values())
+        unknown_side_effect_trials = sum(
+            1 for item in trial_results if item.get("side_effect_unknown") is True
+        )
         fingerprint_values = [
             item.get("fingerprint")
             for item in trial_results
@@ -1309,6 +1346,14 @@ class EvaluatorExecutor:
             "trial_count": attempted,
         }
         summary["quality_score"] = summary["overall_score"]
+        typed_known_failure = agent_version_candidate and (
+            unknown_side_effect_trials > 0
+            or (bool(critical_cases) and critical_passed != len(critical_cases))
+            or any(
+                item.get("explicit_performance_pass", True) is not True
+                for item in trial_results
+            )
+        )
         metrics = {
             "attempted_trials": attempted,
             "completed_trials": completed,
@@ -1321,6 +1366,7 @@ class EvaluatorExecutor:
             "execution_failed_trials": sum(
                 1 for item in trial_results if item.get("execution_outcome") == "execution_failed"
             ),
+            "unknown_side_effect_trial_count": unknown_side_effect_trials,
             "total_trials": len(run_cases),
             "unscored_trials": sum(
                 1 for item in trial_results if not isinstance(item.get("behavior_pass"), bool)
@@ -1341,7 +1387,8 @@ class EvaluatorExecutor:
             "critical_pass_rate": summary["critical_pass_rate"],
             "critical_case_count": summary["critical_case_count"],
             "critical_failed_count": summary["critical_failed_count"],
-            "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
+            "required_hard_blockers": [] if agent_version_candidate
+            else list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
             "hard_blocker_results": hard_blocker_results,
             "hard_blockers_passed": hard_blockers_passed,
             "mixed_runtime": len(fingerprints) > 1,
@@ -1350,8 +1397,23 @@ class EvaluatorExecutor:
             if fingerprints_complete and len(fingerprints) == 1
             else {},
             "scores_written": scores_written,
+            "quality_evidence": {
+                "scope": "fixed_dataset_cases",
+                "statistical_significance": "not_assessed",
+                "scored_case_count": quality_case_count,
+                "excluded_case_count": len(excluded_cases),
+            },
             "gate": {
+                "profile": "agent_version_task_suite" if agent_version_candidate
+                else "builtin_assistant_hard_blockers",
+                "reason": (
+                    "incomplete_execution" if excluded_cases or not quality_case_count
+                    else "known_hard_failure" if typed_known_failure
+                    else "fixed_sample_only" if agent_version_candidate else None
+                ),
                 "status": "unavailable" if excluded_cases or not quality_case_count
+                else "fail" if typed_known_failure
+                else "warning" if agent_version_candidate
                 else "pass" if _critical_cases_gate_passes(
                     case_count=len(critical_cases),
                     passed_count=critical_passed,

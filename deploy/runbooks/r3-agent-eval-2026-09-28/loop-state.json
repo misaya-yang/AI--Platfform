@@ -8,25 +8,27 @@
   "base_sha": "8b3a877a",
   "branch": "codex/r3-agent-eval-20260928",
   "integrated_main_sha": "78000059",
-  "active_phase": "R3-acceptance",
-  "active_feature": "J14～J18 real A/B, permissions, failure and browser acceptance",
-  "active_package": "R3-CANDIDATE_80-safe-increment",
-  "next_action": "After locally merging the reviewed safe increment, finish J14～J18 real five-case synthetic KB A/B, two-role audience, controlled provider/judge failure, and authenticated Codex IAB acceptance. Do not mark full R3 complete from automated or other-browser evidence.",
-  "last_result": "2026-09-28 reviewed safe code increment committed as 78000059 for local main fast-forward; Agent Studio 40/40 source-stable gate, Eval/KB/OpenAPI/architecture/migration gates passed; epoch 7 applied and Docker source hash parity/health confirmed; real Docker Agent Studio and internal publish live E2E 2 passed, 1 feature-flag skip. Authenticated Codex IAB and J16～J18 full live matrix remain pending. See reports/product/r3-agent-eval-progress-2026-09-28.md.",
+  "active_phase": "R3-safe-increment-closeout",
+  "active_feature": "Complete fixed Studio Agent Version runtime/Eval binding and preserve remaining J16～J18 acceptance gaps",
+  "active_package": "R3-after-CANDIDATE_80",
+  "next_action": "Finish remaining J14/J15 approval-cancel and audience-role checks; complete J16～J18 with approved five-category KB behavior contracts, controlled judge/provider failures, a quality-passing fixed A/B comparison and internal linked publication, plus cold-restart durable Trace reconciliation and authenticated Codex IAB acceptance. Preserve the current safe increment and do not label R3 complete.",
+  "last_result": "2026-09-28 typed immutable Agent Version live_candidate, selected-run internal publish evidence, Preview refresh and publication rollback repairs implemented. Focused Python 200/200, Agent Studio aggregate 40/40 source-stable, Eval/architecture/OpenAPI/harness gates passed. Owned local Docker epoch 8-10, all services healthy; J14 and J15 live Docker browser 1/1 each after fixes. Real five-case A/B executed through Runtime/provider but quality gate rejected B and A had two stream-interrupted unscored trials; linked positive publish, cold Trace restart, judge failure and IAB auth remain unverified. Independent review found and verified fixes for data mismatch, Web run link, SQL NULL shape and mutable-pointer FK. See reports/product/r3-typed-agent-live-2026-09-28.md.",
   "updated_at": "2026-09-28",
   "blockers": [
-    "Codex in-app browser is reachable but its authenticated session expired",
+    "Codex IAB is reachable; its local credential-file navigation was rejected by browser security policy, and manual sign-in has been requested without pausing API work",
+    "Real five-case fixed Agent A/B has not passed: A had two stream-interrupted trials and B failed its expected behavior contract; release gate correctly rejects the evidence",
+    "Gateway cold restart can lose the in-memory detached-Trace replay task; no durable reconciliation is verified",
     "Only one verified existing E2E account is available for real two-tenant/two-role validation",
     "No public or tenant-visible local Dataset is configured for the full anonymous audience matrix"
   ],
   "cycle": ["observe", "act", "verify", "review", "integrate", "decide"],
-  "iteration": 2,
+  "iteration": 3,
   "max_iterations": 20,
   "phases": [
     {"id": "R3-A", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
     {"id": "R3-B", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
     {"id": "R3-C", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
-    {"id": "R3-integration", "file": "README.md", "depends_on": ["R3-A", "R3-B", "R3-C"], "status": "in_progress", "evidence": ["reports/agent-studio/agent-studio-regression-v1-result.json", "reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static-live-partial"}
+    {"id": "R3-integration", "file": "README.md", "depends_on": ["R3-A", "R3-B", "R3-C"], "status": "in_progress", "evidence": ["reports/agent-studio/agent-studio-regression-v1-result.json", "reports/product/r3-agent-eval-progress-2026-09-28.md", "reports/product/r3-typed-agent-live-2026-09-28.md"], "review": "passed-static-live-partial"}
   ],
   "pending_acceptance": ["J14", "J15", "J16", "J17", "J18"],
   "execution_authorization": {

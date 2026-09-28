@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
@@ -433,7 +434,19 @@ class EvalAsyncJobResponse(BaseModel):
 
 
 class EvalCandidateConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     system_prompt_override: str | None = Field(default=None, max_length=16_000)
+    agent_id: UUID | None = None
+    agent_version_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_agent_version_pair(self) -> EvalCandidateConfig:
+        if (self.agent_id is None) != (self.agent_version_id is None):
+            raise ValueError("agent_id and agent_version_id must be provided together")
+        if self.agent_id is not None and self.system_prompt_override is not None:
+            raise ValueError("Agent Version candidates do not accept prompt overrides")
+        return self
 
 
 class EvalExperimentRunCreate(BaseModel):

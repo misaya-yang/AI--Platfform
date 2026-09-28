@@ -5,8 +5,12 @@ from uuid import uuid4
 
 import pytest
 from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
+from ai_gateway_contracts.agent_runtime import runtime_sha256
+from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.persistence.repositories.agent_repository import AgentNotFoundError
 from starlette.requests import Request
 
+from src.api.v2 import agent as agent_module
 from src.api.v2.agent import (
     ApprovalDecisionRequest,
     ThreadCreateRequest,
@@ -24,6 +28,21 @@ from src.core.auth.user_resolver import UserContext
 from src.services.agent_runtime.control_plane import AgentRuntimeControlError
 
 
+def _fixed_snapshot(agent_id: str, version_id: str) -> dict:
+    return {
+        "schema_version": "agent-runtime/v1",
+        "tenant_id": "tenant-a",
+        "agent_id": agent_id,
+        "agent_version_id": version_id,
+        "publication": {"id": None, "channel": "preview", "auth_mode": "private"},
+        "model": {"id": "agent-model", "provider": "provider-a", "parameters": {}},
+        "knowledge": {"datasets": [], "retrieval": {"mode": "off"}},
+        "capabilities": [],
+        "memory": {"mode": "session"},
+        "fingerprints": {"spec": "sha256:" + "a" * 64},
+    }
+
+
 def test_v2_routes_are_additive_and_cursor_based() -> None:
     paths = {route.path for route in router.routes}
     assert "/agent/threads" in paths
@@ -39,7 +58,7 @@ class _Database:
         self.thread = None
 
     async def fetch(self, query: str, *_args):
-        assert "FROM assistant_runtime_snapshots" in query
+        assert "FROM assistant_runtime_snapshots" in query or "FROM assistant_runtime_items" in query
         return []
 
     async def fetchrow(self, query: str, *args):
@@ -86,8 +105,16 @@ class _Database:
 
 
 def _request(state: SimpleNamespace) -> Request:
+    if not hasattr(state, "session_manager"):
+        state.session_manager = SimpleNamespace(
+            get=lambda session_id: _unbound_session(session_id)
+        )
     app = SimpleNamespace(state=state)
     return Request({"type": "http", "method": "POST", "path": "/", "headers": [], "app": app})
+
+
+async def _unbound_session(session_id: str) -> SimpleNamespace:
+    return SimpleNamespace(session_id=session_id, user_id="user-a", tenant_id="tenant-a")
 
 
 @pytest.mark.asyncio
@@ -144,6 +171,282 @@ async def test_create_thread_provisions_kernel_then_imports_legacy_history() -> 
     assert calls == ["ensure"]
     assert response["thread"]["id"] == runtime_thread_id
     assert response["thread"]["import_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_fixed_version_thread_and_turn_ignore_later_draft_and_recheck_acl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = str(uuid4()), str(uuid4())
+    snapshot = _fixed_snapshot(agent_id, version_id)
+    db = _Database()
+    session_id = "version-session"
+    runtime_thread_id = str(uuid4())
+    actor = UserContext(
+        user_id="user-a", tenant_id="tenant-a", tier="normal",
+        is_authenticated=True, roles=["user"],
+    )
+    calls: dict[str, list] = {"repository": [], "launch": [], "start": []}
+
+    class _Repository:
+        revoked = False
+        current_draft_revision = 2
+
+        async def resolve_version_runtime(self, **kwargs):
+            calls["repository"].append(kwargs)
+            if self.revoked:
+                raise AgentNotFoundError("AGENT_NOT_FOUND")
+            assert kwargs["agent_id"] == agent_id
+            assert kwargs["agent_version_id"] == version_id
+            assert kwargs["user_id"] == actor.user_id
+            assert kwargs["tenant_id"] == actor.tenant_id
+            return {
+                "agent": {"agent_id": agent_id, "tenant_id": "tenant-a"},
+                "version": {"agent_version_id": version_id, "source_draft_revision": 1},
+                "spec": {"model": {"model_id": "agent-model"}},
+                "capabilities": [], "knowledge": [], "publication": None,
+            }
+
+    class _Sessions:
+        item = None
+
+        async def get(self, requested):
+            return self.item if requested == session_id else None
+
+        async def bind_agent_runtime(self, **kwargs):
+            if self.item is not None:
+                raise PermissionDeniedError("already bound")
+            self.item = SimpleNamespace(**kwargs)
+            return self.item
+
+        async def history(self, _session_id, limit=1):
+            del limit
+            return []
+
+        async def delete(self, _session_id):
+            self.item = None
+
+    class _Assignments:
+        async def bind(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime")
+
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime")
+
+    class _Control:
+        async def ensure_thread(self, **kwargs):
+            assert kwargs["model_id"] == "agent-model"
+            assert kwargs["capability_allowlist"] == []
+            return {"runtime_thread_id": runtime_thread_id}
+
+        async def start_turn(self, **kwargs):
+            calls["start"].append(kwargs)
+            assert kwargs["model_id"] == "agent-model"
+            assert kwargs["resolved_agent_launch"] is launch
+            return SimpleNamespace(
+                run_id=str(uuid4()), requested_reasoning_option="auto",
+                effective_reasoning_option="minimal", after_sequence=0,
+            )
+
+        async def recover_turn(self, **_kwargs):
+            raise AssertionError("revoked Version must not recover")
+
+    async def build_snapshot(_request, _resolution, _user, *, channel):
+        assert channel == "preview"
+        return snapshot
+
+    async def resolve_launch(**kwargs):
+        calls["launch"].append(kwargs)
+        return launch
+
+    launch = object()
+    repository = _Repository()
+    sessions = _Sessions()
+    state = SimpleNamespace(
+        database=db, session_manager=sessions,
+        assistant_runtime_assignments=_Assignments(),
+        agent_runtime_control=_Control(), agent_repository=repository,
+        settings=SimpleNamespace(default_model="builtin-default"),
+    )
+    monkeypatch.setattr(agent_module, "_build_snapshot", build_snapshot)
+    monkeypatch.setattr(agent_module, "resolve_agent_launch", resolve_launch)
+
+    created = await create_thread(
+        ThreadCreateRequest(
+            session_id=session_id, agent_id=agent_id, agent_version_id=version_id
+        ),
+        _request(state), actor,
+    )
+    target = created["thread"]["agent_version_target"]
+    assert target == {
+        "agent_id": agent_id, "agent_version_id": version_id,
+        "agent_spec_hash": "a" * 64,
+        "runtime_snapshot_hash": runtime_sha256(snapshot),
+    }
+    assert sessions.item.channel == "preview"
+    assert sessions.item.agent_version_id == version_id
+    assert repository.current_draft_revision == 2
+    fetched = await agent_module.get_thread(runtime_thread_id, _request(state), actor)
+    assert fetched["thread"]["agent_version_target"] == target
+
+    turn = await create_turn(
+        runtime_thread_id, TurnCreateRequest(message="use version one"), _request(state), actor
+    )
+    assert turn["turn"]["status"] == "in_progress"
+    assert calls["launch"][0]["entrypoint"] == "studio_preview"
+    assert calls["launch"][0]["legacy_snapshot"] is snapshot
+    assert calls["start"][0]["style_guidance"] is None
+    with pytest.raises(Exception) as override:
+        await create_turn(
+            runtime_thread_id,
+            TurnCreateRequest(message="override", model_id="builtin-default"),
+            _request(state), actor,
+        )
+    assert getattr(override.value, "status_code", None) == 422
+    assert len(calls["start"]) == 1
+
+    sessions.item.runtime_fingerprint = "sha256:wrong-pin"
+    with pytest.raises(Exception) as stale_pin:
+        await create_turn(
+            runtime_thread_id, TurnCreateRequest(message="wrong pin"), _request(state), actor
+        )
+    assert getattr(stale_pin.value, "status_code", None) == 409
+    sessions.item.runtime_fingerprint = runtime_sha256(snapshot)
+
+    repository.revoked = True
+    readable = await agent_module.get_thread(runtime_thread_id, _request(state), actor)
+    assert readable["thread"]["agent_version_target"] == target
+    with pytest.raises(Exception) as revoked:
+        await create_turn(
+            runtime_thread_id, TurnCreateRequest(message="after revoke"), _request(state), actor
+        )
+    assert getattr(revoked.value, "status_code", None) == 404
+    with pytest.raises(Exception) as recovery:
+        await agent_module.recover_turn(runtime_thread_id, "run-a", _request(state), actor)
+    assert getattr(recovery.value, "status_code", None) == 404
+    assert len(calls["start"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_fixed_version_rejects_an_existing_unpinned_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = str(uuid4()), str(uuid4())
+    snapshot = _fixed_snapshot(agent_id, version_id)
+
+    class _Sessions:
+        async def get(self, _session_id):
+            return SimpleNamespace(user_id="user-a", tenant_id="tenant-a")
+
+        async def bind_agent_runtime(self, **_kwargs):
+            raise PermissionDeniedError("existing builtin session")
+
+    async def version_snapshot(*_args, **_kwargs):
+        return snapshot
+
+    monkeypatch.setattr(agent_module, "_version_snapshot", version_snapshot)
+    state = SimpleNamespace(session_manager=_Sessions())
+    actor = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+    with pytest.raises(Exception) as conflict:
+        await create_thread(
+            ThreadCreateRequest(
+                session_id="builtin-session", agent_id=agent_id, agent_version_id=version_id
+            ),
+            _request(state), actor,
+        )
+    assert getattr(conflict.value, "status_code", None) == 409
+
+
+def test_fixed_version_request_requires_paired_target_without_model_override() -> None:
+    with pytest.raises(ValueError):
+        ThreadCreateRequest(agent_id=uuid4())
+    with pytest.raises(ValueError):
+        ThreadCreateRequest(agent_id=uuid4(), agent_version_id=uuid4(), model_id="override")
+
+
+@pytest.mark.asyncio
+async def test_fixed_version_thread_retry_keeps_one_pin_after_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = str(uuid4()), str(uuid4())
+    snapshot = _fixed_snapshot(agent_id, version_id)
+    thread_id = str(uuid4())
+    actor = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+
+    class _Sessions:
+        item = None
+        bind_count = 0
+
+        async def get(self, _session_id):
+            return self.item
+
+        async def bind_agent_runtime(self, **kwargs):
+            self.bind_count += 1
+            if self.item is None:
+                self.item = SimpleNamespace(**kwargs)
+            elif any(getattr(self.item, key) != value for key, value in kwargs.items()):
+                raise PermissionDeniedError("pin changed")
+            return self.item
+
+        async def history(self, _session_id, limit=1):
+            del limit
+            return []
+
+    class _Assignments:
+        async def bind(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime")
+
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(runtime_owner="agent_runtime")
+
+    class _Control:
+        attempts = 0
+
+        async def ensure_thread(self, **kwargs):
+            assert kwargs["capability_allowlist"] == []
+            self.attempts += 1
+            if self.attempts == 1:
+                raise AgentRuntimeControlError("RUNTIME_TEMPORARILY_UNAVAILABLE", status_code=503)
+            return {"runtime_thread_id": thread_id}
+
+        async def start_turn(self, **_kwargs):
+            raise AssertionError("thread creation must not dispatch a turn")
+
+    class _Store:
+        async def get_for_session(self, **_kwargs):
+            return None
+
+        async def ensure_native(self, **_kwargs):
+            return SimpleNamespace(
+                runtime_thread_id=thread_id, session_id="same-session",
+                kernel_owner="agent", source_kind="native",
+                import_status="not_required", last_sequence=0,
+            )
+
+    async def version_snapshot(*_args, **_kwargs):
+        return snapshot
+
+    sessions = _Sessions()
+    control = _Control()
+    state = SimpleNamespace(
+        session_manager=sessions,
+        assistant_runtime_assignments=_Assignments(),
+        agent_runtime_control=control,
+        settings=SimpleNamespace(default_model="builtin-default"),
+    )
+    monkeypatch.setattr(agent_module, "_version_snapshot", version_snapshot)
+    monkeypatch.setattr(agent_module, "_store", lambda _request: _Store())
+    body = ThreadCreateRequest(
+        session_id="same-session", agent_id=agent_id, agent_version_id=version_id
+    )
+    with pytest.raises(Exception) as outage:
+        await create_thread(body, _request(state), actor)
+    assert getattr(outage.value, "status_code", None) == 503
+    assert sessions.item.agent_version_id == version_id
+    retried = await create_thread(body, _request(state), actor)
+    assert retried["thread"]["id"] == thread_id
+    assert sessions.bind_count == 2
+    assert control.attempts == 2
 
 
 @pytest.mark.asyncio

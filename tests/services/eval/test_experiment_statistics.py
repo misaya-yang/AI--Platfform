@@ -239,6 +239,32 @@ async def test_compare_does_not_call_execution_fault_a_quality_regression() -> N
 
 
 @pytest.mark.asyncio
+async def test_compare_identifies_two_verified_fixed_agent_versions() -> None:
+    baseline = _run("baseline")
+    candidate = _run("candidate")
+    for run, version, spec in ((baseline, "version-a", "spec-a"), (candidate, "version-b", "spec-b")):
+        identity = {
+            "agent_id": "agent-a", "agent_version_id": version,
+            "agent_spec_hash": spec,
+            "agent_runtime_snapshot_hash": f"sha256:{version}",
+        }
+        run["target_snapshot"] = {"candidate_type": "agent_version", **identity}
+        run["metrics"]["actual_fingerprint"].update(identity)
+    repository = _ComparisonRepository(baseline, candidate, _cases(), _cases())
+
+    comparison = await repository.compare_experiment_runs(
+        tenant_id="tenant-a", baseline_run_id="baseline", candidate_run_id="candidate",
+    )
+
+    assert comparison is not None
+    assert comparison["compatibility"]["compatible"] is True
+    assert "agent_version" in comparison["changed_dimensions"]
+    assert comparison["statistics"]["paired_case_count"] == 12
+    assert comparison["gate"]["status"] == "warning"
+    assert "fixed_sample_only" in comparison["gate"]["warnings"]
+
+
+@pytest.mark.asyncio
 async def test_compare_warns_but_does_not_block_efficiency_increase() -> None:
     baseline = _run("baseline")
     candidate = _run("candidate", latency=150, tokens=130, cost=1.5)

@@ -96,6 +96,30 @@ export function previewSessionActionsBlocked(state: {
   return Object.values(state).some(Boolean);
 }
 
+export function previewCanStartCurrentDraft(state: {
+  target: string;
+  pinnedDraftRevision: number | null;
+  currentDraftRevision: number;
+  restoring: boolean;
+  starting: boolean;
+  sending: boolean;
+  decidingApproval: boolean;
+  cancelling: boolean;
+  refreshingRun: boolean;
+  approvalPending: boolean;
+}): boolean {
+  return state.pinnedDraftRevision !== null
+    && state.pinnedDraftRevision < state.currentDraftRevision
+    && state.target === `draft:${state.pinnedDraftRevision}`
+    && !state.restoring
+    && !state.starting
+    && !state.sending
+    && !state.decidingApproval
+    && !state.cancelling
+    && !state.refreshingRun
+    && !state.approvalPending;
+}
+
 export type PreviewPollResult<TApproval> =
   | { kind: "terminal"; runId: string; status: string; messages: SessionHistoryMessage[] }
   | { kind: "approval"; runId: string; approval: TApproval }

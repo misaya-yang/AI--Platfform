@@ -212,9 +212,13 @@ async function releaseSnapshot(page: Page, agentId: string) {
     if (![publicationsResponse, eventsResponse, versionsResponse, evaluationsResponse].every((item) => item.ok)) {
       throw new Error("Live release evidence API failed");
     }
-    const publications = await publicationsResponse.json() as Array<{ version_id: string; version_number: number }>;
+    const publications = await publicationsResponse.json() as Array<{ publication_id: string; version_id: string; version_number: number; public_id: string; channel: string }>;
     const events = await eventsResponse.json() as Array<{ operation: string; to_version_id: string }>;
-    const versions = await versionsResponse.json() as Array<{ agent_version_id: string; version_number: number }>;
+    const versions = await versionsResponse.json() as Array<{
+      agent_version_id: string;
+      version_number: number;
+      spec?: { model?: { model_id?: string }; knowledge?: Array<{ dataset_id: string }> };
+    }>;
     const evaluationsPayload = await evaluationsResponse.json() as {
       evaluations: Array<{
         status: string;
@@ -227,8 +231,15 @@ async function releaseSnapshot(page: Page, agentId: string) {
     return {
       pointerVersionId: publications[0]?.version_id ?? null,
       pointerVersionNumber: publications[0]?.version_number ?? null,
+      publicationId: publications.find((item) => item.channel === "hosted")?.publication_id ?? null,
+      hostedPublicId: publications.find((item) => item.channel === "hosted")?.public_id ?? null,
       eventOperations: events.map((item) => item.operation),
-      versions: versions.map((item) => ({ id: item.agent_version_id, number: item.version_number })),
+      versions: versions.map((item) => ({
+        id: item.agent_version_id,
+        number: item.version_number,
+        configuredModel: item.spec?.model?.model_id ?? "",
+        knowledgeIds: (item.spec?.knowledge || []).map((binding) => binding.dataset_id),
+      })),
       evaluations: evaluationsPayload.evaluations,
     };
   }, agentId);
@@ -249,6 +260,20 @@ async function screenshot(page: Page, name: string) {
     fullPage: false,
     animations: "disabled",
   });
+}
+
+async function sendHostedMessage(page: Page, message: string) {
+  await page.getByPlaceholder("Message this agent").fill(message);
+  const streamed = page.waitForResponse((response) =>
+    response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/chat/stream"),
+  );
+  await page.getByRole("button", { name: "Send message" }).click();
+  const response = await streamed;
+  expect(response.status()).toBe(200);
+  const answer = page.locator(".agent-public-message.is-assistant p").last();
+  await expect(answer).not.toHaveText(/^(?:Generating…)?$/, { timeout: 90_000 });
+  await expect(page.locator(".agent-public-error")).toHaveCount(0);
+  return response;
 }
 
 test.describe("Agent publish live stack", () => {
@@ -279,6 +304,8 @@ test.describe("Agent publish live stack", () => {
 
     const uniqueName = `AS06 Live ${Date.now()}`;
     let agentId: string | null = null;
+    let pinnedHostedPage: Page | null = null;
+    let newHostedPage: Page | null = null;
     try {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto("/agents", { waitUntil: "domcontentloaded" });
@@ -374,12 +401,34 @@ test.describe("Agent publish live stack", () => {
       await page.getByRole("button", { name: "Close" }).click();
 
       await page.setViewportSize({ width: 1440, height: 900 });
+      const beforeRollback = await releaseSnapshot(page, agentId!);
+      const versionTwoEvidence = beforeRollback.versions.find((item) => item.number === 2);
+      expect(beforeRollback.pointerVersionId).toBe(versionTwoEvidence?.id);
+      expect(beforeRollback.hostedPublicId).toBeTruthy();
+      expect(beforeRollback.publicationId).toBeTruthy();
+      pinnedHostedPage = await page.context().newPage();
+      await pinnedHostedPage.addInitScript(() => localStorage.setItem("i18nextLng", "en-US"));
+      await pinnedHostedPage.goto(`/a/${beforeRollback.hostedPublicId}`, { waitUntil: "domcontentloaded" });
+      const versionTwoSessionResponse = pinnedHostedPage.waitForResponse((response) =>
+        response.request().method() === "POST"
+        && new URL(response.url()).pathname === `/api/v1/public/agents/${beforeRollback.hostedPublicId}/sessions`,
+      );
+      await sendHostedMessage(pinnedHostedPage, "Confirm this published Agent can answer a support question.");
+      const versionTwoSession = await (await versionTwoSessionResponse).json() as { session_id: string; agent_version_id: string; runtime_fingerprint: string };
+      expect(versionTwoSession.agent_version_id).toBe(versionTwoEvidence?.id);
+      expect(versionTwoSession.runtime_fingerprint).toBeTruthy();
+
       await page.goto(`/agents/${agentId}/versions`, { waitUntil: "domcontentloaded" });
       await expect(page.getByText("Current target · v2")).toBeVisible();
       const versionOne = page.locator(".agent-version-history > article").filter({ hasText: "v1" });
       await versionOne.getByRole("button", { name: "Roll back HOSTED" }).click();
       await page.getByLabel("Rollback reason").fill("Return to the first known healthy live Version.");
+      const rollbackResponse = page.waitForResponse((response) =>
+        response.request().method() === "POST"
+        && new URL(response.url()).pathname === `/api/v1/publications/${beforeRollback.publicationId}/rollback`,
+      );
       await page.getByRole("button", { name: "Roll back channel" }).click();
+      expect((await rollbackResponse).ok(), "Rollback API must commit before the channel pointer can update").toBe(true);
       await expect(page.getByText("Current target · v1")).toBeVisible();
       await expect(page.getByText("Rolled back channel", { exact: true })).toBeVisible();
 
@@ -395,10 +444,30 @@ test.describe("Agent publish live stack", () => {
         "promote",
         "rollback",
       ]);
+      const oldPinnedResponse = await sendHostedMessage(pinnedHostedPage, "Continue in the existing Version two conversation.");
+      expect(await oldPinnedResponse.headerValue("x-session-id")).toBe(versionTwoSession.session_id);
+      newHostedPage = await page.context().newPage();
+      await newHostedPage.addInitScript(() => localStorage.setItem("i18nextLng", "en-US"));
+      await newHostedPage.goto(`/a/${evidence.hostedPublicId}`, { waitUntil: "domcontentloaded" });
+      const versionOneSessionResponse = newHostedPage.waitForResponse((response) =>
+        response.request().method() === "POST"
+        && new URL(response.url()).pathname === `/api/v1/public/agents/${evidence.hostedPublicId}/sessions`,
+      );
+      await sendHostedMessage(newHostedPage, "Confirm the rolled-back Agent still answers a support question.");
+      const versionOneSession = await (await versionOneSessionResponse).json() as { session_id: string; agent_version_id: string; runtime_fingerprint: string };
+      expect(versionOneSession.agent_version_id).toBe(versionOneEvidence?.id);
+      expect(versionOneSession.session_id).not.toBe(versionTwoSession.session_id);
+      expect(versionOneSession.runtime_fingerprint).toBeTruthy();
+      expect(versionOneEvidence?.configuredModel).toBeDefined();
+      expect(versionTwoEvidence?.configuredModel).toBeDefined();
+      expect(versionOneEvidence?.knowledgeIds).toEqual(expect.any(Array));
+      expect(versionTwoEvidence?.knowledgeIds).toEqual(expect.any(Array));
       await screenshot(page, "live-rollback-audit-1440x900");
       expect(consoleErrors).toEqual([]);
       expect(badResponses).toEqual([]);
     } finally {
+      await pinnedHostedPage?.close();
+      await newHostedPage?.close();
       if (agentId && !page.isClosed()) {
         const cleanup = await releaseCleanup(page, agentId);
         expect(cleanup).toEqual({ archive: 200, remove: 200 });

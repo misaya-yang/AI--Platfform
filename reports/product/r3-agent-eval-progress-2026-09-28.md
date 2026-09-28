@@ -65,3 +65,19 @@
 | J18 固定 A/B 比较 | 自动化证明不可归因/同失败/未评分分类 | 真实固定候选同一数据集逐例比较和发布决策回读 |
 
 本地 `main` 合入的是可复核安全增量；R3 **尚未达到 J14～J18 全部真实验收**，完整 R3 不标完成。未推送远端；保留开始时已有的 `reports/r1-boundaries/*.json` 未跟踪文件。
+
+## 2026-09-28 续验修正
+
+上述“旧登录态过期”只是页面现象，不是充分的阻塞判断。同一已有 E2E 身份在本地 Docker Playwright 已成功登录。主代理随后在 Codex IAB 尝试正常登录：该浏览器使用独立虚拟剪贴板，系统剪贴板粘贴无数据；打开本机凭据文件的 `file:` URL 被浏览器安全策略明确拒绝，并明确禁止通过间接路径绕过。已停止绕过尝试并异步请求用户在 IAB 手动登录；其余 API/真实服务验收继续进行。此项仅是 **IAB 交互输入依赖**，不能阻断可独立执行的 J14～J18 后端/Playwright 工作。未输出或保存账号凭据。
+
+继续调查确认另一项 **R3 范围内的代码缺口**：现有 Eval `live_candidate` 经 V2 Thread/Turn 真实执行，但启动的是内建 Assistant，既没有 Studio Agent ID，也没有固定草稿/版本身份。因此此前自动化的 A/B 分类不能声称已经验证“固定 Agent A/B”；也不能把 `rescore_trace` 当新执行。后续使用现有预发布不可变 Version 作为 typed Eval target，由 Gateway 服务端解析版本与当前资源授权，保持原 Runtime/Worker 执行和 durable handle；五类样本真实 A/B 通过后再核发布决策身份。该工作仍在进行，未改变本报告上方已通过的安全增量证据。
+
+## 2026-09-28 固定 Version 安全增量收口
+
+上段所述 typed target 已实际实现：Eval 的 `live_candidate` 接收服务器核验的 `agent_id`/不可变 `agent_version_id`，冻结模型、KB、spec/runtime 指纹；worker 使用原创建者授权，V2 Thread/Turn 核对同一 pin 后执行。Web 可选定和回读版本。内部 linked publish 需显式选择已完成、完整评分、与 release eval **同一数据集和 manifest** 的 run；复用已评测 Version，审计只称五样本有限证据。公开/token 的该路径继续拒绝，待受众专属质量规则，不扩大受众。
+
+真实 Docker 暴露并修复了两处数据库合同错误：预发布 Version Preview 原受旧 shape CHECK 拒绝（epoch 8）；reviewer 随后发现 NULL/UNKNOWN 漏洞（epoch 9）；有 Hosted 历史会话时旧 composite FK 又阻止 Publication 指针回滚（epoch 10）。三个均为前向 authority 迁移，旧 epoch 未改。普通 Preview SSE 断开改为同一持久 Runtime 游标的后台终态重读，避免把断开误报取消；该补写在 Gateway 冷重启后仍无持久重试。
+
+本次实测详情与每个 run 的区分见 [固定 Version 本地实机补验](r3-typed-agent-live-2026-09-28.md)。J14 的 r1 运行中保存 r2、刷新后开独立预览 **Docker Playwright 1/1 通过**；J15 在旧 v2 Hosted 会话存在时回滚 v1，首次 500 后应用 epoch 10，同用例复测 **1/1 通过**。五样本真实 A/B 均经 Runtime/provider 执行；最终 A 有 2 个 `stream_interrupted` 未评分，B 执行 5/5 但预设行为断言 0/5，质量 gate 拒绝，比较标记证据不足。带 KB 来源失败样本的显式重试返回 409，无新 run。不能把这些负向结果写成完整 J16～J18 通过。
+
+独立只读 reviewer 的数据集错配、Web selected run 缺口、Preview detach Trace、shape NULL 漏洞均已最小修正并复核；epoch 9/10 最终静态复核无合入硬阻塞。Codex 内置浏览器仍停留登录页，账号输入受该浏览器安全策略限制；普通 Docker Playwright 使用原专用账号成功。真实裁判故障、五类行为全部通过的固定 A/B、Trace 冷重启补偿、完整双角色/公开受众矩阵仍未验收，**R3 不标完成**。

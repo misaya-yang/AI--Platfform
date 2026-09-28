@@ -6,6 +6,7 @@ import {
   latestPreviewRunId,
   pollPreviewOutcome,
   previewArtifactCanDownload,
+  previewCanStartCurrentDraft,
   previewHistoryMessages,
   previewLocator,
   previewRunIsTerminal,
@@ -57,6 +58,19 @@ test("active and approval runs block new, clear, and target switching until term
   ]);
   assert.equal(finalMessages[1].content, "final answer");
   assert.equal(previewSessionActionsBlocked({ ...active, runUnsettled: false }), false);
+});
+
+test("a saved r2 can start an isolated Preview while a restored r1 run remains active", () => {
+  const state = {
+    target: "draft:1", pinnedDraftRevision: 1, currentDraftRevision: 2,
+    restoring: false, starting: false, sending: false, decidingApproval: false,
+    cancelling: false, refreshingRun: false, approvalPending: false,
+  };
+  assert.equal(previewCanStartCurrentDraft(state), true);
+  assert.equal(previewCanStartCurrentDraft({ ...state, target: "draft" }), false);
+  assert.equal(previewCanStartCurrentDraft({ ...state, currentDraftRevision: 1 }), false);
+  assert.equal(previewCanStartCurrentDraft({ ...state, approvalPending: true }), false);
+  assert.equal(previewCanStartCurrentDraft({ ...state, sending: true }), false);
 });
 
 test("a rejected approval keeps the Preview blocked until the rejection reaches a terminal run", () => {
