@@ -16,6 +16,7 @@ from knowledge_service.services.knowledge.special_publication import (
 from qdrant_client.http.models import PointStruct
 
 GENERATION = "00000000-0000-4000-8000-000000000001"
+TEXT_GENERATION = "00000000-0000-4000-8000-000000000002"
 DATASET = {"dataset_id": "dataset-a", "tenant_id": "tenant-a", "collection_name": "base"}
 
 
@@ -86,12 +87,14 @@ class Database:
         self.image_rows: list[dict[str, Any]] = []
         self.execution_status = "running"
         self.active_execution_id = GENERATION
+        self.execution_id = GENERATION
+        self.operator_disabled_positions: set[int] = set()
         self.lease_special_ids: list[str | None] = []
         self.shared_lease_flags: list[bool] = []
 
     def owner(self) -> dict[str, Any]:
         return {
-            "execution_id": GENERATION, "document_id": "document-a",
+            "execution_id": self.execution_id, "document_id": "document-a",
             "dataset_id": "dataset-a", "execution_status": self.execution_status,
             **self.special,
         }
@@ -107,6 +110,12 @@ class Database:
     ) -> list[dict[str, Any]]:
         assert connection is self.connection
         return list(self.image_rows)
+
+    async def get_operator_disabled_segment_positions(
+        self, _document_id: str, content_type: str, *, connection: Any,
+    ) -> set[int]:
+        assert content_type == "text" and connection is self.connection
+        return set(self.operator_disabled_positions)
 
     async def get_special_publication_manifest(
         self, _execution_id: str, *, connection: Any = None,
@@ -170,8 +179,12 @@ class Database:
         self.document["status"] = "completed"
         self.document["content"] = kwargs["candidate_content"]
         self.document["metadata"].update(kwargs["candidate_metadata_patch"])
+        if kwargs["delete_all_excess"]:
+            self.image_rows = []
         if kwargs["candidate_version_number"] is not None:
             self.document["current_version"] = kwargs["candidate_version_number"]
+            self.versions[kwargs["previous_version_number"] - 1]["change_type"] = "updated"
+            self.versions[kwargs["candidate_version_number"] - 1]["change_type"] = "restored"
         self.events.append("pg_committed")
         return len(kwargs["segment_rows"]), 0
 
@@ -383,6 +396,63 @@ def _setup(*, image: bool = False) -> tuple[SpecialPublicationCoordinator, Any, 
     return SpecialPublicationCoordinator(service), plan, db, vectors, storage
 
 
+def _prepare_text_restore_after_vision(
+    db: Database, storage: Storage, vision_plan: Any,
+) -> SimpleNamespace:
+    historical = dict(db.versions[0]["metadata"]["_special_source_manifest"])
+    assert historical["source_kind"] == "text"
+    assert historical["source_hash"] == hashlib.sha256(b"old").hexdigest()
+    old_key = vision_plan.object_manifest[0]["storage_key"]
+    storage.object_data[old_key] = b"page"
+    db.image_rows = [{
+        "image_attachment_id": vision_plan.object_manifest[0]["attachment_id"],
+        "image_filename": "page_1.png", "text": vision_plan.content,
+        "metadata": {"page_number": 1},
+    }]
+    db.versions.extend([
+        {"content": vision_plan.content,
+         "content_hash": hashlib.sha256(vision_plan.content.encode()).hexdigest(),
+         "metadata": dict(db.document["metadata"]),
+         "change_type": "pending_before_restore"},
+        {"content": "old", "content_hash": hashlib.sha256(b"old").hexdigest(),
+         "metadata": {"_special_source_manifest": historical},
+         "change_type": "pending_restore"},
+    ])
+    db.document["metadata"]["_document_pending_restore_version"] = {
+        "previous_version": 3, "candidate_version": 4,
+    }
+    db.document["metadata"].update({
+        "processing_mode": "scanned", "extracted_images": [{"storage_key": old_key}],
+        "image_count": 1, "images_embedded": True, "embedded_image_count": 1,
+    })
+    db.document["status"] = "indexing"
+    db.execution_id = TEXT_GENERATION
+    db.active_execution_id = TEXT_GENERATION
+    db.special = {
+        "generation_id": TEXT_GENERATION,
+        "source_hash": hashlib.sha256(b"old").hexdigest(),
+        "plan_hash": None, "planned_object_keys": [], "phase": "preparing",
+        "collections": {}, "objects": {},
+    }
+    point = PointStruct(
+        id="00000000-0000-4000-8000-000000000021", vector=[0.1, 0.2],
+        payload={"document_id": "document-a", "text": "old"},
+    )
+    return SimpleNamespace(
+        generation_id=TEXT_GENERATION, document_id="document-a",
+        dataset_id="dataset-a", source_kind="text",
+        source_hash=hashlib.sha256(b"old").hexdigest(), content="old",
+        points_by_collection={"base": [point]},
+        segment_rows=[{
+            "segment_id": str(point.id), "dataset_id": "dataset-a",
+            "document_id": "document-a", "position": 0, "text": "old",
+            "content_type": "text", "enabled": False,
+            "status": "indexing", "metadata": {},
+        }],
+        segment_ids=[str(point.id)], object_manifest=[], summary_row=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_multi_collection_publication_commits_before_old_point_cleanup() -> None:
     coordinator, plan, db, vectors, _storage = _setup()
@@ -406,6 +476,14 @@ async def test_multi_collection_publication_commits_before_old_point_cleanup() -
     assert db.document["current_version"] == 2
     assert db.document["version_count"] == 2
     assert db.lease_special_ids == [GENERATION]
+
+
+@pytest.mark.asyncio
+async def test_first_text_snapshot_keeps_pinned_index_config() -> None:
+    coordinator, plan, db, _vectors, _storage = _setup()
+    index_config = {"chunking": {"mode": "paragraph"}}
+    await coordinator.publish(plan, {**DATASET, "index_config": index_config}, GENERATION, "old")
+    assert db.versions[0]["metadata"]["_special_source_manifest"]["index_config"] == index_config
 
 
 @pytest.mark.asyncio
@@ -527,6 +605,111 @@ async def test_pending_restore_content_mismatch_refuses_before_upsert() -> None:
     with pytest.raises(SpecialSourceUnverifiableError, match="content differs"):
         await coordinator.publish(plan, DATASET, GENERATION, "old")
     assert "upsert" not in vectors.events
+    assert db.special["phase"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_first_text_to_vision_to_text_restores_one_fenced_generation() -> None:
+    coordinator, vision_plan, db, vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    old_object = vision_plan.object_manifest[0]["storage_key"]
+
+    assert await coordinator.publish(
+        text_plan, DATASET, TEXT_GENERATION, vision_plan.content,
+    ) == text_plan.segment_ids
+    assert db.revision > 0 and db.special["phase"] == "committed"
+    assert vectors.points == {"base": {text_plan.segment_ids[0]}, "base_sections": set()}
+    assert db.document["content"] == "old"
+    assert db.document["current_version"] == 4
+    assert db.versions[3]["change_type"] == "restored"
+    assert db.versions[3]["metadata"]["_special_source_manifest"]["source_kind"] == "text"
+    assert db.document["metadata"]["_special_source_manifest"]["source_kind"] == "text"
+    assert db.document["metadata"]["processing_mode"] == "text_only"
+    assert db.document["metadata"]["extracted_images"] == []
+    assert db.document["metadata"]["image_count"] == 0
+    assert db.image_rows == []
+    assert old_object in storage.objects  # Historical vision version still owns its bytes.
+    assert db.events.index("pg_committed") < db.events.index("fence_closed")
+
+
+@pytest.mark.asyncio
+async def test_text_restore_point_keeps_operator_disabled_position() -> None:
+    coordinator, vision_plan, db, _vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    db.operator_disabled_positions.add(0)
+
+    await coordinator.publish(text_plan, DATASET, TEXT_GENERATION, vision_plan.content)
+
+    assert text_plan.points_by_collection["base"][0].payload["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_text_restore_candidate_failure_keeps_vision_serving() -> None:
+    coordinator, vision_plan, db, vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    before = {name: set(ids) for name, ids in vectors.points.items()}
+    vectors.fail_upsert = "base"
+
+    with pytest.raises(RuntimeError, match="candidate upsert failure"):
+        await coordinator.publish(text_plan, DATASET, TEXT_GENERATION, vision_plan.content)
+    assert vectors.points == before
+    assert db.document["content"] == vision_plan.content
+    assert db.document["current_version"] == 2
+    assert db.image_rows
+    assert storage.objects == {vision_plan.object_manifest[0]["storage_key"]}
+    assert db.special["phase"] == "aborted" and db.revision > 0
+
+
+@pytest.mark.asyncio
+async def test_text_restore_post_commit_crash_reconciles_old_collections() -> None:
+    coordinator, vision_plan, db, vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    db.fail_after_commit_once = True
+
+    with pytest.raises(RuntimeError, match="post-commit interruption"):
+        await coordinator.publish(text_plan, DATASET, TEXT_GENERATION, vision_plan.content)
+    assert db.special["phase"] == "committed" and db.revision < 0
+    assert "base_sections" in vectors.points
+    assert await coordinator.recover_unfinished(DATASET)
+    assert db.revision > 0
+    assert vectors.points == {"base": {text_plan.segment_ids[0]}, "base_sections": set()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["content_hash", "source_hash", "source_kind", "index_config"])
+async def test_text_restore_missing_source_evidence_refuses_before_upsert(missing: str) -> None:
+    coordinator, vision_plan, db, vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    if missing == "content_hash":
+        db.versions[3].pop("content_hash")
+    else:
+        db.versions[3]["metadata"]["_special_source_manifest"].pop(missing)
+    before = {name: set(ids) for name, ids in vectors.points.items()}
+    upserts_before = vectors.events.count("upsert")
+
+    with pytest.raises(SpecialSourceUnverifiableError):
+        await coordinator.publish(text_plan, DATASET, TEXT_GENERATION, vision_plan.content)
+    assert vectors.events.count("upsert") == upserts_before
+    assert vectors.points == before
+    assert db.special["phase"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_text_restore_requires_current_special_source_receipt() -> None:
+    coordinator, vision_plan, db, vectors, storage = _setup(image=True)
+    await coordinator.publish(vision_plan, DATASET, GENERATION, "old")
+    text_plan = _prepare_text_restore_after_vision(db, storage, vision_plan)
+    db.document["metadata"].pop("_special_source_manifest")
+    upserts_before = vectors.events.count("upsert")
+
+    with pytest.raises(SpecialSourceUnverifiableError, match="serving source receipt"):
+        await coordinator.publish(text_plan, DATASET, TEXT_GENERATION, vision_plan.content)
+    assert vectors.events.count("upsert") == upserts_before
     assert db.special["phase"] == "aborted"
 
 

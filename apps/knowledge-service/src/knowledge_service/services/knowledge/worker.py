@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -56,6 +57,15 @@ DEFAULT_LARGE_FILE_THRESHOLD = 50 * 1024 * 1024
 REPLAY_SNAPSHOT_ACTIONS = frozenset({"reprocess", "recover", "retry"})
 CHUNKING_VALIDATION_EXEMPT_ACTIONS = REPLAY_SNAPSHOT_ACTIONS | {"reembed"}
 PROCESSING_MODE_VALUES = frozenset(mode.value for mode in ProcessingMode)
+
+
+def _special_generation_id(execution_id: str) -> str:
+    """Use one UUID spelling for the durable manifest and candidate planner."""
+
+    try:
+        return str(uuid.UUID(str(execution_id)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise RuntimeError("special publication execution ID is not a UUID") from exc
 
 
 def _require_enqueue_bm25_v2_available(service: Any, index_config: dict[str, Any]) -> None:
@@ -263,6 +273,17 @@ class _KnowledgeReplayAdmission:
             return  # Version restore uses the standard text publication path.
         mode = str(metadata.get("processing_mode") or "text_only").strip().lower()
         index_config = dataset.get("index_config") or {}
+        from .special_publication import SOURCE_MANIFEST_KEY
+
+        source_receipt = metadata.get(SOURCE_MANIFEST_KEY)
+        if (
+            isinstance(source_receipt, dict)
+            and source_receipt.get("source_kind") == "text"
+            and not self._hierarchical_opted_in(index_config)
+        ):
+            # An ordinary replay would leave the pinned source receipt and
+            # current version behind while replacing the restored text.
+            raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
         if (
             mode == "scanned"
             and bool(metadata.get("original_file_key"))
@@ -327,10 +348,17 @@ class _KnowledgeReplayAdmission:
         document = await self.service.db.get_document(
             task.document_id, connection=connection,
         )
-        if document and self._has_image_generation_receipt(
-            self._document_metadata(document)
-        ):
-            raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+        if document:
+            from .special_publication import SOURCE_MANIFEST_KEY
+
+            current_metadata = self._document_metadata(document)
+            if (
+                isinstance(current_metadata.get(SOURCE_MANIFEST_KEY), dict)
+                or self._has_image_generation_receipt(current_metadata)
+            ):
+                # A legacy target without a pinned source receipt cannot
+                # safely replace a serving special/text-restored generation.
+                raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
         tenant_id = str(dataset.get("tenant_id") or "").strip()
         has_segments = getattr(self.service.db, "document_has_specialized_segments", None)
         has_points = getattr(self.service.vector_store, "document_has_specialized_points", None)
@@ -1647,7 +1675,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             not isinstance(restore_version, int) or restore_version <= 0
         ):
             raise RuntimeError(f"{label} restore version is invalid")
-        if restore_kind is not None and restore_kind not in {"hierarchy", "vision"}:
+        if restore_kind is not None and restore_kind not in {"text", "hierarchy", "vision"}:
             raise RuntimeError(f"{label} restore source kind is invalid")
         if restore_kind is not None and (
             not isinstance(restore_hash, str)
@@ -2673,6 +2701,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
 
         special_publication_attempted = False
         special_execution_id = ""
+        special_generation = ""
         special_source_hash = ""
         special_dataset: dict[str, Any] | None = None
         try:
@@ -2803,25 +2832,29 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     raise RuntimeError("hierarchical generation has no durable execution")
                 source_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
                 special_execution_id = execution_id
+                special_generation = _special_generation_id(execution_id)
                 special_source_hash = source_hash
                 special_dataset = dataset
                 begin = getattr(self.service.db, "record_special_publication_manifest", None)
                 if not callable(begin):
                     raise RuntimeError("special publication manifest is unavailable")
                 await begin(
-                    execution_id, task.document_id, task.dataset_id, execution_id,
+                    execution_id, task.document_id, task.dataset_id, special_generation,
                     source_hash=source_hash, planned_object_keys=[],
                 )
                 plan = await prepare_candidate(
                     document_id=task.document_id,
                     dataset_id=task.dataset_id,
                     text=full_text,
-                    generation_id=execution_id,
+                    generation_id=special_generation,
                     metadata=metadata,
                     chunking_config=chunking_config,
                 )
                 from .special_publication import SpecialPublicationCoordinator
 
+                await self.service.db.update_document_status(
+                    task.document_id, status="indexing", progress=75,
+                )
                 await SpecialPublicationCoordinator(self.service).publish(
                     plan, dataset, execution_id, str(doc.get("content") or ""),
                     document_shared_lease_held=True,
@@ -2898,7 +2931,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
 
                         await SpecialPublicationCoordinator(self.service).abort_preparing(
                             special_dataset, special_execution_id,
-                            special_execution_id, special_source_hash,
+                            special_generation, special_source_hash,
                             document_shared_lease_held=True,
                         )
                 self._note_stage_fallback(
@@ -2986,6 +3019,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
         execution_id = str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip()
         if not isinstance(pending, dict) or not execution_id:
             raise RuntimeError("special restore has no durable candidate owner")
+        generation_id = _special_generation_id(execution_id)
         candidate_number = int(pending.get("candidate_version") or 0)
         target = await self.service.db.get_document_version(
             task.document_id, candidate_number, include_pending=True,
@@ -3040,7 +3074,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     raise RuntimeError("special restore page order is invalid")
                 pinned_page_texts[page_number] = item["text"]
             planned_keys = await self.vision_processor.planned_object_keys(
-                pdf_bytes, task.document_id, generation_id=execution_id,
+                pdf_bytes, task.document_id, generation_id=generation_id,
                 tenant_id=tenant_id, storage_service=self.service.image_storage_service,
             )
         elif snapshot.restore_source_kind == "hierarchy":
@@ -3048,11 +3082,14 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                 raise RuntimeError("special hierarchy restore processor is unavailable")
             if hashlib.sha256(content.encode("utf-8")).hexdigest() != source_hash:
                 raise RuntimeError("special restore hierarchy text changed")
+        elif snapshot.restore_source_kind == "text":
+            if content_hash != source_hash or source.get("objects") != {} or source.get("page_texts") != []:
+                raise RuntimeError("special restore text source is unverifiable")
         else:
             raise RuntimeError("special restore source kind is invalid")
 
         await self.service.db.record_special_publication_manifest(
-            execution_id, task.document_id, task.dataset_id, execution_id,
+            execution_id, task.document_id, task.dataset_id, generation_id,
             source_hash=source_hash, planned_object_keys=planned_keys,
         )
         try:
@@ -3060,7 +3097,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                 assert pdf_bytes is not None and pinned_page_texts is not None
                 plan = await self.vision_processor.prepare_document(
                     pdf_bytes, task.document_id, task.dataset_id, collection,
-                    generation_id=execution_id, tenant_id=tenant_id,
+                    generation_id=generation_id, tenant_id=tenant_id,
                     storage_service=self.service.image_storage_service,
                     pinned_page_texts=pinned_page_texts,
                 )
@@ -3078,13 +3115,13 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     "segments_created": len(plan.segment_ids),
                     "ocr_strategy": "restored_pinned_page_text",
                 }
-            else:
+            elif snapshot.restore_source_kind == "hierarchy":
                 from .chunking import ChunkingConfig
 
                 chunking = ChunkingConfig.from_dict(snapshot.chunking)
                 plan = await self.hierarchical_indexer.prepare_document(
                     document_id=task.document_id, dataset_id=task.dataset_id,
-                    text=content, generation_id=execution_id,
+                    text=content, generation_id=generation_id,
                     metadata=target.get("metadata") or {}, chunking_config=chunking,
                 )
                 patch = {
@@ -3093,6 +3130,22 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     "l3_segments": plan.l3_count,
                     "total_vectors": sum(len(points) for points in plan.points_by_collection.values()),
                 }
+            else:
+                from .text_restore_candidate import TextRestoreCandidatePlanner
+
+                plan = await TextRestoreCandidatePlanner(self.service).prepare(
+                    document_id=task.document_id, dataset=dataset,
+                    generation_id=generation_id, content=content,
+                    title=str(target.get("title") or document.get("title") or task.document_id),
+                    chunking=snapshot.chunking,
+                )
+                patch = {
+                    "l1_segments": 0, "l2_segments": 0, "l3_segments": 0,
+                    "total_vectors": len(plan.segment_ids),
+                }
+            await self.service.db.update_document_status(
+                task.document_id, status="indexing", progress=75,
+            )
             return await coordinator.publish(
                 plan, dataset, execution_id, str(document.get("content") or ""),
                 metadata_patch=patch, document_shared_lease_held=True,
@@ -3101,7 +3154,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             owner = await self.service.db.get_special_publication_manifest(execution_id)
             if owner and owner.get("phase") == "preparing":
                 await coordinator.abort_preparing(
-                    dataset, execution_id, execution_id, source_hash,
+                    dataset, execution_id, generation_id, source_hash,
                     document_shared_lease_held=True,
                 )
             raise
@@ -3120,6 +3173,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
         execution_id = str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip()
         if not original_key or not execution_id:
             raise RuntimeError("scanned generation lacks source or durable execution")
+        generation_id = _special_generation_id(execution_id)
         dataset = await self.service.db.get_dataset(task.dataset_id)
         if not isinstance(dataset, dict):
             raise RuntimeError("scanned dataset authority is unavailable")
@@ -3138,11 +3192,11 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             collection = f"kb_{task.dataset_id}_{dimension}"
         planned_keys = await self.vision_processor.planned_object_keys(
             pdf_bytes, task.document_id,
-            generation_id=execution_id, tenant_id=tenant_id,
+            generation_id=generation_id, tenant_id=tenant_id,
             storage_service=self.service.image_storage_service,
         )
         await self.service.db.record_special_publication_manifest(
-            execution_id, task.document_id, task.dataset_id, execution_id,
+            execution_id, task.document_id, task.dataset_id, generation_id,
             source_hash=source_hash, planned_object_keys=planned_keys,
         )
         from .special_publication import SpecialPublicationCoordinator
@@ -3164,9 +3218,12 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
         try:
             plan = await self.vision_processor.prepare_document(
                 pdf_bytes, task.document_id, task.dataset_id, collection,
-                generation_id=execution_id, tenant_id=tenant_id,
+                generation_id=generation_id, tenant_id=tenant_id,
                 storage_service=self.service.image_storage_service,
                 text_extractor=text_extractor,
+            )
+            await self.service.db.update_document_status(
+                task.document_id, status="indexing", progress=75,
             )
             await coordinator.publish(
                 plan, dataset, execution_id, str(doc.get("content") or ""),
@@ -3182,7 +3239,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             owner = await self.service.db.get_special_publication_manifest(execution_id)
             if owner and owner.get("phase") == "preparing":
                 await coordinator.abort_preparing(
-                    dataset, execution_id, execution_id, source_hash,
+                    dataset, execution_id, generation_id, source_hash,
                     document_shared_lease_held=True,
                 )
             raise

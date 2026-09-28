@@ -1667,7 +1667,8 @@ async def test_version_restore_refuses_specialized_points_before_candidate_or_ex
 
 
 @pytest.mark.asyncio
-async def test_version_restore_queues_verified_hierarchy_source_without_text_fallback() -> None:
+@pytest.mark.parametrize("kind", ["text", "hierarchy"])
+async def test_version_restore_queues_verified_special_source_without_text_fallback(kind: str) -> None:
     database = _RestoreDatabase()
     restored_content = "restored hierarchy content"
     digest = hashlib.sha256(restored_content.encode()).hexdigest()
@@ -1676,7 +1677,7 @@ async def test_version_restore_queues_verified_hierarchy_source_without_text_fal
         "document_id": "document-a", "version_number": 1,
         "content": restored_content, "content_hash": digest,
         "metadata": {"_special_source_manifest": {
-            "source_kind": "hierarchy", "source_hash": digest,
+            "source_kind": kind, "source_hash": digest,
             "content_hash": digest, "index_config": index_config,
             "original_source_key": "", "page_texts": [], "objects": {},
         }},

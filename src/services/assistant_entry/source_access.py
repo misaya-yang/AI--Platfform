@@ -11,7 +11,6 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from time import monotonic
 from typing import Any
 from uuid import UUID
 
@@ -82,7 +81,16 @@ def _context_references(
         top_has_version, top_has_hash = top_version is not None, top_hash is not None
         metadata_has_version = metadata_version is not None
         metadata_has_hash = metadata_hash is not None
-        if top_has_version != top_has_hash or metadata_has_version != metadata_has_hash:
+        if (
+            top_has_version != top_has_hash
+            or metadata_has_version != metadata_has_hash
+            or (top_has_version and type(top_version) is not int)
+            or (metadata_has_version and type(metadata_version) is not int)
+            or (top_has_hash and (not isinstance(top_hash, str) or top_hash != top_hash.strip()))
+            or (metadata_has_hash and (
+                not isinstance(metadata_hash, str) or metadata_hash != metadata_hash.strip()
+            ))
+        ):
             versions.add(UNKNOWN_SOURCE_VERSION)
             continue
         if not top_has_version and not metadata_has_version:
@@ -145,6 +153,11 @@ async def conversation_sources(
         run_id = str(row["run_id"] or "")
         event_documents.setdefault(run_id, set()).update(references)
         event_versions.setdefault(run_id, set()).update(versions)
+        if not run_id:
+            # A persisted event without a turn cannot be safely attributed to
+            # one answer. Make every run inherit it rather than expose one.
+            unknown_time_documents.update(references)
+            unknown_time_versions.update(versions)
         if isinstance(row.get("created_at"), datetime):
             dated_contexts.append((row["created_at"], frozenset(references)))
             dated_versions.append((row["created_at"], frozenset(versions)))
@@ -168,14 +181,26 @@ async def conversation_sources(
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata") or {}
-        for context in metadata.get("contexts", []) if isinstance(metadata, dict) else []:
-            if isinstance(context, dict) and context.get("dataset_id"):
-                legacy_ids.add(str(context["dataset_id"]))
-                context_documents, context_versions = _context_references(
-                    context.get("chunks"), str(context["dataset_id"]),
-                )
-                legacy_documents.update(context_documents)
-                legacy_versions.update(context_versions)
+        if not isinstance(metadata, dict) or "contexts" not in metadata:
+            continue
+        contexts = metadata["contexts"]
+        if not isinstance(contexts, list):
+            legacy_documents.add(("", ""))
+            legacy_versions.add(UNKNOWN_SOURCE_VERSION)
+            continue
+        for context in contexts:
+            if not isinstance(context, dict):
+                legacy_documents.add(("", ""))
+                legacy_versions.add(UNKNOWN_SOURCE_VERSION)
+                continue
+            default_dataset_id = str(context.get("dataset_id") or "")
+            if default_dataset_id:
+                legacy_ids.add(default_dataset_id)
+            context_documents, context_versions = _context_references(
+                context.get("chunks"), default_dataset_id,
+            )
+            legacy_documents.update(context_documents)
+            legacy_versions.update(context_versions)
     legacy_ids.update(dataset_id for dataset_id, _ in legacy_documents if dataset_id)
     baseline_documents = set(legacy_documents) | unknown_time_documents
     baseline_versions = set(legacy_versions) | unknown_time_versions
@@ -439,9 +464,13 @@ async def quiz_source_scope(
 async def quiz_source_ids(
     request: Request, quiz_id: UUID, tenant_id: str, *, require_origin: bool = False,
 ) -> frozenset[str]:
-    dataset_ids, _, _ = await quiz_source_scope(
+    dataset_ids, documents, versions = await quiz_source_scope(
         request, quiz_id, tenant_id, require_origin=require_origin,
     )
+    if not dataset_ids and (documents or versions):
+        # The anonymous share caller only consumes dataset IDs. A source
+        # without a usable dataset ID cannot be represented by that result.
+        raise HTTPException(409, detail={"code": "ASSISTANT_SOURCE_ORIGIN_UNVERIFIED"})
     return dataset_ids
 
 
@@ -558,23 +587,26 @@ class ConversationEventGuard:
         self.source_versions = sources.source_versions
         self.observed_documents_by_run: dict[str, set[tuple[str, str]]] = {}
         self.observed_versions_by_run: dict[str, set[SourceVersionRef]] = {}
-        self.next_check = 0.0
+        self.last_sequence: int | None = None
         self.revoked = False
 
     async def project(self, raw: dict[str, Any]) -> dict[str, Any]:
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         run_id = str(data.get("run_id") or "")
-        if run_id and run_id not in self.seen_run_ids:
+        sequence = raw.get("sequence")
+        valid_sequence = type(sequence) is int
+        sequence_gap = not valid_sequence or self.last_sequence is None or sequence != self.last_sequence + 1
+        self.last_sequence = sequence if valid_sequence else None
+        if sequence_gap or (run_id and run_id not in self.seen_run_ids) or raw.get("event_type") == "context_retrieved":
+            # Replay cursors can skip a context event. Reconcile persisted
+            # sources on the first event and on gaps before showing content.
             self.sources = await conversation_sources(self.request, self.user, self.sources_session_id)
-            self.seen_run_ids.add(run_id)
+            if run_id:
+                self.seen_run_ids.add(run_id)
         ids = self.sources.inherited_by_run.get(run_id, self.sources.dataset_ids)
         documents = (self.sources.documents_by_run or {}).get(run_id, self.sources.document_ids)
         versions = (self.sources.versions_by_run or {}).get(run_id, self.sources.source_versions)
         if raw.get("event_type") == "context_retrieved":
-            self.sources = await conversation_sources(self.request, self.user, self.sources_session_id)
-            ids = self.sources.inherited_by_run.get(run_id, self.sources.dataset_ids)
-            documents = (self.sources.documents_by_run or {}).get(run_id, self.sources.document_ids)
-            versions = (self.sources.versions_by_run or {}).get(run_id, self.sources.source_versions)
             observed_documents, observed_versions = _context_references(data.get("chunks"))
             self.observed_documents_by_run.setdefault(run_id, set()).update(observed_documents)
             self.observed_versions_by_run.setdefault(run_id, set()).update(observed_versions)
@@ -585,24 +617,12 @@ class ConversationEventGuard:
             self.dataset_ids = ids
             self.document_ids = documents
             self.source_versions = versions
-            self.next_check = 0.0
         if not self.dataset_ids and not self.document_ids and not self.source_versions:
             return raw
-        now = monotonic()
-        if self.document_ids and not self.document_ids <= await visible_document_keys(
-            self.request, self.user, self.document_ids,
-        ):
-            self.revoked = True
-        if self.source_versions and not self.source_versions <= await visible_source_version_keys(
-            self.request, self.user, self.source_versions,
-        ):
-            self.revoked = True
-        if now >= self.next_check:
-            self.revoked = self.revoked or not await source_scope_allowed(
-                self.request, self.user, self.dataset_ids, self.document_ids,
-                versioned_refs=self.source_versions,
-            )
-            self.next_check = now + 1.0
+        self.revoked = self.revoked or not await source_scope_allowed(
+            self.request, self.user, self.dataset_ids, self.document_ids,
+            versioned_refs=self.source_versions,
+        )
         if not self.revoked:
             return raw
         event_type = raw.get("event_type")

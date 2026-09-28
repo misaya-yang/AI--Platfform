@@ -105,7 +105,20 @@ class SpecialPublicationCoordinator:
 
     @staticmethod
     def _source_kind(plan: Any, objects: dict[str, str]) -> str:
-        return "vision" if getattr(plan, "total_pages", None) is not None or objects else "hierarchy"
+        inferred = (
+            "vision" if getattr(plan, "total_pages", None) is not None or objects
+            else "hierarchy"
+        )
+        declared = str(getattr(plan, "source_kind", "") or "")
+        if declared == "text":
+            if inferred != "hierarchy":
+                raise SpecialSourceUnverifiableError("text candidate has image receipts")
+            if plan.source_hash != _sha256_text(plan.content):
+                raise SpecialSourceUnverifiableError("text candidate source hash differs")
+            return "text"
+        if declared and declared != inferred:
+            raise SpecialSourceUnverifiableError("special candidate source kind differs")
+        return inferred
 
     @staticmethod
     def _vision_page_texts(plan: Any, objects: dict[str, str]) -> list[dict[str, Any]]:
@@ -145,7 +158,7 @@ class SpecialPublicationCoordinator:
 
     async def _old_source_manifest(
         self, current: dict[str, Any], document_id: str,
-        *, tenant_id: str, connection: Any,
+        *, tenant_id: str, index_config: dict[str, Any], connection: Any,
     ) -> dict[str, Any]:
         """Capture serving image bytes before replacing their segment rows."""
 
@@ -234,13 +247,21 @@ class SpecialPublicationCoordinator:
                 raise SpecialSourceUnverifiableError(
                     "old vision page receipts differ from serving image rows"
                 )
+        prior_index_config = previous.get("index_config", index_config)
+        if not isinstance(prior_index_config, dict):
+            raise SpecialSourceUnverifiableError("old source index config is invalid")
+        if prior_kind == "text" and (
+            previous.get("source_hash", content_hash) != content_hash
+            or objects or previous.get("page_texts") not in (None, [])
+        ):
+            raise SpecialSourceUnverifiableError("old text source receipt differs")
         return {
             "generation_id": str(previous.get("generation_id") or ""),
             "source_hash": str(previous.get("source_hash") or content_hash),
             "content_hash": content_hash,
             "source_kind": prior_kind or ("vision" if image_rows else "text"),
             "original_source_key": str(previous.get("original_source_key") or metadata.get("original_file_key") or ""),
-            "index_config": _json_object(previous.get("index_config")),
+            "index_config": prior_index_config,
             "page_texts": page_texts,
             "objects": dict(sorted(objects.items())),
         }
@@ -470,8 +491,8 @@ class SpecialPublicationCoordinator:
                     )
                     if (
                         pending is None or pending["change_type"] != "pending_restore"
-                        or pending["content"] != plan.content
-                        or pending["content_hash"] != content_hash
+                        or pending.get("content") != plan.content
+                        or pending.get("content_hash") != content_hash
                     ):
                         raise SpecialSourceUnverifiableError(
                             "pending restore content differs from prepared candidate"
@@ -487,6 +508,14 @@ class SpecialPublicationCoordinator:
                     ):
                         raise SpecialSourceUnverifiableError(
                             "pending restore source identity differs from candidate"
+                        )
+                    if source_kind == "text" and (
+                        restore_source.get("source_hash") != content_hash
+                        or restore_source.get("page_texts") != []
+                        or restore_source.get("objects") != {}
+                    ):
+                        raise SpecialSourceUnverifiableError(
+                            "pending text restore source receipt is incomplete"
                         )
                     if source_kind == "vision":
                         saved_pages = restore_source.get("page_texts")
@@ -524,19 +553,46 @@ class SpecialPublicationCoordinator:
                 candidate_metadata = {
                     **(metadata_patch or {}), SOURCE_MANIFEST_KEY: candidate_source,
                 }
+                if source_kind == "text":
+                    # The old special image/level receipts must stop describing
+                    # the active document in the same transaction that removes
+                    # their segment rows. Historical version receipts stay intact.
+                    candidate_metadata.update({
+                        "processing_mode": "text_only",
+                        "original_file_key": original_source_key,
+                        "extracted_images": [], "image_count": 0,
+                        "images_embedded": False, "embedded_image_count": 0,
+                        "pages_processed": 0, "total_pages": 0,
+                        "l1_segments": 0, "l2_segments": 0, "l3_segments": 0,
+                        "total_vectors": len(plan.segment_ids),
+                        "segments_created": len(plan.segment_ids),
+                    })
                 current_version = int(current["current_version"] or 0)
                 existing = await connection.fetchrow(
                     "SELECT content_hash, content, metadata FROM document_versions "
                     "WHERE document_id = $1 AND version_number = $2",
                     document_id, current_version,
                 ) if current_version > 0 else None
-                if existing is not None and _sha256_text(str(existing["content"] or "")) != str(existing["content_hash"] or ""):
+                if existing is not None and _sha256_text(str(existing.get("content") or "")) != str(existing.get("content_hash") or ""):
                     raise SpecialSourceUnverifiableError("old document version bytes differ")
                 if existing is not None and str(existing["content"] or "") != str(current["content"] or ""):
                     raise SpecialSourceUnverifiableError(
                         "old document version and serving content differ"
                     )
                 has_old_points = any(old_ids.values())
+                if source_kind == "text":
+                    serving_source = _json_object(metadata.get(SOURCE_MANIFEST_KEY))
+                    if not serving_source:
+                        raise SpecialSourceUnverifiableError(
+                            "old special serving source receipt is unavailable"
+                        )
+                    version_source = _json_object(
+                        _json_object(existing.get("metadata")).get(SOURCE_MANIFEST_KEY)
+                    ) if existing is not None else {}
+                    if version_source and version_source != serving_source:
+                        raise SpecialSourceUnverifiableError(
+                            "old special version source differs from serving source"
+                        )
                 baseline_needed = existing is None and has_old_points
                 if isinstance(restore, dict) and existing is None:
                     raise SpecialSourceUnverifiableError("restore has no active old version")
@@ -544,7 +600,8 @@ class SpecialPublicationCoordinator:
                 if existing is not None or baseline_needed:
                     old_source = await self._old_source_manifest(
                         {**dict(current), "content": existing["content"] if existing else current["content"]},
-                        document_id, tenant_id=tenant_id, connection=connection,
+                        document_id, tenant_id=tenant_id,
+                        index_config=pinned_index_config, connection=connection,
                     )
                 if isinstance(restore, dict):
                     version_number = int(restore["candidate_version"])
@@ -572,6 +629,21 @@ class SpecialPublicationCoordinator:
                         **_json_object(row.get("metadata")),
                         "source_version": version_number, "source_hash": content_hash,
                     }
+                if source_kind == "text":
+                    # Segment upsert preserves an operator disable by
+                    # (document, content type, position). Match the Qdrant
+                    # candidate's visibility before writing either store.
+                    disabled_positions = await self.db.get_operator_disabled_segment_positions(
+                        document_id, "text", connection=connection,
+                    )
+                    disabled_ids = {
+                        str(row["segment_id"]) for row in plan.segment_rows
+                        if int(row["position"]) in disabled_positions
+                    }
+                    for points in plan.points_by_collection.values():
+                        for point in points:
+                            if str(point.id) in disabled_ids:
+                                point.payload = {**(point.payload or {}), "enabled": False}
                 plan_hash = self._plan_hash(plan, objects, candidate_source)
                 manifest = await self.db.advance_special_publication_manifest(
                     execution_id, document_id, dataset_id, generation_id,

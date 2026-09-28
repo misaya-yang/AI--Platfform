@@ -3867,6 +3867,19 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         async with self._pool.acquire() as conn, conn.transaction():
             await _insert(conn)
 
+    async def get_operator_disabled_segment_positions(
+        self, document_id: str, content_type: str, *, connection: Any,
+    ) -> set[int]:
+        """Read the operator's visibility decisions inside a publication lease."""
+
+        rows = await connection.fetch(
+            "SELECT position FROM segments "
+            "WHERE document_id = $1 AND content_type = $2 "
+            "AND disabled_by IS NOT NULL FOR UPDATE",
+            document_id, content_type,
+        )
+        return {int(row["position"]) for row in rows}
+
     async def get_segment_hashes_by_document(
         self, document_id: str, content_type: str = "text"
     ) -> dict[int, dict[str, Any]]:

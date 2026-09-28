@@ -9,7 +9,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from knowledge_service.services.knowledge import special_publication
+from knowledge_service.core.exceptions import ValidationFailedError
+from knowledge_service.services.knowledge import special_publication, text_restore_candidate
 from knowledge_service.services.knowledge.worker import (
     KnowledgeIngestTask,
     KnowledgeWorker,
@@ -18,12 +19,16 @@ from knowledge_service.services.knowledge.worker import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["hierarchy", "vision"])
+@pytest.mark.parametrize("kind", ["text", "hierarchy", "vision"])
 async def test_special_restore_publishes_pinned_historical_source(
     monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
-    execution_id = str(uuid.uuid4())
-    content = "[Page 1]\nold OCR" if kind == "vision" else "old hierarchy body"
+    execution_id = uuid.uuid4().hex  # PostgreSQL pipeline receipts use UUID hex.
+    generation_id = str(uuid.UUID(execution_id))
+    content = (
+        "[Page 1]\nold OCR" if kind == "vision" else
+        "old ordinary body" if kind == "text" else "old hierarchy body"
+    )
     content_hash = hashlib.sha256(content.encode()).hexdigest()
     pdf_bytes = b"verified historical pdf"
     source_hash = hashlib.sha256(pdf_bytes if kind == "vision" else content.encode()).hexdigest()
@@ -39,6 +44,7 @@ async def test_special_restore_publishes_pinned_historical_source(
             "knowledge/documents/tenant-a/doc-a/original/old.pdf" if kind == "vision" else ""
         ),
         "page_texts": pages,
+        "objects": {},
     }
     candidate = {
         "change_type": "pending_restore", "content": content,
@@ -49,6 +55,7 @@ async def test_special_restore_publishes_pinned_historical_source(
         get_document_version=AsyncMock(return_value=candidate),
         record_special_publication_manifest=AsyncMock(),
         get_special_publication_manifest=AsyncMock(return_value={"phase": "committed"}),
+        update_document_status=AsyncMock(),
     )
     storage = SimpleNamespace(download_original_file=AsyncMock(return_value=pdf_bytes))
     plan = SimpleNamespace(
@@ -63,6 +70,15 @@ async def test_special_restore_publishes_pinned_historical_source(
         prepare_document=AsyncMock(return_value=plan),
     )
     published: list[dict[str, Any]] = []
+    text_prepares: list[dict[str, Any]] = []
+
+    class TextPlanner:
+        def __init__(self, _service: Any) -> None:
+            pass
+
+        async def prepare(self, **kwargs: Any) -> Any:
+            text_prepares.append(kwargs)
+            return plan
 
     class Coordinator:
         def __init__(self, _service: Any) -> None:
@@ -87,6 +103,7 @@ async def test_special_restore_publishes_pinned_historical_source(
             raise AssertionError("successful restore must not abort")
 
     monkeypatch.setattr(special_publication, "SpecialPublicationCoordinator", Coordinator)
+    monkeypatch.setattr(text_restore_candidate, "TextRestoreCandidatePlanner", TextPlanner)
     service = SimpleNamespace(
         db=database, settings=SimpleNamespace(knowledge=None),
         image_storage_service=storage,
@@ -114,12 +131,56 @@ async def test_special_restore_publishes_pinned_historical_source(
         "source_hash": source_hash,
         "planned_object_keys": ["new-page"] if kind == "vision" else [],
     }
+    assert database.record_special_publication_manifest.await_args.args[3] == generation_id
     assert published[0]["document_shared_lease_held"] is True
+    database.update_document_status.assert_awaited_once_with(
+        "doc-a", status="indexing", progress=75,
+    )
     if kind == "vision":
         storage.download_original_file.assert_awaited_once_with(source["original_source_key"])
         assert vision.prepare_document.await_args.kwargs["pinned_page_texts"] == {1: "old OCR"}
+        assert vision.prepare_document.await_args.kwargs["generation_id"] == generation_id
         assert "text_extractor" not in vision.prepare_document.await_args.kwargs
-    else:
+    elif kind == "hierarchy":
         storage.download_original_file.assert_not_awaited()
         assert hierarchy.prepare_document.await_args.kwargs["text"] == content
+        assert hierarchy.prepare_document.await_args.kwargs["generation_id"] == generation_id
         assert hierarchy.prepare_document.await_args.kwargs["metadata"] == candidate["metadata"]
+    else:
+        storage.download_original_file.assert_not_awaited()
+        hierarchy.prepare_document.assert_not_awaited()
+        assert text_prepares[0]["content"] == content
+        assert text_prepares[0]["generation_id"] == generation_id
+
+
+@pytest.mark.asyncio
+async def test_text_receipt_refuses_unversioned_standard_reprocess() -> None:
+    worker = KnowledgeWorker(SimpleNamespace(
+        db=SimpleNamespace(), settings=SimpleNamespace(knowledge=None),
+    ))
+    with pytest.raises(ValidationFailedError, match="specialized"):
+        await worker.require_safe_special_replay_admission(
+            KnowledgeIngestTask(dataset_id="dataset-a", document_id="doc-a"),
+            {"metadata": {
+                "processing_mode": "text_only",
+                special_publication.SOURCE_MANIFEST_KEY: {"source_kind": "text"},
+            }},
+            {"tenant_id": "tenant-a", "index_config": {"chunking": {"mode": "automatic"}}},
+            action="reprocess",
+        )
+
+
+@pytest.mark.asyncio
+async def test_text_receipt_refuses_unverified_legacy_restore() -> None:
+    database = SimpleNamespace(get_document=AsyncMock(return_value={
+        "metadata": {special_publication.SOURCE_MANIFEST_KEY: {"source_kind": "text"}},
+    }))
+    worker = KnowledgeWorker(SimpleNamespace(
+        db=database, settings=SimpleNamespace(knowledge=None),
+    ))
+
+    with pytest.raises(ValidationFailedError, match="specialized"):
+        await worker.require_safe_restore_admission(
+            KnowledgeIngestTask(dataset_id="dataset-a", document_id="doc-a"),
+            {"tenant_id": "tenant-a"},
+        )

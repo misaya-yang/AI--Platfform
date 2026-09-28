@@ -66,3 +66,5 @@
 本记录**不表示 R2 完成**。层级/扫描图片的多 collection 候选发布、active BM25 v2 与非文本发布后崩溃窗口、执行中硬崩溃、知识来源的稳定历史全文/双角色撤权、来源同步、评测待审核样本及 J09～J13/J30 全矩阵仍待完成。实际测试层级、独立 review 和缺口见 [R2 执行记录](../../../reports/product/r2-knowledge-progress-2026-09-27.md) 与 [执行状态](../../../deploy/runbooks/r2-knowledge-lifecycle-2026-09-27/loop-state.json)。
 
 **2026-09-28 增量：** 层级/VisionPDF 候选发布、同类特殊版本的可验证来源恢复、负 revision owner/执行清单对账及旧点/图片对象清理已接入。真实 PostgreSQL 提交后受控中断恢复、真实 Qdrant 遗留点清理分别通过；全量 KB 单测 1976 通过/1 跳过，本地 Docker 与内置浏览器核对了既有文本版本和失败回看。真实特殊 provider 的成功、失败和物理重启端到端、特殊版本恢复到更早普通文本，以及 J09～J13/J30 全矩阵未通过，**R2-A/R2 不标完成**。证据和未验证项见 [本次收口记录](../../../reports/product/r2-special-publication-closure-2026-09-28.md)。
+
+**2026-09-28 后续局部验收：** 真实 DashScope 层级文档完成两代发布和同类旧版恢复；同一任务的 PostgreSQL 活动切片与 Qdrant base/section 点 ID 对齐，内置浏览器刷新后仍显示完成。Worker 执行 UUID 和发布状态缺陷已修；特殊版本恢复到历史普通文本的候选路径补齐并经自动化/故障注入，但当前公开扫描上传关闭且真实跨类用户路径未验。来源撤权的 SSE/历史/Quiz 保护补强，双租户验收未执行。独立 review 的普通文本层级误判、操作员禁用位置不一致和无回执旧版恢复风险已最小修正并复核。**完整 R2 仍进行中**，详见 [后续收口证据](../../../reports/product/r2-special-completion-2026-09-28.md)。

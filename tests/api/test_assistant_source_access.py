@@ -18,6 +18,7 @@ from src.core.auth.user_resolver import UserContext
 from src.services.assistant_entry.source_access import (
     ConversationEventGuard,
     conversation_sources,
+    quiz_source_ids,
     require_conversation_source_access,
 )
 
@@ -91,6 +92,17 @@ async def test_legacy_context_is_inherited_and_string_snapshots_are_supported():
     req = request(legacy=json.dumps({"messages": [{"role": "assistant", "metadata": {"contexts": [{"dataset_id": "legacy-a"}]}}]}), snapshots=[{"run_id": "later", "snapshot": json.dumps(snapshot("unused", ["private-a"])["snapshot"])}])
     sources = await conversation_sources(req, USER, "session-a")
     assert sources.inherited_by_run["later"] == frozenset({"legacy-a", "private-a"})
+
+
+@pytest.mark.asyncio
+async def test_legacy_context_uses_chunk_dataset_when_outer_dataset_is_missing():
+    legacy = {"messages": [{"role": "assistant", "metadata": {"contexts": [{
+        "chunks": [{"dataset_id": "private-a", "document_id": "doc-a", "content": "Private source"}],
+    }]}}]}
+    req = request(snapshots=[], visible=["private-a"], visible_docs=[], legacy=legacy)
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -190,6 +202,23 @@ async def test_partial_metadata_identity_cannot_hide_behind_complete_top_level_i
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", ["boolean_metadata_version", "numeric_hash", "padded_hash"])
+async def test_malformed_source_version_fields_fail_closed(malformed):
+    context = versioned_context()
+    chunk = context["chunks"][0]
+    if malformed == "boolean_metadata_version":
+        chunk["metadata"] = {"source_version": True, "source_hash": SOURCE_HASH}
+    elif malformed == "numeric_hash":
+        chunk["source_hash"] = int("1" * 64)
+    else:
+        chunk["source_hash"] = f" {SOURCE_HASH} "
+    req = request(visible=["private-a"], visible_docs=["doc-a"], contexts=[context])
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_same_dataset_document_revocation_blocks_history_and_derived_reads(monkeypatch):
     req = request(
         visible=["private-a"], visible_docs=[], contexts=[document_context()],
@@ -233,6 +262,29 @@ async def test_orphan_context_event_still_restricts_its_runtime_run(monkeypatch)
     )
     monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=owned))
     thread = await agent.get_thread(THREAD.runtime_thread_id, req, USER)
+    assert thread["thread"]["restricted_source_run_ids"] == ["run-a"]
+
+
+@pytest.mark.asyncio
+async def test_runless_context_event_cannot_leave_earlier_run_unrestricted(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime.now(timezone.utc)
+    admitted = snapshot("run-a", ["private-a"])
+    admitted["created_at"] = start
+    context = document_context()
+    context["run_id"] = None
+    context["created_at"] = start + timedelta(minutes=1)
+    req = request(
+        visible=["private-a"], visible_docs=[], snapshots=[admitted], contexts=[context],
+    )
+    owned = SimpleNamespace(
+        session_id="session-a", runtime_thread_id=THREAD.runtime_thread_id,
+        import_status="ready", last_sequence=9, source_kind="native",
+        kernel_owner="agent_runtime",
+    )
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=owned))
+    thread = await agent.get_thread(owned.runtime_thread_id, req, USER)
     assert thread["thread"]["restricted_source_run_ids"] == ["run-a"]
 
 
@@ -298,10 +350,9 @@ async def test_malformed_persisted_context_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_context_event_rechecks_document_before_text_delta(monkeypatch):
+async def test_new_context_event_rechecks_document_before_text_delta():
     req = request(visible=["private-a"], contexts=[], visible_docs=[])
     guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
-    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: 0.0)
     event = {"sequence": 1, "event_type": "context_retrieved", "data": {
         "run_id": "run-a", "chunks": document_context()["chunks"],
     }}
@@ -315,14 +366,30 @@ async def test_new_context_event_rechecks_document_before_text_delta(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_open_stream_revocation_blocks_next_delta_inside_one_second(monkeypatch):
+async def test_skipped_context_event_rechecks_persisted_source_before_delta():
+    contexts = []
+    req = request(visible=["private-a"], visible_docs=[], contexts=contexts)
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
+    started = await guard.project({
+        "sequence": 1, "event_type": "run_started", "data": {"run_id": "run-a"},
+    })
+    assert started["event_type"] == "run_started"
+    contexts.append(document_context())  # Sequence 2 was excluded by the client's cursor.
+    delta = await guard.project({
+        "sequence": 3, "event_type": "text_delta",
+        "data": {"run_id": "run-a", "content": "Private source text"},
+    })
+    assert delta["data"]["source_access_revoked"] is True
+    assert "Private source text" not in json.dumps(delta)
+
+
+@pytest.mark.asyncio
+async def test_open_stream_document_revocation_blocks_next_delta():
     req = request(
         visible=["private-a"], visible_docs=["doc-a"],
         contexts=[document_context()],
     )
     guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
-    ticks = iter([0.0, 0.1])
-    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: next(ticks))
     raw = {"sequence": 1, "event_type": "text_delta", "data": {
         "run_id": "run-a", "content": "Private source text",
     }}
@@ -331,6 +398,39 @@ async def test_open_stream_revocation_blocks_next_delta_inside_one_second(monkey
     revoked = await guard.project({**raw, "sequence": 2})
     assert revoked["data"]["source_access_revoked"] is True
     assert "Private source text" not in json.dumps(revoked)
+
+
+@pytest.mark.asyncio
+async def test_open_stream_rechecks_dataset_revocation_on_next_delta():
+    req = request(visible=["private-a"], contexts=[])
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
+    raw = {"sequence": 1, "event_type": "text_delta", "data": {
+        "run_id": "run-a", "content": "Knowledge-derived answer",
+    }}
+    assert (await guard.project(raw))["data"]["content"] == "Knowledge-derived answer"
+    req.app.state.kb_proxy.list_datasets = AsyncMock(return_value=[])
+    revoked = await guard.project({**raw, "sequence": 2})
+    assert revoked["data"]["source_access_revoked"] is True
+    assert "Knowledge-derived answer" not in json.dumps(revoked)
+
+
+@pytest.mark.asyncio
+async def test_quiz_share_source_ids_fail_closed_when_context_document_has_no_dataset():
+    req = request(
+        snapshots=[snapshot("run-a", [])],
+        contexts=[{"run_id": "run-a", "chunks": [{"document_id": "doc-a", "content": "Private text"}]}],
+    )
+    original_fetchrow = req.app.state.database.fetchrow
+
+    async def fetchrow(query, *args):
+        if "FROM assistant.quizzes q" in query:
+            return {"dataset_ids": [], "created_by": "user-a", "session_id": "session-a", "run_id": "run-a"}
+        return await original_fetchrow(query, *args)
+
+    req.app.state.database.fetchrow = fetchrow
+    with pytest.raises(HTTPException) as denied:
+        await quiz_source_ids(req, UUID(int=1), USER.tenant_id, require_origin=True)
+    assert denied.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -417,11 +517,9 @@ async def test_revoked_derived_artifact_denies_before_content_or_storage_url(han
 
 
 @pytest.mark.asyncio
-async def test_open_event_stream_rechecks_current_rights_before_later_delivery(monkeypatch):
+async def test_open_event_stream_rechecks_current_rights_before_later_delivery():
     req = request(visible=["private-a"])
     guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
-    ticks = iter([0.0, 2.0, 4.0])
-    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: next(ticks))
     raw = {"sequence": 1, "event_type": "text_delta", "data": {"run_id": "run-a", "content": "Private source"}}
     assert (await guard.project(raw))["data"]["content"] == "Private source"
     req.app.state.kb_proxy.list_datasets = AsyncMock(return_value=[])

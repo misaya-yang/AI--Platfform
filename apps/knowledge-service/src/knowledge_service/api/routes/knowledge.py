@@ -4819,12 +4819,16 @@ async def restore_document_version(
                     digest = hashlib.sha256(restored_text.encode("utf-8")).hexdigest()
                     if (
                         not isinstance(target_source, dict)
-                        or source_kind not in {"hierarchy", "vision"}
+                        or source_kind not in {"text", "hierarchy", "vision"}
                         or str(version_to_restore.get("content_hash") or "") != digest
                         or target_source.get("content_hash") != digest
                         or not re.fullmatch(r"[0-9a-f]{64}", str(target_source.get("source_hash") or ""))
                         or not isinstance(target_source.get("index_config"), dict)
-                        or (source_kind == "hierarchy" and target_source["source_hash"] != digest)
+                        or (source_kind in {"text", "hierarchy"} and target_source["source_hash"] != digest)
+                        or (source_kind == "text" and (
+                            target_source.get("objects") != {}
+                            or target_source.get("page_texts") != []
+                        ))
                         or (source_kind == "vision" and (
                             not str(target_source.get("original_source_key") or "").startswith(
                                 f"knowledge/documents/{authoritative_dataset['tenant_id']}/{document_id}/original/"
