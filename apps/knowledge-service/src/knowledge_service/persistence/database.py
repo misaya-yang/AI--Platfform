@@ -2537,9 +2537,13 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                         COALESCE(d.metadata, '{{}}'::jsonb)
                         ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
                   )
+                  -- A special preparing owner can still have a positive
+                  -- revision before its first point plan. Its dedicated
+                  -- recovery must finish object cleanup and requeue under
+                  -- the same execution; generic TTL recovery would steal
+                  -- the document marker and strand that owner.
                   AND NOT (
-                        ds.content_revision < 0
-                        AND COALESCE(d.metadata, '{{}}'::jsonb)
+                        COALESCE(d.metadata, '{{}}'::jsonb)
                             ? '_special_publication_generation_id'
                   )
                   AND dataset_gate.dataset_locked

@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Any
 
-from ai_gateway_core.eval.evaluator_executor import REQUIRED_ASSISTANT_HARD_BLOCKERS
+from ai_gateway_core.eval.evaluator_executor import (
+    REQUIRED_ASSISTANT_HARD_BLOCKERS,
+    is_runnable_dataset_example,
+)
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
@@ -409,6 +412,8 @@ import_eval_examples = _eval_dataset_routes.import_eval_examples
 export_eval_examples = _eval_dataset_routes.export_eval_examples
 create_eval_dataset = _eval_dataset_routes.create_eval_dataset
 create_eval_example_from_trace = _eval_dataset_routes.create_eval_example_from_trace
+get_latest_kb_failure_example = _eval_dataset_routes.get_latest_kb_failure_example
+save_kb_failure_example = _eval_dataset_routes.save_kb_failure_example
 preview_eval_trace_feedback = _eval_dataset_routes.preview_eval_trace_feedback
 @router.get("/evaluators", response_model=EvalEvaluatorListResponse)
 async def list_eval_evaluators(
@@ -639,12 +644,16 @@ async def run_eval_experiment(
     if body.run_mode == "live_candidate":
         if not dataset_id:
             raise HTTPException(status_code=422, detail="live_candidate requires a dataset")
-        examples = await repo.list_example_manifest(
+        manifest = await repo.list_example_manifest(
             tenant_id=auth.tenant_id,
             dataset_id=str(dataset_id),
         )
+        examples = [
+            example for example in manifest
+            if is_runnable_dataset_example(example)
+        ]
         if not examples:
-            raise HTTPException(status_code=422, detail="Dataset has no examples")
+            raise HTTPException(status_code=422, detail="Dataset has no approved examples")
         invalid_cases: list[dict[str, Any]] = []
         for example in examples:
             input_payload = example.get("input") if isinstance(example.get("input"), dict) else {}

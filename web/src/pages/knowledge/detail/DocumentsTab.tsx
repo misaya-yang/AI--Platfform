@@ -11,7 +11,7 @@
  * it with `hidden`) so all state survives tab switches exactly as before.
  */
 
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
@@ -50,6 +50,7 @@ import {
 } from "@/hooks/useKnowledge";
 import {
   getDocument,
+  getDatasetAgentImpact,
   deleteDocument,
   deleteSegment,
   reembedDocument,
@@ -71,8 +72,16 @@ import {
   getDocumentMetadataRegistry,
   updateDocumentMetadata,
   type DocumentPipelineAction,
+  type DatasetAgentImpact,
 } from "@/api/knowledge";
-import { partitionIds, summarizeDocumentBatches } from "./batchOperations";
+import {
+  documentBatchItemOutcomes,
+  hasBlockingUnknown,
+  partitionIds,
+  settleDocumentBatchAttempt,
+  summarizeDocumentBatches,
+  type DocumentBatchAttempt,
+} from "./batchOperations";
 import { lastStartedDocumentStage } from "./documentStages";
 import {
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
@@ -127,6 +136,8 @@ import { toast } from "@/hooks/use-toast";
 import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentList } from "@/pages/knowledge/detail/SegmentList";
 import { DocumentMetadataDialog } from "@/pages/knowledge/detail/DocumentMetadataDialog";
+import { useAuthStore } from "@/store/useAuthStore";
+import { canConfirmDatasetImpactDelete, isDatasetAgentImpact } from "./datasetAgentImpact";
 
 const FILE_TYPE_CATEGORIES: Record<string, string[]> = {
   document: ["pdf", "doc", "docx", "txt", "md", "html", "rtf"],
@@ -141,6 +152,155 @@ const SEGMENT_KEYWORDS_LIMIT = 100;
 const SEGMENT_KEYWORD_MAX_LENGTH = 256;
 const SEGMENT_BATCH_LIMIT = 500;
 const DOCUMENT_METADATA_BATCH_LIMIT = 500;
+
+interface BatchReceipt {
+  action: "reembed" | "delete";
+  requestedCount: number;
+  requestedIds: string[];
+  allDocuments?: boolean;
+  attempts: DocumentBatchAttempt[];
+}
+
+function batchReceiptStorageKey(userId: string | undefined, datasetId: string | undefined): string | null {
+  return userId && datasetId ? `kb-batch-receipt:${userId}:${datasetId}` : null;
+}
+
+function readBatchReceipt(key: string | null): BatchReceipt | null {
+  if (!key) return null;
+  try {
+    const raw = sessionStorage.getItem(key);
+    const value: unknown = raw ? JSON.parse(raw) : null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const receipt = value as Partial<BatchReceipt>;
+    if ((receipt.action !== "reembed" && receipt.action !== "delete")
+      || !Number.isSafeInteger(receipt.requestedCount) || !Array.isArray(receipt.attempts)
+      || !Array.isArray(receipt.requestedIds)
+      || !receipt.requestedIds.every((id) => typeof id === "string")
+      || !receipt.attempts.every((attempt) => Array.isArray(attempt.requestedIds)
+        && attempt.requestedIds.every((id) => typeof id === "string")
+        && typeof attempt.outcomeUnknown === "boolean"
+        && (!attempt.operation || typeof attempt.operation.operation_id === "string"))) return null;
+    return receipt as BatchReceipt;
+  } catch { return null; }
+}
+
+function writeBatchReceipt(key: string | null, receipt: BatchReceipt | null) {
+  if (!key) return;
+  try {
+    if (!receipt) { sessionStorage.removeItem(key); return; }
+    // Keep IDs and safe outcome fields needed for refresh/reconciliation;
+    // worker error text is not needed in the browser draft.
+    const safe: BatchReceipt = {
+      ...receipt,
+      attempts: receipt.attempts.map((attempt) => ({
+        requestedIds: attempt.requestedIds,
+        outcomeUnknown: attempt.outcomeUnknown,
+        acknowledged: attempt.acknowledged,
+        operation: attempt.operation ? {
+          operation_id: attempt.operation.operation_id,
+          tenant_id: attempt.operation.tenant_id,
+          dataset_id: attempt.operation.dataset_id,
+          operation: attempt.operation.operation,
+          status: attempt.operation.status,
+          total_count: attempt.operation.total_count,
+          queued_count: attempt.operation.queued_count,
+          skipped_count: attempt.operation.skipped_count,
+          failed_count: attempt.operation.failed_count,
+          problem_items: attempt.operation.problem_items.map((item) => ({
+            document_id: item.document_id, status: item.status, error_code: item.error_code,
+          })),
+          problem_items_truncated: attempt.operation.problem_items_truncated,
+        } : undefined,
+      })),
+    };
+    sessionStorage.setItem(key, JSON.stringify(safe));
+  } catch { /* In-memory receipt remains available in this page. */ }
+}
+
+function BatchReceiptPanel({ receipt, documents, busy, onRecheck, onAcknowledge }: {
+  receipt: BatchReceipt;
+  documents: Document[];
+  busy: boolean;
+  onRecheck: () => void;
+  onAcknowledge: () => void;
+}) {
+  const { t } = useTranslation();
+  const summary = summarizeDocumentBatches(
+    receipt.attempts.flatMap((attempt) => attempt.operation && !attempt.outcomeUnknown ? [attempt.operation] : [])
+  );
+  const attemptedIds = new Set(receipt.attempts.flatMap((attempt) => attempt.requestedIds));
+  const notSubmittedIds = receipt.requestedIds.filter((id) => !attemptedIds.has(id));
+  const attemptedCount = receipt.allDocuments ? receipt.requestedCount : attemptedIds.size;
+  const unknownCount = attemptedCount - summary.total;
+  const titleById = new Map(documents.map((document) => [document.document_id, document.title]));
+  const outcomes = receipt.attempts.flatMap((attempt) => Array.from(documentBatchItemOutcomes(attempt)));
+  return (
+    <div data-testid="document-batch-receipt" role="status" className="rounded-lg border border-border bg-card p-3 text-sm space-y-2">
+      <p className="font-medium">
+        {t(receipt.action === "delete" ? "knowledge.detail.batchDeleteDone" : "knowledge.detail.batchReindexDone")}
+      </p>
+      <p className="text-muted-foreground">
+        {t("knowledge.detail.batchReceiptCounts", {
+          total: receipt.requestedCount,
+          successLabel: t(receipt.action === "reembed"
+            ? "knowledge.detail.batchReceiptQueued" : "knowledge.detail.batchReceiptDeleted"),
+          succeeded: summary.succeeded,
+          skipped: summary.skipped,
+          failed: summary.failed,
+          unknown: Math.max(0, unknownCount),
+          notSubmitted: notSubmittedIds.length,
+        })}
+      </p>
+      {receipt.attempts.some((attempt) => attempt.outcomeUnknown || attempt.operation?.problem_items_truncated) && (
+        <p className="text-amber-700 dark:text-amber-400">
+          {t("knowledge.detail.batchReceiptUnknownHint")}
+        </p>
+      )}
+      {hasBlockingUnknown(receipt.attempts) && (
+        <p className="text-amber-700 dark:text-amber-400">
+          {t("knowledge.detail.batchReceiptBlocksNew")}
+        </p>
+      )}
+      {receipt.attempts.some((attempt) => attempt.outcomeUnknown && attempt.operation?.operation_id) && (
+        <Button size="sm" variant="outline" disabled={busy} onClick={onRecheck}>
+          {t("knowledge.detail.batchReceiptRecheck")}
+        </Button>
+      )}
+      {receipt.attempts.some((attempt) => attempt.outcomeUnknown && !attempt.operation?.operation_id && !attempt.acknowledged) && (
+        <Button size="sm" variant="outline" disabled={busy} onClick={onAcknowledge}>
+          {t("knowledge.detail.batchReceiptAcknowledge")}
+        </Button>
+      )}
+      <div className="max-h-40 overflow-auto border-t border-border/60 pt-2 space-y-1">
+        {receipt.attempts.map((attempt, index) => (
+          <div key={attempt.operation?.operation_id ?? `unknown-${index}`}>
+            <p className="text-xs text-muted-foreground">
+              {t("knowledge.detail.batchReceiptOperation", { index: index + 1 })}: {attempt.operation?.operation_id ?? t("knowledge.detail.batchReceiptNoId")}
+            </p>
+          </div>
+        ))}
+        {outcomes.map(([id, outcome]) => (
+          <p key={id} className="text-xs">
+            {titleById.get(id) ?? id} <span className="text-muted-foreground">({id})</span>: {t(outcome === "succeeded"
+              ? receipt.action === "reembed" ? "knowledge.detail.batchReceiptQueued" : "knowledge.detail.batchReceiptDeleted"
+              : `knowledge.detail.batchReceiptStatus.${outcome}`)}
+          </p>
+        ))}
+        {receipt.attempts.flatMap((attempt) => attempt.requestedIds.length === 0
+          ? attempt.operation?.problem_items ?? [] : []).map((item) => (
+          <p key={item.document_id} className="text-xs">
+            {titleById.get(item.document_id) ?? item.document_id}: {t(`knowledge.detail.batchReceiptStatus.${item.status}`)}
+          </p>
+        ))}
+        {notSubmittedIds.map((id) => (
+          <p key={`not-submitted-${id}`} className="text-xs">
+            {titleById.get(id) ?? id} <span className="text-muted-foreground">({id})</span>: {t("knowledge.detail.batchReceiptNotSubmitted")}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
 const EMPTY_METADATA_REGISTRY: DocumentMetadataRegistry = {
   version: 1,
   revision: 0,
@@ -191,6 +351,8 @@ export function DocumentsTab({
   onOpenUrlDialog,
 }: DocumentsTabProps) {
   const { t } = useTranslation();
+  const userId = useAuthStore((state) => state.user?.user_id);
+  const receiptKey = batchReceiptStorageKey(userId, datasetId);
   const [searchParams] = useSearchParams();
   const sourceDocumentId = searchParams.get("document_id");
   const [linkedDocument, setLinkedDocument] = useState<Document | null>(null);
@@ -289,10 +451,25 @@ export function DocumentsTab({
   const [batchReindexOpen, setBatchReindexOpen] = useState(false);
   const [batchReindexAll, setBatchReindexAll] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [deleteImpact, setDeleteImpact] = useState<DatasetAgentImpact | null>(null);
+  const [deleteImpactLoading, setDeleteImpactLoading] = useState(false);
+  const [deleteImpactFailed, setDeleteImpactFailed] = useState(false);
+  const deleteImpactRequest = useRef(0);
   const [batchLoading, setBatchLoading] = useState(false);
-  // Ids the batch-reindex endpoint reported as skipped (409 all-skipped
-  // contract): rendered inside the dialog so users can deselect and retry.
-  const [batchReindexSkipped, setBatchReindexSkipped] = useState<string[] | null>(null);
+  const batchInFlight = useRef(false);
+  const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
+  const [batchReceipt, setBatchReceipt] = useState<BatchReceipt | null>(null);
+  const [loadedReceiptKey, setLoadedReceiptKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!receiptKey) return;
+    setBatchReceipt(readBatchReceipt(receiptKey));
+    setLoadedReceiptKey(receiptKey);
+  }, [receiptKey]);
+
+  useEffect(() => {
+    if (receiptKey && loadedReceiptKey === receiptKey) writeBatchReceipt(receiptKey, batchReceipt);
+  }, [receiptKey, loadedReceiptKey, batchReceipt]);
 
   // Document lifecycle (enable/disable, archive): rows with an in-flight
   // mutation render their controls disabled until it settles.
@@ -673,43 +850,58 @@ export function DocumentsTab({
   }
 
   async function handleBatchReindex() {
-    if (!datasetId || (!batchReindexAll && selectedDocIds.size === 0)) return;
+    if (!datasetId || batchInFlight.current || (!batchReindexAll && selectedDocIds.size === 0)) return;
+    if (batchReceipt && hasBlockingUnknown(batchReceipt.attempts)) {
+      setBatchReindexOpen(false);
+      toast.warning(t("knowledge.detail.batchReceiptBlocked"));
+      return;
+    }
+    batchInFlight.current = true;
     setBatchLoading(true);
+    const requestedIds = batchReindexAll ? [] : Array.from(selectedDocIds);
+    const chunks = batchReindexAll ? [[]] : partitionIds(requestedIds, DOCUMENT_BATCH_REINDEX_LIMIT);
+    const attempts: DocumentBatchAttempt[] = [];
+    const requestedCount = batchReindexAll ? totalDocuments : selectedDocIds.size;
+    setBatchProgress({ done: 0, total: chunks.length });
     try {
-      const submitted = batchReindexAll
-        ? [await batchReindexDocuments(datasetId, [], true)]
-        : await Promise.all(
-            partitionIds(selectedDocIds, DOCUMENT_BATCH_REINDEX_LIMIT).map((ids) =>
-              batchReindexDocuments(datasetId, ids)
-            )
-          );
-      const completed = await Promise.all(
-        submitted.map((operation) =>
-          waitForDocumentBatchOperation(datasetId, operation.operation_id)
-        )
-      );
+      for (const ids of chunks) {
+        const attempt = await settleDocumentBatchAttempt(
+          ids,
+          undefined,
+          () => batchReindexDocuments(datasetId, ids, batchReindexAll),
+          (operationId) => waitForDocumentBatchOperation(datasetId, operationId),
+          (operation) => {
+            const pendingReceipt: BatchReceipt = {
+              action: "reembed", requestedCount: batchReindexAll ? operation.total_count : requestedCount,
+              requestedIds, allDocuments: batchReindexAll,
+              attempts: [...attempts, { requestedIds: ids, operation, outcomeUnknown: true }],
+            };
+            setBatchReceipt(pendingReceipt);
+            writeBatchReceipt(receiptKey, pendingReceipt);
+          }
+        );
+        attempts.push(attempt);
+        const progressReceipt: BatchReceipt = {
+          action: "reembed", requestedCount: batchReindexAll ? attempt.operation?.total_count ?? requestedCount : requestedCount,
+          requestedIds, allDocuments: batchReindexAll, attempts: [...attempts],
+        };
+        setBatchReceipt(progressReceipt);
+        writeBatchReceipt(receiptKey, progressReceipt);
+        setBatchProgress({ done: attempts.length, total: chunks.length });
+        if (attempt.outcomeUnknown) break;
+      }
+      const receipt: BatchReceipt = {
+        action: "reembed", requestedCount: batchReindexAll ? attempts[0]?.operation?.total_count ?? requestedCount : requestedCount,
+        requestedIds, allDocuments: batchReindexAll, attempts,
+      };
+      setBatchReceipt(receipt);
+      const completed = attempts.flatMap((attempt) => attempt.operation && !attempt.outcomeUnknown ? [attempt.operation] : []);
       const summary = summarizeDocumentBatches(completed);
-      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-      const skippedIds = completed.flatMap((operation) =>
-        operation.problem_items
-          .filter((item) => item.status === "skipped")
-          .map((item) => item.document_id)
-      );
-      if (summary.skipped > 0 || summary.failed > 0) {
-        setBatchReindexSkipped(skippedIds);
-        if (summary.succeeded === 0) {
-          toast.warning(
-            t("knowledge.detail.batchReindexAllSkippedTitle"),
-            t("knowledge.detail.batchReindexAllSkippedText")
-          );
-          return;
-        }
+      void qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      if (summary.skipped > 0 || summary.failed > 0 || attempts.some((attempt) => attempt.outcomeUnknown)) {
         toast.warning(
           t("knowledge.detail.batchReindexDone"),
-          t("knowledge.detail.batchReindexPartial", {
-            queued: summary.succeeded,
-            skipped: summary.skipped + summary.failed,
-          })
+          t("knowledge.detail.batchReceiptReview")
         );
       } else {
         toast.success(
@@ -718,44 +910,76 @@ export function DocumentsTab({
         );
       }
       setBatchReindexOpen(false);
-      setBatchReindexSkipped(null);
       setBatchReindexAll(false);
-      setSelectedDocIds(new Set());
-    } catch (e) {
-      console.error("Batch reindex failed:", e);
-      toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
+      if (!batchReindexAll) {
+        const outcomes = new Map(attempts.flatMap((attempt) => Array.from(documentBatchItemOutcomes(attempt))));
+        setSelectedDocIds(new Set(requestedIds.filter((id) => outcomes.get(id) !== "succeeded")));
+      }
     } finally {
+      batchInFlight.current = false;
       setBatchLoading(false);
     }
   }
 
   async function handleBatchDelete() {
-    if (!datasetId || selectedDocIds.size === 0) return;
-    setBatchLoading(true);
-    try {
-      const submitted = await Promise.all(
-        partitionIds(selectedDocIds, DOCUMENT_BATCH_DELETE_LIMIT).map((ids) =>
-          batchDeleteDocuments(datasetId, ids)
-        )
-      );
-      const completed = await Promise.all(
-        submitted.map((operation) =>
-          waitForDocumentBatchOperation(datasetId, operation.operation_id)
-        )
-      );
-      const result = summarizeDocumentBatches(completed);
-      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+    if (!datasetId || batchInFlight.current || selectedDocIds.size === 0) return;
+    if (deleteImpactLoading || deleteImpactFailed
+      || !canConfirmDatasetImpactDelete(permission, datasetId, deleteImpact)) {
+      toast.warning(t("knowledge.detail.batchDeleteImpactRequired"));
+      return;
+    }
+    if (batchReceipt && hasBlockingUnknown(batchReceipt.attempts)) {
       setBatchDeleteOpen(false);
-      setSelectedDocIds(new Set());
+      toast.warning(t("knowledge.detail.batchReceiptBlocked"));
+      return;
+    }
+    batchInFlight.current = true;
+    setBatchLoading(true);
+    const requestedIds = Array.from(selectedDocIds);
+    const chunks = partitionIds(requestedIds, DOCUMENT_BATCH_DELETE_LIMIT);
+    const attempts: DocumentBatchAttempt[] = [];
+    const requestedCount = selectedDocIds.size;
+    setBatchProgress({ done: 0, total: chunks.length });
+    try {
+      for (const ids of chunks) {
+        const attempt = await settleDocumentBatchAttempt(
+          ids,
+          undefined,
+          () => batchDeleteDocuments(datasetId, ids),
+          (operationId) => waitForDocumentBatchOperation(datasetId, operationId),
+          (operation) => {
+            const pendingReceipt: BatchReceipt = {
+              action: "delete", requestedCount, requestedIds,
+              attempts: [...attempts, { requestedIds: ids, operation, outcomeUnknown: true }],
+            };
+            setBatchReceipt(pendingReceipt);
+            writeBatchReceipt(receiptKey, pendingReceipt);
+          }
+        );
+        attempts.push(attempt);
+        const progressReceipt: BatchReceipt = { action: "delete", requestedCount, requestedIds, attempts: [...attempts] };
+        setBatchReceipt(progressReceipt);
+        writeBatchReceipt(receiptKey, progressReceipt);
+        setBatchProgress({ done: attempts.length, total: chunks.length });
+        if (attempt.outcomeUnknown) break;
+      }
+      const receipt: BatchReceipt = { action: "delete", requestedCount, requestedIds, attempts };
+      setBatchReceipt(receipt);
+      const completed = attempts.flatMap((attempt) => attempt.operation && !attempt.outcomeUnknown ? [attempt.operation] : []);
+      const result = summarizeDocumentBatches(completed);
+      void qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      setBatchDeleteOpen(false);
+      const outcomes = new Map(attempts.flatMap((attempt) => Array.from(documentBatchItemOutcomes(attempt))));
+      setSelectedDocIds(new Set(requestedIds.filter((id) => outcomes.get(id) !== "succeeded")));
       // Clear selected doc if it was deleted
-      if (selectedDocId && selectedDocIds.has(selectedDocId)) {
+      if (selectedDocId && attempts.some((attempt) => documentBatchItemOutcomes(attempt).get(selectedDocId) === "succeeded")) {
         setSelectedDocId(undefined);
       }
       // Show result
-      if (result.failed > 0 || result.skipped > 0) {
+      if (result.failed > 0 || result.skipped > 0 || attempts.some((attempt) => attempt.outcomeUnknown)) {
         toast.warning(
           t("knowledge.detail.batchDeleteDone"),
-          `${result.succeeded} / ${result.failed + result.skipped}`
+          t("knowledge.detail.batchReceiptReview")
         );
       } else {
         toast.success(
@@ -763,12 +987,73 @@ export function DocumentsTab({
           t("knowledge.detail.batchDeleteSuccess", { count: result.succeeded })
         );
       }
-    } catch (e) {
-      console.error("Batch delete failed:", e);
-      toast.error(t("knowledge.detail.batchDeleteFailed"), e instanceof Error ? e.message : String(e));
     } finally {
+      batchInFlight.current = false;
       setBatchLoading(false);
     }
+  }
+
+  async function loadDeleteImpact() {
+    if (!datasetId || permission !== "owner") return;
+    const request = ++deleteImpactRequest.current;
+    setDeleteImpact(null);
+    setDeleteImpactFailed(false);
+    setDeleteImpactLoading(true);
+    try {
+      const impact = await getDatasetAgentImpact(datasetId);
+      if (!isDatasetAgentImpact(impact, datasetId)) throw new Error("Invalid Agent impact receipt");
+      if (deleteImpactRequest.current === request) setDeleteImpact(impact);
+    } catch {
+      if (deleteImpactRequest.current === request) setDeleteImpactFailed(true);
+    } finally {
+      if (deleteImpactRequest.current === request) setDeleteImpactLoading(false);
+    }
+  }
+
+  function openBatchDelete() {
+    if (permission !== "owner") return;
+    setBatchDeleteOpen(true);
+    void loadDeleteImpact();
+  }
+
+  async function recheckBatchReceipt() {
+    if (!datasetId || !batchReceipt || batchInFlight.current) return;
+    batchInFlight.current = true;
+    setBatchLoading(true);
+    setBatchProgress({ done: 0, total: batchReceipt.attempts.length });
+    try {
+      const attempts: DocumentBatchAttempt[] = [];
+      for (const previous of batchReceipt.attempts) {
+        const attempt = await settleDocumentBatchAttempt(
+          previous.requestedIds,
+          previous,
+          async () => { throw new Error("An accepted batch must not be resubmitted"); },
+          (operationId) => waitForDocumentBatchOperation(datasetId, operationId)
+        );
+        attempts.push(attempt);
+        const progressReceipt = { ...batchReceipt, attempts: [...attempts, ...batchReceipt.attempts.slice(attempts.length)] };
+        setBatchReceipt(progressReceipt);
+        writeBatchReceipt(receiptKey, progressReceipt);
+        setBatchProgress({ done: attempts.length, total: batchReceipt.attempts.length });
+      }
+      const outcomes = new Map(attempts.flatMap((attempt) => Array.from(documentBatchItemOutcomes(attempt))));
+      setSelectedDocIds((previous) => new Set(Array.from(previous).filter((id) => outcomes.get(id) !== "succeeded")));
+      void qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      if (hasBlockingUnknown(attempts)) toast.warning(t("knowledge.detail.batchReceiptStillUnknown"));
+      else toast.success(t("knowledge.detail.batchReceiptReconciled"));
+    } finally {
+      batchInFlight.current = false;
+      setBatchLoading(false);
+    }
+  }
+
+  function acknowledgeBatchWithoutId() {
+    if (!batchReceipt || !window.confirm(t("knowledge.detail.batchReceiptAcknowledgeConfirm"))) return;
+    setBatchReceipt((previous) => previous ? {
+      ...previous,
+      attempts: previous.attempts.map((attempt) => attempt.outcomeUnknown && !attempt.operation?.operation_id
+        ? { ...attempt, acknowledged: true } : attempt),
+    } : null);
   }
 
   // Selecting another document (or leaving the panel) drops segment-level
@@ -1089,22 +1374,22 @@ export function DocumentsTab({
                     {filteredDocs.length > 0 && filteredDocs.every((doc) => selectedDocIds.has(doc.document_id)) ? (
                       <>
                         <Square className="h-4 w-4 mr-2" />
-                        {t("knowledge.detail.deselectAll")}
+                        {t("knowledge.detail.deselectCurrentPage")}
                       </>
                     ) : (
                       <>
                         <CheckSquare className="h-4 w-4 mr-2" />
-                        {t("knowledge.detail.selectAll")}
+                        {t("knowledge.detail.selectCurrentPage")}
                       </>
                     )}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => selectByStatus("uploaded")}>
                     <Upload className="h-4 w-4 mr-2" />
-                    {t("knowledge.detail.selectUploaded")}
+                    {t("knowledge.detail.selectUploadedCurrentPage")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => selectByStatus("failed")}>
                     <X className="h-4 w-4 mr-2" />
-                    {t("knowledge.detail.selectFailed")}
+                    {t("knowledge.detail.selectFailedCurrentPage")}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
@@ -1119,7 +1404,6 @@ export function DocumentsTab({
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => {
-                      setBatchReindexSkipped(null);
                       setBatchReindexAll(false);
                       setBatchReindexOpen(true);
                     }}
@@ -1131,7 +1415,6 @@ export function DocumentsTab({
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => {
-                      setBatchReindexSkipped(null);
                       setBatchReindexAll(true);
                       setBatchReindexOpen(true);
                     }}
@@ -1142,8 +1425,8 @@ export function DocumentsTab({
                     {t("knowledge.detail.batchReindexAll", { count: totalDocuments })}
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    onClick={() => setBatchDeleteOpen(true)}
-                    disabled={selectedDocIds.size === 0}
+                    onClick={openBatchDelete}
+                    disabled={selectedDocIds.size === 0 || permission !== "owner"}
                     className="text-destructive"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
@@ -1192,6 +1475,30 @@ export function DocumentsTab({
           </DropdownMenu>
         </div>
       </div>
+
+      {batchLoading && (
+        <p role="status" data-testid="document-batch-progress" className="text-sm text-muted-foreground">
+          {t("knowledge.detail.batchReceiptProgress", batchProgress)}
+        </p>
+      )}
+      {batchMode && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t("knowledge.detail.batchSelectionScope", {
+            selected: selectedDocIds.size,
+            pageCount: docs.length,
+            total: totalDocuments,
+          })}
+        </p>
+      )}
+      {batchReceipt && (
+        <BatchReceiptPanel
+          receipt={batchReceipt}
+          documents={docs}
+          busy={batchLoading}
+          onRecheck={() => void recheckBatchReceipt()}
+          onAcknowledge={acknowledgeBatchWithoutId}
+        />
+      )}
 
       {/* 文档列表 - 表格形式 */}
       <Card className="p-0 overflow-hidden border-border">
@@ -1536,9 +1843,9 @@ export function DocumentsTab({
       <Dialog
         open={batchReindexOpen}
         onOpenChange={(open) => {
+          if (batchLoading) return;
           setBatchReindexOpen(open);
           if (!open) {
-            setBatchReindexSkipped(null);
             setBatchReindexAll(false);
           }
         }}
@@ -1561,27 +1868,6 @@ export function DocumentsTab({
               <p>• {t("knowledge.detail.batchReindexHint2")}</p>
               <p>• {t("knowledge.detail.batchReindexHint3")}</p>
             </div>
-            {/* 全部被跳过（409）时展示跳过清单，供用户取消选择后重试 */}
-            {batchReindexSkipped !== null && (
-              <div
-                data-testid="batch-reindex-skipped"
-                className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-2"
-              >
-                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
-                  {t("knowledge.detail.batchReindexSkippedLabel", { count: batchReindexSkipped.length })}
-                </p>
-                <div className="max-h-32 overflow-auto">
-                  {batchReindexSkipped.map((docId) => {
-                    const doc = docs.find((d) => d.document_id === docId);
-                    return (
-                      <div key={docId} className="px-1 py-0.5 text-xs text-amber-700/90 dark:text-amber-400/90 truncate">
-                        {doc?.title ?? docId}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
             {/* 选中的文档列表预览 */}
             {!batchReindexAll && <div className="max-h-32 overflow-auto border border-border rounded-lg">
               {Array.from(selectedDocIds).slice(0, 10).map((docId) => {
@@ -1620,7 +1906,11 @@ export function DocumentsTab({
       </Dialog>
 
       {/* 批量删除确认对话框 */}
-      <Dialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+      <Dialog open={batchDeleteOpen} onOpenChange={(open) => {
+        if (batchLoading) return;
+        if (!open) deleteImpactRequest.current += 1;
+        setBatchDeleteOpen(open);
+      }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
@@ -1635,6 +1925,47 @@ export function DocumentsTab({
             <div className="bg-destructive/10 rounded-lg p-3 text-xs text-destructive space-y-1">
               <p>{t("knowledge.detail.batchDeleteWarning")}</p>
               <p>• {t("knowledge.detail.batchDeleteHint")}</p>
+              <p>• {t("knowledge.detail.batchDeleteAgentsRemain")}</p>
+            </div>
+            <div data-testid="batch-delete-impact" className="rounded-lg border border-border p-3 text-xs space-y-2">
+              <p className="font-medium">{t("knowledge.detail.batchDeleteImpactTitle")}</p>
+              <p className="text-muted-foreground">{t("knowledge.detail.batchDeleteImpactScope")}</p>
+              {deleteImpactLoading && (
+                <p role="status" className="flex items-center gap-2 text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" />{t("knowledge.detail.batchDeleteImpactLoading")}
+                </p>
+              )}
+              {deleteImpactFailed && (
+                <div role="alert" className="space-y-2 text-destructive">
+                  <p>{t("knowledge.detail.batchDeleteImpactFailed")}</p>
+                  <Button size="sm" variant="outline" onClick={() => void loadDeleteImpact()}>
+                    {t("common.retry")}
+                  </Button>
+                </div>
+              )}
+              {deleteImpact && !deleteImpactLoading && !deleteImpactFailed && (
+                <div className="space-y-2">
+                  <p>{t("knowledge.detail.batchDeleteImpactSummary", {
+                    visible: deleteImpact.visible_agents.length,
+                    hidden: deleteImpact.hidden_agent_count,
+                  })}</p>
+                  <p>{t("knowledge.detail.batchDeleteImpactDraft", deleteImpact.counts.current_draft)}</p>
+                  <p>{t("knowledge.detail.batchDeleteImpactActive", deleteImpact.counts.active_publication)}</p>
+                  <p>{t("knowledge.detail.batchDeleteImpactHistorical", deleteImpact.counts.historical_version)}</p>
+                  {deleteImpact.visible_agents.map((agent) => (
+                    <p key={agent.agent_id} className="border-t border-border/60 pt-1">
+                      <span className="font-medium">{agent.name || agent.agent_id}</span>
+                      <span className="text-muted-foreground"> ({agent.agent_id})</span>
+                      {": "}{[
+                        agent.current_draft ? t("knowledge.detail.batchDeleteImpactDraftTag") : null,
+                        agent.active_publication ? t("knowledge.detail.batchDeleteImpactActiveTag") : null,
+                        agent.historical_version_count > 0
+                          ? t("knowledge.detail.batchDeleteImpactHistoricalTag", { count: agent.historical_version_count }) : null,
+                      ].filter(Boolean).join(" · ")}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
             {/* 选中的文档列表预览 */}
             <div className="max-h-32 overflow-auto border border-border rounded-lg">
@@ -1657,7 +1988,8 @@ export function DocumentsTab({
             <Button variant="outline" onClick={() => setBatchDeleteOpen(false)} disabled={batchLoading}>
               {t("knowledge.detail.cancel")}
             </Button>
-            <Button variant="destructive" onClick={handleBatchDelete} disabled={batchLoading}>
+            <Button variant="destructive" onClick={handleBatchDelete} disabled={batchLoading || deleteImpactLoading
+              || deleteImpactFailed || !canConfirmDatasetImpactDelete(permission, datasetId, deleteImpact)}>
               {batchLoading ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />

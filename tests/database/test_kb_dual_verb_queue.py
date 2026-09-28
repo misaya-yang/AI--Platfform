@@ -30,6 +30,8 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from dotenv import dotenv_values
+from fastapi import HTTPException
+from knowledge_service.api.routes.knowledge import _submit_route_execution
 from knowledge_service.persistence.database import (
     DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
@@ -88,6 +90,7 @@ async def verb_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     dataset_id VARCHAR(255) PRIMARY KEY,
                     tenant_id VARCHAR(255) NOT NULL,
                     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
                     collection_name VARCHAR(255),
                     embedding_provider VARCHAR(255),
                     embedding_model VARCHAR(255),
@@ -690,17 +693,20 @@ async def test_waiting_row_refuses_conflicting_verb_reclaim(
     assert row["metadata"][DOCUMENT_INGEST_ACTION_KEY] == "reprocess"
     assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-original"
 
-    # An identical verb re-pin stays idempotent (route retry / recovery race).
+    # An identical verb may be retried only by its original execution.
     assert (
         await database.claim_document_for_enqueue(
             "dataset-a", "doc-queued", action="reprocess", execution_id="exec-repin"
         )
-        is True
+        is False
     )
     row = await _get_document_row(pool, "doc-queued")
     assert row["status"] == "waiting"
     assert row["metadata"][DOCUMENT_INGEST_ACTION_KEY] == "reprocess"
-    assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-repin"
+    assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-original"
+    assert await database.claim_document_for_enqueue(
+        "dataset-a", "doc-queued", action="reprocess", execution_id="exec-original",
+    )
 
 
 @pytest.mark.asyncio
@@ -721,6 +727,123 @@ async def test_unmarked_waiting_row_accepts_any_verb(
     row = await _get_document_row(pool, "doc-bulk")
     assert row["status"] == "waiting"
     assert row["metadata"][DOCUMENT_INGEST_ACTION_KEY] == "reembed"
+
+
+@pytest.mark.asyncio
+async def test_replay_claim_pins_its_own_rule_and_cannot_replace_recovery_owner(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(
+        pool, document_id="doc-owned", status="completed", process_rule_id="old-rule",
+    )
+    async with pool.acquire() as conn:
+        for execution_id, rule_id in (("exec-original", "rule-original"), ("exec-other", "rule-other")):
+            await conn.execute(
+                "INSERT INTO document_pipeline_executions "
+                "(execution_id, document_id, dataset_id, action, process_rule_id, input_snapshot) "
+                "VALUES ($1, 'doc-owned', 'dataset-a', 'reprocess', $2, '{\"chunking\":{}}'::jsonb)",
+                execution_id, rule_id,
+            )
+    # Two requests can record and pin before either claims; the winning
+    # execution's rule must be installed atomically with its queue ownership.
+    assert await database.pin_document_process_rule("doc-owned", "rule-other", idle_only=True)
+    assert await database.claim_document_for_enqueue(
+        "dataset-a", "doc-owned", action="reprocess",
+        execution_id="exec-original", pin_execution_rule=True,
+    )
+    row = await _get_document_row(pool, "doc-owned")
+    assert row["process_rule_id"] == "rule-original"
+    assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-original"
+    assert not await database.pin_document_process_rule(
+        "doc-owned", "rule-other", idle_only=True,
+    )
+
+    # Preparing recovery temporarily uses waiting with no verb marker, but
+    # retains the original running ledger link. A fresh request cannot steal it.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE documents SET metadata = metadata - $2::text WHERE document_id = $1",
+            "doc-owned", DOCUMENT_INGEST_ACTION_KEY,
+        )
+    assert not await database.claim_document_for_enqueue(
+        "dataset-a", "doc-owned", action="reprocess",
+        execution_id="exec-other", pin_execution_rule=True,
+    )
+    row = await _get_document_row(pool, "doc-owned")
+    assert row["process_rule_id"] == "rule-original"
+    assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-original"
+
+
+@pytest.mark.asyncio
+async def test_route_submission_commits_execution_and_claim_or_neither(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-atomic", status="completed")
+    service = SimpleNamespace(db=database)
+    worker = SimpleNamespace(enqueue_claimed=AsyncMock())
+
+    execution_id = await _submit_route_execution(
+        service, worker, "dataset-a", "doc-atomic", action="reprocess",
+    )
+    row = await _get_document_row(pool, "doc-atomic")
+    assert row["status"] == "waiting"
+    assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == execution_id
+    assert row["process_rule_id"]
+    worker.enqueue_claimed.assert_awaited_once_with("dataset-a", "doc-atomic")
+
+    with pytest.raises(HTTPException) as duplicate:
+        await _submit_route_execution(
+            service, worker, "dataset-a", "doc-atomic", action="reprocess",
+        )
+    assert duplicate.value.status_code == 409
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT count(*) FROM document_pipeline_executions WHERE document_id = $1",
+            "doc-atomic",
+        ) == 1
+        await conn.execute(
+            "UPDATE documents SET status = 'completed', metadata = '{}'::jsonb "
+            "WHERE document_id = $1", "doc-atomic",
+        )
+        await conn.execute("UPDATE datasets SET is_archived = TRUE WHERE dataset_id = 'dataset-a'")
+    with pytest.raises(HTTPException) as archived:
+        await _submit_route_execution(
+            service, worker, "dataset-a", "doc-atomic", action="reprocess",
+        )
+    assert archived.value.status_code == 409
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT count(*) FROM document_pipeline_executions WHERE document_id = $1",
+            "doc-atomic",
+        ) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_record_and_link_rollback_together_on_link_failure(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(
+        pool, document_id="doc-worker-atomic", status="parsing",
+        metadata={"processing_mode": "text_only"},
+    )
+    worker = KnowledgeWorker(SimpleNamespace(
+        db=database, settings=SimpleNamespace(knowledge=None),
+    ))
+    database.link_pipeline_execution = AsyncMock(side_effect=RuntimeError("link failed"))
+
+    async with pool.acquire() as conn:
+        result = await worker._ensure_pipeline_execution(
+            KnowledgeIngestTask("dataset-a", "doc-worker-atomic"),
+            "ingest", "", connection=conn,
+        )
+        assert result == ""
+        assert await conn.fetchval(
+            "SELECT count(*) FROM document_pipeline_executions WHERE document_id = $1",
+            "doc-worker-atomic",
+        ) == 0
 
 
 @pytest.mark.asyncio
@@ -1158,6 +1281,31 @@ async def test_active_bm25_v2_stuck_recovery_requires_enabled_runtime(
 
 
 @pytest.mark.asyncio
+async def test_generic_recovery_cannot_steal_positive_revision_special_preparation(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    execution_id, _rule_id, _snapshot = await _seed_interrupted_generation(
+        pool, action="reprocess",
+    )
+    generation_id = "00000000-0000-4000-8000-000000000099"
+    async with pool.acquire() as connection:
+        await connection.execute(
+            "UPDATE documents SET metadata = metadata || $2::jsonb "
+            "WHERE document_id = $1",
+            "doc-interrupted",
+            json.dumps({"_special_publication_generation_id": generation_id}),
+        )
+
+    assert await database.claim_stuck_documents(stuck_threshold_minutes=1) == []
+    document = await _get_document_row(pool, "doc-interrupted")
+    assert document["status"] == "indexing"
+    assert document["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == execution_id
+    assert document["metadata"]["_special_publication_generation_id"] == generation_id
+    assert (await _get_execution_row(pool, execution_id))["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_stuck_reembed_renews_consistent_reembed_ledger(
     verb_world: tuple[DatabaseStorage, asyncpg.Pool],
 ) -> None:
@@ -1556,6 +1704,37 @@ async def test_execution_log_error_close_records_message(
 
     with pytest.raises(ValueError):
         await database.complete_pipeline_execution(execution_id, status="running")
+
+
+@pytest.mark.asyncio
+async def test_execution_completion_preserves_crash_recovery_lineage(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-a")
+    execution_id = await database.record_pipeline_execution(
+        "doc-a", "dataset-a", action="recover",
+    )
+    async with pool.acquire() as connection:
+        await connection.execute(
+            "UPDATE document_pipeline_executions "
+            "SET manifest = $2::jsonb WHERE execution_id = $1",
+            execution_id,
+            json.dumps({"recovered_from_execution_id": "original-execution"}),
+        )
+
+    assert await database.complete_pipeline_execution(
+        execution_id, status="completed", manifest={"segment_ids": ["segment-a"]},
+    )
+    execution = await database.get_pipeline_execution(execution_id)
+    assert execution is not None
+    manifest = execution["manifest"]
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+    assert manifest == {
+        "recovered_from_execution_id": "original-execution",
+        "segment_ids": ["segment-a"],
+    }
 
 
 async def _dataset_revision(pool: asyncpg.Pool, dataset_id: str = "dataset-a") -> int:

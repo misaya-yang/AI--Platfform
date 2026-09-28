@@ -11,6 +11,7 @@ Parent-child relationships are maintained for context retrieval.
 
 import asyncio
 import hashlib
+import math
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -22,6 +23,7 @@ from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import SOURCE_OWNED_DOCUMENT_METADATA_KEYS
 from .chunking import MAX_CHUNK_OUTPUTS
+from .common import maybe_await
 from .lexical_config import LexicalConfig
 
 logger = get_logger(__name__)
@@ -230,20 +232,14 @@ class HierarchicalIndexer:
             ks, "hierarchical_l3_chunk_overlap", self.DEFAULT_L3_CHUNK_OVERLAP
         )
 
-    async def _embedder_for(self, dataset_id: str) -> Any:
-        """Resolve the dataset-scoped embedder for this generation.
-
-        An explicitly constructed embedder wins; otherwise the resolver is
-        consulted once per dataset and cached (embedder identity is stable
-        for a given dataset config, and a config change re-processes through
-        reembed/reprocess which rebuilds the worker-bound indexer anyway).
-        """
+    async def _embedder_for(self, dataset_id: str, *, fresh: bool = False) -> Any:
+        """Resolve an embedder, bypassing the legacy cache for a new candidate."""
         if self.embedder is not None:
             return self.embedder
         normalized = str(dataset_id or "").strip()
         if not normalized:
             raise ValueError("hierarchical indexing requires a dataset_id to resolve its embedder")
-        cached = self._embedders_by_dataset.get(normalized)
+        cached = None if fresh else self._embedders_by_dataset.get(normalized)
         if cached is not None:
             return cached
         if not callable(self._embedding_resolver):
@@ -253,7 +249,8 @@ class HierarchicalIndexer:
         embedder = await self._embedding_resolver(normalized)
         if embedder is None:
             raise ValueError(f"hierarchical indexing: embedding resolution failed for {normalized}")
-        self._embedders_by_dataset[normalized] = embedder
+        if not fresh:
+            self._embedders_by_dataset[normalized] = embedder
         return embedder
 
     async def index_document(
@@ -345,6 +342,36 @@ class HierarchicalIndexer:
         chunking_config: Any | None = None,
         levels_override: list[int] | None = None,
     ) -> HierarchicalCandidatePlan:
+        """Bind one current dataset embedder to the entire unpublished plan."""
+
+        embedder = await self._embedder_for(dataset_id, fresh=True)
+        try:
+            return await self._prepare_document_bound(
+                document_id, dataset_id, text,
+                generation_id=generation_id,
+                metadata=metadata,
+                chunking_config=chunking_config,
+                levels_override=levels_override,
+                embedder=embedder,
+            )
+        finally:
+            if self.embedder is None:
+                close = getattr(embedder, "close", None)
+                if callable(close):
+                    await maybe_await(close())
+
+    async def _prepare_document_bound(
+        self,
+        document_id: str,
+        dataset_id: str,
+        text: str,
+        *,
+        generation_id: str,
+        metadata: dict[str, Any] | None,
+        chunking_config: Any | None,
+        levels_override: list[int] | None,
+        embedder: Any,
+    ) -> HierarchicalCandidatePlan:
         """Embed a complete hierarchy without publishing any serving state.
 
         The caller owns collection creation, durable manifest recording and the
@@ -388,7 +415,7 @@ class HierarchicalIndexer:
         tenant_id = str(dataset.get("tenant_id") or "").strip()
         if not tenant_id:
             raise ValueError("hierarchical candidate requires dataset tenant_id")
-        vector_dim = await self._get_vector_dimension(dataset_id)
+        vector_dim = embedder.dimension
         base_collection = str(dataset.get("collection_name") or "").strip()
         if not base_collection:
             make_name = getattr(self.vector_store, "make_collection_name", None)
@@ -431,9 +458,23 @@ class HierarchicalIndexer:
         async def embed_all(values: list[str], layer: str) -> list[list[float]]:
             if not values:
                 return []
-            vectors = await self._embed_texts(values, dataset_id=dataset_id)
-            if len(vectors) != len(values) or any(vector is None for vector in vectors):
-                raise RuntimeError(f"hierarchical candidate {layer} embedding is incomplete")
+            vectors = await self._embed_texts(
+                values, dataset_id=dataset_id, embedder=embedder,
+            )
+            if len(vectors) != len(values) or any(
+                not isinstance(vector, list)
+                or len(vector) != vector_dim
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in vector
+                )
+                for vector in vectors
+            ):
+                raise RuntimeError(
+                    f"hierarchical candidate {layer} embedding is incomplete or invalid"
+                )
             return vectors
 
         l3_vectors = await embed_all([segment.text for segment in active_l3], "L3")
@@ -1092,6 +1133,7 @@ class HierarchicalIndexer:
         max_retries: int = 3,
         *,
         dataset_id: str = "",
+        embedder: Any | None = None,
     ) -> list[list[float] | None]:
         """Generate embeddings for texts with retry.
 
@@ -1104,7 +1146,8 @@ class HierarchicalIndexer:
         Returns:
             List of embedding vectors (None for failed texts)
         """
-        embedder = await self._embedder_for(dataset_id)
+        if embedder is None:
+            embedder = await self._embedder_for(dataset_id)
         for attempt in range(max_retries):
             try:
                 vectors = await embedder.embed_documents(texts)

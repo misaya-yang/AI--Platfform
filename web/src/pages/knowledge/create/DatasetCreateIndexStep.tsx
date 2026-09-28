@@ -287,7 +287,7 @@ export function DatasetCreateIndexStep({
         <div className="flex items-center gap-4">
           <input
             type="range"
-            min={10}
+            min={50}
             max={6000}
             step={10}
             value={maxChunkSize}
@@ -299,14 +299,14 @@ export function DatasetCreateIndexStep({
             value={maxChunkSize}
             onChange={(event) =>
               onMaxChunkSizeChange(
-                Math.max(10, Math.min(6000, Number(event.target.value) || 10))
+                Math.max(50, Math.min(6000, Number(event.target.value) || 50))
               )
             }
             className="w-24"
           />
         </div>
         <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
-          <span>10</span>
+          <span>50</span>
           <span>6000</span>
         </div>
       </div>

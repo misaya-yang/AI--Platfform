@@ -1148,3 +1148,87 @@ test.describe("Eval trace console", () => {
     assertNoRuntimeFailures();
   });
 });
+
+test("review queue reaches later API pages and blocks opposite concurrent decisions", async ({ page }) => {
+  await installEvalHarness(page);
+  const datasetId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const allExamples = Array.from({ length: 501 }, (_, index) => ({
+    example_id: `approved-${index}`,
+    dataset_id: datasetId,
+    tenant_id: "tenant-a",
+    split: "regression",
+    input: { message: `approved ${index}` },
+    expected_output: {},
+    metadata: { review_status: "approved" },
+    source_trace_id: null,
+    created_by: "eval-user",
+  }));
+  for (let index = 1; index <= 9; index += 1) {
+    allExamples.push({
+      example_id: `pending-${index}`,
+      dataset_id: datasetId,
+      tenant_id: "tenant-a",
+      split: "review",
+      input: { message: `pending ${index}` },
+      expected_output: {},
+      metadata: { review_status: "pending" },
+      source_trace_id: null,
+      created_by: "eval-user",
+    });
+  }
+  const requestedOffsets: number[] = [];
+  const patches: Array<Record<string, unknown>> = [];
+  let releasePatch: (() => void) | undefined;
+  const patchHold = new Promise<void>((resolve) => { releasePatch = resolve; });
+
+  await page.route(/\/api\/v1\/eval\/datasets(?:\?.*)?$/, async (route) => {
+    await route.fulfill(jsonResponse({
+      datasets: [{
+        dataset_id: datasetId, tenant_id: "tenant-a", name: "KB A Eval", version: "v1",
+        description: "", schema: {}, metadata: { kb_dataset_id: "kb-A" },
+        created_by: "eval-user",
+      }],
+      total: 1, limit: 200, offset: 0,
+    }));
+  });
+  await page.route(new RegExp(`/api/v1/eval/datasets/${datasetId}/examples(?:\\?.*)?$`), async (route) => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 200);
+    requestedOffsets.push(offset);
+    await route.fulfill(jsonResponse({
+      examples: allExamples.slice(offset, offset + limit),
+      total: allExamples.length, limit, offset,
+    }));
+  });
+  await page.route(`**/api/v1/eval/datasets/${datasetId}/examples/*`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    patches.push(route.request().postDataJSON() as Record<string, unknown>);
+    await patchHold;
+    const target = allExamples.find((example) => route.request().url().endsWith(example.example_id));
+    if (target) target.metadata.review_status = "approved";
+    await route.fulfill(jsonResponse({
+      ...target,
+      metadata: { review_status: "approved" },
+    }));
+  });
+
+  await page.goto("/eval?dataset_id=kb-A&tab=assets&review=pending");
+  await expect(page.getByTestId("review-approve-pending-1")).toBeVisible();
+  await expect(page.locator(".ant-pagination-item-2")).toBeVisible();
+  expect(requestedOffsets).toContain(500);
+  await page.locator(".ant-pagination-item-2").click();
+  await expect(page.getByTestId("review-approve-pending-9")).toBeVisible();
+  await page.locator(".ant-pagination-item-1").click();
+
+  await page.getByTestId("review-approve-pending-1").click();
+  await expect(page.getByTestId("review-needs-fix-pending-1")).toBeDisabled();
+  await page.evaluate(() => {
+    const button = document.querySelector<HTMLButtonElement>("[data-testid='review-needs-fix-pending-1']");
+    button?.click();
+  });
+  expect(patches).toHaveLength(1);
+  expect(patches[0].review_status).toBe("approved");
+  releasePatch?.();
+  await expect(page.getByTestId("review-approve-pending-1")).toHaveCount(0);
+});

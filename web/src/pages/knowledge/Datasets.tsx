@@ -17,6 +17,7 @@ import {
   Segmented,
   message,
   Spin,
+  Pagination,
 } from "antd";
 import type { MenuProps } from "antd";
 import {
@@ -47,6 +48,7 @@ import { colors } from "@/theme/themeConfig";
 import { copyToClipboard } from "@/lib/clipboard";
 
 const { Text, Title, Paragraph } = Typography;
+const DATASET_PAGE_SIZE = 24;
 
 // 类型 Tab 配置。多模态项（image / audio_video）暂不提供：后端能力仍是
 // text_only（PRD T5-9，L689"要么解锁、要么隐藏滤镜项"），此处选择隐藏
@@ -281,6 +283,17 @@ function DatasetCard({
               <span className="text-[11px] text-muted-foreground">{t("knowledge.datasets.segments")}</span>
             </div>
           </div>
+        </div>
+
+        <div className="mt-2 text-[11px] text-muted-foreground space-y-0.5">
+          <p className="m-0 truncate" title={dataset.created_by || dataset.tenant_id || undefined}>
+            {t("knowledge.datasets.owner")}: {dataset.created_by || t("knowledge.datasets.ownerUnknown")}
+            {dataset.tenant_id ? ` · ${t("knowledge.datasets.tenant")}: ${dataset.tenant_id}` : ""}
+          </p>
+          <p className="m-0">
+            {t("knowledge.datasets.retrieval")}: {dataset.index_config?.retrieval?.mode || "hybrid"}
+            {!dataset.index_config?.retrieval ? ` (${t("knowledge.datasets.defaultConfig")})` : ""}
+          </p>
         </div>
 
         {/* 底部：ID + 可见性 */}
@@ -518,6 +531,7 @@ export function KnowledgeDatasetsPage() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deletingDataset, setDeletingDataset] = useState<Dataset | null>(null);
   const [deletePassword, setDeletePassword] = useState("");
@@ -535,12 +549,16 @@ export function KnowledgeDatasetsPage() {
       const matchesSearch =
         d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         d.dataset_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (d.description || "").toLowerCase().includes(searchQuery.toLowerCase());
+        (d.description || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (d.created_by || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (d.tenant_id || "").toLowerCase().includes(searchQuery.toLowerCase());
       const matchesType =
         typeFilter === "all" || (d.kb_type || "document") === typeFilter;
       return matchesSearch && matchesType;
     });
   }, [datasets, searchQuery, typeFilter]);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(filteredDatasets.length / DATASET_PAGE_SIZE)));
+  const pageDatasets = filteredDatasets.slice((currentPage - 1) * DATASET_PAGE_SIZE, currentPage * DATASET_PAGE_SIZE);
 
   // 统计数据
   const stats = useMemo(() => {
@@ -723,7 +741,7 @@ export function KnowledgeDatasetsPage() {
             placeholder={t("knowledge.datasets.searchPlaceholder")}
             prefix={<SearchOutlined style={{ color: colors.neutral[400] }} />}
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
             allowClear
             style={{
               width: 320,
@@ -735,7 +753,7 @@ export function KnowledgeDatasetsPage() {
           <div className="knowledge-type-rail ui-tabs-rail">
             <Segmented
               value={typeFilter}
-              onChange={(value) => setTypeFilter(value as string)}
+              onChange={(value) => { setTypeFilter(value as string); setPage(1); }}
               options={typeOptions.map((opt) => ({
                 value: opt.value,
                 label: (
@@ -786,12 +804,14 @@ export function KnowledgeDatasetsPage() {
           onResetFilters={() => {
             setSearchQuery("");
             setTypeFilter("all");
+            setPage(1);
           }}
           onCreateClick={() => nav("/knowledge/create")}
         />
       ) : (
+        <>
         <Row gutter={[16, 16]}>
-          {filteredDatasets.map((dataset, index) => (
+          {pageDatasets.map((dataset, index) => (
             <Col key={dataset.dataset_id} xs={24} sm={12} lg={8} xl={8}>
               <DatasetCard
                 dataset={dataset}
@@ -812,6 +832,17 @@ export function KnowledgeDatasetsPage() {
             </Col>
           ))}
         </Row>
+        <div className="mt-5 flex justify-end">
+          <Pagination
+            current={currentPage}
+            pageSize={DATASET_PAGE_SIZE}
+            total={filteredDatasets.length}
+            onChange={setPage}
+            showSizeChanger={false}
+            showTotal={(total) => t("knowledge.datasets.resultCount", { count: total })}
+          />
+        </div>
+        </>
       )}
 
       {/* 删除确认弹窗 */}

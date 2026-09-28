@@ -30,6 +30,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
   const [copied, setCopied] = useState(false);
   const [includeArtifacts, setIncludeArtifacts] = useState(true);
   const [expiresDays, setExpiresDays] = useState<number | undefined>(7);
+  const [audience, setAudience] = useState<"public" | "internal">("internal");
   const [preview, setPreview] = useState<ConversationSharePreview | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [loadingPreview, setLoadingPreview] = useState(false);
@@ -44,6 +45,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
     void previewConversationShare(sessionId, {
       include_artifacts: includeArtifacts,
       expires_days: expiresDays,
+      audience,
     }).then((value) => {
       if (!cancelled) setPreview(value);
     }).catch((error: { response?: { data?: { detail?: string } } }) => {
@@ -56,7 +58,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
       if (!cancelled) setLoadingPreview(false);
     });
     return () => { cancelled = true; };
-  }, [sessionId, includeArtifacts, expiresDays, isOpen, t]);
+  }, [sessionId, includeArtifacts, expiresDays, audience, isOpen, t]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -71,6 +73,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
         include_artifacts: includeArtifacts,
         expires_days: expiresDays,
         preview_hash: preview.preview_hash,
+        audience,
       });
       setShareInfo(info);
       setExistingShares(await listConversationShares(sessionId));
@@ -81,7 +84,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
     } finally {
       setIsCreating(false);
     }
-  }, [sessionId, includeArtifacts, expiresDays, preview, t]);
+  }, [sessionId, includeArtifacts, expiresDays, audience, preview, t]);
 
   const handleRevoke = useCallback(async (shareCode: string) => {
     try {
@@ -131,7 +134,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
         className="max-w-md max-h-[90dvh] gap-0 p-0 sm:p-0 bg-white dark:bg-slate-800 rounded-2xl"
         onOpenAutoFocus={() => { returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }}
         onCloseAutoFocus={(event) => { event.preventDefault(); returnFocus.current?.focus(); }}>
-        <DialogDescription className="sr-only">{t("assistant.shareVisitorPreview")}</DialogDescription>
+        <DialogDescription className="sr-only">{audience === "internal" ? t("assistant.shareInternalPreview") : t("assistant.shareVisitorPreview")}</DialogDescription>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
           <div className="flex items-center gap-2">
@@ -149,7 +152,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
             <>
               {/* Preview */}
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50 space-y-2">
-                <p className="text-xs font-medium">{t("assistant.shareVisitorPreview", "Visitor preview · anyone with this link")}</p>
+                <p className="text-xs font-medium">{audience === "internal" ? t("assistant.shareInternalPreview") : t("assistant.shareVisitorPreview")}</p>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">{t("assistant.messages", "Messages")}</span>
                   <span className="font-medium">{preview?.message_count ?? messageCount}</span>
@@ -179,6 +182,18 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
               </div>
 
               {/* Include artifacts toggle */}
+              <label className="flex items-center justify-between gap-2 text-sm">
+                <span>{t("assistant.shareAudience", "Who can open this link")}</span>
+                <select
+                  value={audience}
+                  onChange={(event) => { setAudience(event.target.value as "public" | "internal"); setPreview(null); }}
+                  className="rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600"
+                >
+                  <option value="internal">{t("assistant.shareInternal", "Signed-in teammates with source access")}</option>
+                  <option value="public">{t("assistant.sharePublic", "Anyone with the link")}</option>
+                </select>
+              </label>
+
               <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -206,7 +221,9 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
               </label>
 
               <p className="text-xs text-muted-foreground">
-                {t("assistant.shareNote", "Anyone with the link can view this conversation. You can revoke the link at any time.")}
+                {audience === "internal"
+                  ? t("assistant.shareInternalNote", "Only active teammates who can still access every source can open this link. You can revoke it at any time.")
+                  : t("assistant.shareNote", "Anyone with the link can view this conversation. You can revoke the link at any time.")}
               </p>
 
               <button
@@ -231,6 +248,9 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                   <Check className="w-6 h-6 text-green-600" />
                 </div>
                 <p className="font-medium">{t("assistant.shareLinkReady", "Share link is ready!")}</p>
+                <p className="text-xs text-muted-foreground">{shareInfo.audience === "internal"
+                  ? t("assistant.shareInternal", "Signed-in teammates with source access")
+                  : t("assistant.sharePublic", "Anyone with the link")}</p>
                 <p className="text-sm text-muted-foreground">
                   {shareInfo.message_count} {t("assistant.messages", "messages")}
                   {shareInfo.artifact_count > 0 && ` · ${shareInfo.artifact_count} ${t("assistant.artifacts", "artifacts")}`}
@@ -271,6 +291,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
               {existingShares.filter((share) => share.is_active).map((share) => (
                 <div key={share.share_code} className="flex items-center justify-between gap-2 py-1 text-xs">
                   <a href={`/share/${share.share_code}`} target="_blank" rel="noreferrer" className="truncate underline">{share.share_code}</a>
+                  <span className="shrink-0 text-muted-foreground">{share.audience === "internal" ? t("assistant.shareInternalShort", "Internal") : t("assistant.sharePublicShort", "Public")}</span>
                   <button type="button" onClick={() => void handleRevoke(share.share_code)} className="shrink-0 text-red-600">
                     {t("assistant.revokeShare", "Revoke")}
                   </button>

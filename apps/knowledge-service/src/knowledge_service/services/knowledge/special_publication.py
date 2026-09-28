@@ -412,6 +412,29 @@ class SpecialPublicationCoordinator:
                 manifest["dataset_id"], revision, connection, active_context,
             )
 
+    async def _resume_preparing(
+        self, manifest: dict[str, Any], revision: int, connection: Any,
+        active_context: dict[str, Any] | None, *, tenant_id: str,
+    ) -> None:
+        """Retire only unpublished objects, then requeue the same execution."""
+
+        if manifest.get("phase") != "preparing":
+            raise RuntimeError("only an unplanned preparation may reuse its execution")
+        await self._delete_objects(
+            manifest.get("planned_object_keys") or [],
+            tenant_id=tenant_id, document_id=manifest["document_id"],
+            generation_id=manifest["generation_id"],
+        )
+        async with connection.transaction():
+            await self.db.resume_special_preparing_execution(
+                manifest["execution_id"], manifest["document_id"],
+                manifest["dataset_id"], manifest["generation_id"],
+                manifest["source_hash"], connection=connection,
+            )
+            await self._finish_fence(
+                manifest["dataset_id"], revision, connection, active_context,
+            )
+
     async def publish(
         self, plan: Any, dataset: dict[str, Any], execution_id: str,
         expected_content: str, *, metadata_patch: dict[str, Any] | None = None,
@@ -775,6 +798,7 @@ class SpecialPublicationCoordinator:
         self, dataset: dict[str, Any], execution_id: str,
         generation_id: str, source_hash: str, *,
         document_shared_lease_held: bool = False,
+        resume_same_execution: bool = False,
     ) -> bool:
         """Retire a failed preparation using only its predeclared object keys."""
 
@@ -838,10 +862,16 @@ class SpecialPublicationCoordinator:
                 or current.get("publication_revision") != abs(publication.revision)
             ):
                 raise RuntimeError("failed preparation manifest changed before cleanup")
-            await self._abort_uncommitted(
-                current, publication.revision, publication.connection,
-                active_context, tenant_id=tenant_id,
-            )
+            if resume_same_execution:
+                await self._resume_preparing(
+                    current, publication.revision, publication.connection,
+                    active_context, tenant_id=tenant_id,
+                )
+            else:
+                await self._abort_uncommitted(
+                    current, publication.revision, publication.connection,
+                    active_context, tenant_id=tenant_id,
+                )
             return True
 
     async def recover_unfinished(self, dataset: dict[str, Any]) -> bool:
@@ -870,7 +900,12 @@ class SpecialPublicationCoordinator:
                     owner, publication.revision, publication.connection, active_context,
                     tenant_id=tenant_id,
                 )
-            elif owner["phase"] in {"preparing", "prepared", "points_written", "aborted"}:
+            elif owner["phase"] == "preparing":
+                await self._resume_preparing(
+                    owner, publication.revision, publication.connection,
+                    active_context, tenant_id=tenant_id,
+                )
+            elif owner["phase"] in {"prepared", "points_written", "aborted"}:
                 await self._abort_uncommitted(
                     owner, publication.revision, publication.connection, active_context,
                     tenant_id=tenant_id,

@@ -333,6 +333,7 @@ async def _record_ingest_execution(
     document_id: str,
     action: str,
     trigger_source: str = "api",
+    connection: Any | None = None,
 ) -> str | None:
     """Capture the replay snapshot at submission time (PRD T1 / addendum §1).
 
@@ -352,8 +353,9 @@ async def _record_ingest_execution(
             )
         return None
     try:
-        dataset = await svc.db.get_dataset(dataset_id)
-        document = await svc.db.get_document(document_id)
+        connection_kw = {"connection": connection} if connection is not None else {}
+        dataset = await svc.db.get_dataset(dataset_id, **connection_kw)
+        document = await svc.db.get_document(document_id, **connection_kw)
     except Exception as exc:
         if snapshot_required:
             logger.exception(
@@ -446,6 +448,7 @@ async def _record_ingest_execution(
                     dataset_id,
                     mode=mode or "automatic",
                     rules=rule_snapshot,
+                    **connection_kw,
                 )
                 process_rule_id = str(recorded_rule_id or "").strip() or None
                 if snapshot_required and process_rule_id is None:
@@ -470,6 +473,7 @@ async def _record_ingest_execution(
             trigger_source=trigger_source,
             process_rule_id=process_rule_id,
             input_snapshot=input_snapshot,
+            **connection_kw,
         )
         execution_id = str(recorded_execution_id or "").strip() or None
         if snapshot_required and execution_id is None:
@@ -485,9 +489,11 @@ async def _record_ingest_execution(
             ) from exc
         return None
 
-    if process_rule_id and callable(pin_rule):
+    if process_rule_id and callable(pin_rule) and connection is None:
         try:
-            pinned = await pin_rule(document_id, process_rule_id)
+            pinned = await pin_rule(
+                document_id, process_rule_id, idle_only=snapshot_required,
+            )
             if not pinned:
                 raise RuntimeError("document process-rule pin was not persisted")
         except Exception as exc:
@@ -506,6 +512,64 @@ async def _record_ingest_execution(
                     detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
                 ) from exc
 
+    return execution_id
+
+
+async def _submit_route_execution(
+    svc: KnowledgeService,
+    worker: KnowledgeWorker,
+    dataset_id: str,
+    document_id: str,
+    *,
+    action: str,
+    recover_stage: str | None = None,
+) -> str | None:
+    """Commit the API execution, rule pin, and queue owner together.
+
+    The shared document lease excludes dataset archive while the execution
+    row is being created. A crash before commit leaves no orphan running row;
+    after commit the durable waiting row survives an API process crash.
+    """
+    lease = getattr(svc.db, "document_index_update_lease", None)
+    claim = getattr(svc.db, "claim_document_for_enqueue", None)
+    if not callable(lease) or not callable(claim):
+        # Lightweight route doubles use the original public worker contract.
+        execution_id = await _record_ingest_execution(
+            svc, dataset_id=dataset_id, document_id=document_id, action=action,
+        )
+        queued = await _try_enqueue_document(
+            worker, dataset_id, document_id, action=action,
+            recover_stage=recover_stage, execution_id=execution_id,
+        )
+        if not queued:
+            await _fail_ingest_execution(
+                svc, execution_id, f"{action} claim rejected or ineligible document",
+            )
+            raise HTTPException(409, "Document is already queued/processing or ineligible")
+        return execution_id
+
+    try:
+        async with lease(dataset_id, document_id) as conn, conn.transaction():
+            dataset = await svc.db.get_dataset(dataset_id, connection=conn)
+            if not dataset:
+                raise HTTPException(409, "Dataset is no longer available for indexing")
+            from ...services.knowledge.worker import _require_enqueue_bm25_v2_available
+
+            _require_enqueue_bm25_v2_available(svc, dataset.get("index_config") or {})
+            execution_id = await _record_ingest_execution(
+                svc, dataset_id=dataset_id, document_id=document_id,
+                action=action, connection=conn,
+            )
+            if not execution_id or not await claim(
+                dataset_id, document_id, action=action,
+                recover_stage=recover_stage, execution_id=execution_id,
+                pin_execution_rule=action in _REPLAY_SNAPSHOT_ACTIONS,
+                connection=conn,
+            ):
+                raise HTTPException(409, "Document is already queued/processing or ineligible")
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
+    await worker.enqueue_claimed(dataset_id, document_id)
     return execution_id
 
 
@@ -724,11 +788,20 @@ async def list_datasets(
     response: Response,
     limit: int = Query(default=200, ge=1, le=200),
     cursor: str | None = Query(default=None, max_length=1024),
+    archived: bool = Query(default=False),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        page = await svc.list_datasets_page(user, limit=limit, cursor=cursor)
+        page = (
+            await svc.dataset_service.list_datasets_page(
+                user, limit=limit, cursor=cursor, archived_only=True,
+            )
+            if archived is True else
+            await svc.list_datasets_page(user, limit=limit, cursor=cursor)
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if page["next_cursor"]:
@@ -782,6 +855,33 @@ async def update_dataset(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class DatasetArchiveRequest(BaseModel):
+    archived: bool
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.patch("/knowledge/datasets/{dataset_id}/archive")
+async def set_dataset_archived(
+    dataset_id: str,
+    payload: DatasetArchiveRequest = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await svc.dataset_service.set_dataset_archived(
+            user, dataset_id, archived=payload.archived, reason=payload.reason,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IndexLeaseUnavailableError as exc:
+        raise HTTPException(
+            status_code=409, detail=str(exc), headers={"Retry-After": "1"},
+        ) from exc
+    except ValidationFailedError as exc:
+        status = 404 if str(exc) == "dataset not found" else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.delete("/knowledge/datasets/{dataset_id}")
@@ -1764,27 +1864,9 @@ async def reindex_document(
                 status_code=409,
                 detail="Document is already queued; the durable queue owns this generation",
             )
-        execution_id = await _record_ingest_execution(
-            svc,
-            dataset_id=dataset_id,
-            document_id=document_id,
-            action="reembed",
+        execution_id = await _submit_route_execution(
+            svc, worker, dataset_id, document_id, action="reembed",
         )
-        queued = await _try_enqueue_document(
-            worker,
-            dataset_id,
-            document_id,
-            action="reembed",
-            execution_id=execution_id,
-        )
-        if not queued:
-            await _fail_ingest_execution(
-                svc, execution_id, "reembed claim rejected or ineligible document"
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="Document is already queued/processing or is not eligible for reindex",
-            )
         logger.info("Reindex (reembed) queued for document %s (dataset=%s)", document_id, dataset_id)
         return _pipeline_execution_receipt(
             {"status": "queuing", "document_id": document_id},
@@ -1843,10 +1925,12 @@ async def reprocess_document(
         dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
         _require_dataset_index_writable(dataset)
         document = await _get_route_document_or_404(svc, dataset_id, document_id)
-        if str(document.get("status") or "") == "waiting":
+        if str(document.get("status") or "") in {
+            "waiting", "parsing", "splitting", "indexing",
+        }:
             raise HTTPException(
                 status_code=409,
-                detail="Document is already queued; the durable queue owns this generation",
+                detail="Document is already queued or processing; the current execution owns this generation",
             )
         await _require_special_replay_admission(
             worker, dataset_id, document_id, document, dataset, action="reprocess",
@@ -1854,27 +1938,9 @@ async def reprocess_document(
         _require_dataset_index_writable(
             await svc.require_dataset_access(user, dataset_id, required="editor")
         )
-        execution_id = await _record_ingest_execution(
-            svc,
-            dataset_id=dataset_id,
-            document_id=document_id,
-            action="reprocess",
+        execution_id = await _submit_route_execution(
+            svc, worker, dataset_id, document_id, action="reprocess",
         )
-        queued = await _try_enqueue_document(
-            worker,
-            dataset_id,
-            document_id,
-            action="reprocess",
-            execution_id=execution_id,
-        )
-        if not queued:
-            await _fail_ingest_execution(
-                svc, execution_id, "reprocess claim rejected or ineligible document"
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="Document is already queued/processing or is not eligible for reprocess",
-            )
         logger.info("Reprocess queued for document %s (dataset=%s)", document_id, dataset_id)
         return _pipeline_execution_receipt(
             {
@@ -1930,28 +1996,10 @@ async def recover_document(
             await svc.require_dataset_access(user, dataset_id, required="editor")
         )
         recover_stage = _latest_stage_reached(document)
-        execution_id = await _record_ingest_execution(
-            svc,
-            dataset_id=dataset_id,
-            document_id=document_id,
-            action="recover",
-        )
-        queued = await _try_enqueue_document(
-            worker,
-            dataset_id,
-            document_id,
-            action="recover",
+        execution_id = await _submit_route_execution(
+            svc, worker, dataset_id, document_id, action="recover",
             recover_stage=recover_stage,
-            execution_id=execution_id,
         )
-        if not queued:
-            await _fail_ingest_execution(
-                svc, execution_id, "recover claim rejected or ineligible document"
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="Document is already queued/processing or is not eligible for recover",
-            )
         logger.info(
             "Recover queued for document %s (dataset=%s, stage=%s)",
             document_id,
@@ -2013,27 +2061,9 @@ async def retry_document(
         _require_dataset_index_writable(
             await svc.require_dataset_access(user, dataset_id, required="editor")
         )
-        execution_id = await _record_ingest_execution(
-            svc,
-            dataset_id=dataset_id,
-            document_id=document_id,
-            action="retry",
+        execution_id = await _submit_route_execution(
+            svc, worker, dataset_id, document_id, action="retry",
         )
-        queued = await _try_enqueue_document(
-            worker,
-            dataset_id,
-            document_id,
-            action="retry",
-            execution_id=execution_id,
-        )
-        if not queued:
-            await _fail_ingest_execution(
-                svc, execution_id, "retry claim rejected or ineligible document"
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="Document is already queued/processing or is not eligible for retry",
-            )
         logger.info("Retry queued for document %s (dataset=%s)", document_id, dataset_id)
         return _pipeline_execution_receipt(
             {"status": "queuing", "document_id": document_id, "action": "retry"},
@@ -2673,7 +2703,8 @@ async def hit_test(
 ):
     """Retrieve preview endpoint for debugging (includes raw scores in metadata)."""
     try:
-        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        source_dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        source_generation = _dataset_content_generation(source_dataset)
         payload.mode = payload.mode or "hybrid"
         results, meta = await svc.retrieve(
             user=user,
@@ -2702,6 +2733,10 @@ async def hit_test(
             mmr_threshold=payload.mmr_threshold,
             telemetry_source="hit_test",
         )
+        identities = await _published_source_identity_map(
+            svc, user, dataset_id, [r.document_id for r in results],
+            source_generation,
+        )
         return {
             "results": [
                 {
@@ -2709,7 +2744,13 @@ async def hit_test(
                     "document_id": r.document_id,
                     "score": r.score,
                     "text": r.text,
-                    "metadata": r.metadata,
+                    "metadata": _source_metadata(r.metadata, r.document_id, identities),
+                    "source_version": (
+                        _source_identity(r.metadata, r.document_id, identities) or (None, None)
+                    )[0],
+                    "source_hash": (
+                        _source_identity(r.metadata, r.document_id, identities) or (None, None)
+                    )[1],
                 }
                 for r in results
             ],
@@ -4288,6 +4329,7 @@ async def get_dataset_sources(
         # Get Confluence bindings if service is available
         confluence_bindings = []
         confluence_svc = getattr(request.app.state, "confluence_sync_service", None)
+        connector_status = "not_configured" if confluence_svc is None else "available"
         if confluence_svc:
             try:
                 bindings = await confluence_svc.list_bindings(user, dataset_id=dataset_id)
@@ -4297,11 +4339,17 @@ async def get_dataset_sources(
                         "space_name": b.get("space_name"),
                         "page_count": b.get("synced_page_count") or 0,
                         "status": b.get("status"),
+                        "last_success_at": b.get("last_sync_at"),
+                        "has_problem": (
+                            str(b.get("status") or "").lower() not in {"completed", "success"}
+                            and bool(b.get("last_error"))
+                        ),
                     }
                     for b in bindings
                 ]
-            except Exception as e:
-                logger.warning(f"Failed to get Confluence bindings for dataset {dataset_id}: {e}")
+            except Exception:
+                logger.warning("Confluence bindings unavailable for dataset %s", dataset_id)
+                connector_status = "unavailable"
 
         result = {
             "file_uploads": {
@@ -4311,6 +4359,7 @@ async def get_dataset_sources(
                 "count": source_counts.get("url", 0),
             },
             "confluence_bindings": confluence_bindings,
+            "connector_status": connector_status,
             "total_documents": sum(source_counts.values()),
         }
         await _require_unchanged_dataset_content(

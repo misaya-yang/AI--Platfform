@@ -17,5 +17,7 @@ async def require_compatible_schema(conn: Any) -> None:
     if len(baselines) != 1 or baselines[0]["baseline_id"] != DATABASE_BASELINE_ID:
         raise RuntimeError("Knowledge schema baseline is incompatible")
     sequence = await conn.fetchval("SELECT COALESCE(max(sequence),0) FROM public.platform_schema_changes WHERE baseline_id=$1", DATABASE_BASELINE_ID)
-    if not MIN_REQUIRED_EPOCH_SEQUENCE <= sequence <= MAX_SUPPORTED_EPOCH_SEQUENCE:
+    # Dataset reads include is_archived from authority sequence 5 onward.
+    # Reject older schemas at startup instead of failing individual requests.
+    if not max(MIN_REQUIRED_EPOCH_SEQUENCE, 5) <= sequence <= MAX_SUPPORTED_EPOCH_SEQUENCE:
         raise RuntimeError("Knowledge schema epoch is incompatible; run the matching authority migration")

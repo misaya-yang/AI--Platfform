@@ -216,7 +216,7 @@ test.describe("dynamic route render smoke", () => {
     assertNoRuntimeFailures();
   });
 
-  test("keeps a cached quiz result visible when quiz metadata is unavailable", async ({
+  test("keeps a server-confirmed quiz result visible when metadata is temporarily unavailable", async ({
     page,
   }) => {
     const cachedResult = {
@@ -241,9 +241,14 @@ test.describe("dynamic route render smoke", () => {
         },
       ],
     };
-    await page.addInitScript((result) => {
-      localStorage.setItem("quiz_submitted_cached-quiz", JSON.stringify(result));
-    }, cachedResult);
+    await page.addInitScript(() => {
+      sessionStorage.setItem("quiz_session_cached-quiz_anonymous", JSON.stringify({
+        token: "confirmed-attempt-token", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }));
+    });
+    await page.route("**/api/v1/quiz/public/cached-quiz/attempts/result", async (route) => {
+      await route.fulfill(jsonResponse(cachedResult));
+    });
     await page.route("**/api/v1/quiz/shared/cached-quiz", async (route) => {
       await route.fulfill({
         status: 503,
@@ -259,5 +264,24 @@ test.describe("dynamic route render smoke", () => {
       page.getByText("Quiz details could not be loaded. Showing your saved result."),
     ).toBeVisible();
     await expect(page.getByText("50")).toBeVisible();
+  });
+
+  test("does not show a prior result after the quiz link is revoked", async ({ page }) => {
+    await page.addInitScript(() => {
+      sessionStorage.setItem("quiz_session_revoked-quiz_anonymous", JSON.stringify({
+        token: "previous-attempt-token",
+      }));
+    });
+    await page.route("**/api/v1/quiz/public/revoked-quiz/attempts/result", async (route) => {
+      await route.fulfill(jsonResponse({ attempt_id: "previous", total_score: 1 }));
+    });
+    await page.route("**/api/v1/quiz/shared/revoked-quiz", async (route) => {
+      await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    });
+
+    await page.goto("/quiz/revoked-quiz", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByRole("alert")).toContainText("Quiz not found");
+    await expect(page.getByRole("heading", { name: "Quiz result" })).toHaveCount(0);
   });
 });

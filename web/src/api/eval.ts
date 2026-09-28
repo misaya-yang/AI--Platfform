@@ -1,3 +1,4 @@
+import { isAxiosError } from "axios";
 import { api } from "@/lib/api";
 
 export type TraceFamily = "assistant" | "langgraph_proxy" | "rag";
@@ -236,6 +237,34 @@ export interface EvalExampleImportItem {
   metadata?: Record<string, unknown>;
   source_trace_id?: string | null;
   source_span_id?: string | null;
+}
+
+export interface EvalKbFailureSavePayload {
+  case_id: string;
+  kb_dataset_id: string;
+  query: string;
+  expected_answer: string;
+  source: "kb-hit-test" | "kb-qa";
+  observed_segment_ids: string[];
+  source_versions: Array<{
+    kb_dataset_id: string;
+    document_id: string;
+    segment_id: string;
+    source_version: number;
+    source_hash: string;
+  }>;
+  source_trace_id?: string | null;
+  kb_trace_id?: string | null;
+  query_fingerprint?: string | null;
+  observed_answer?: string | null;
+  failure_reason?: string | null;
+  expected_revision: number;
+}
+
+export interface EvalKbFailureSaveResponse {
+  example: EvalExample;
+  created: boolean;
+  revision: number;
 }
 
 export interface EvalExampleUpdate {
@@ -591,6 +620,23 @@ export async function listEvalDatasets(params: { limit?: number; offset?: number
   return response.data;
 }
 
+/** The Eval console needs the full tenant catalog to resolve linked KB datasets. */
+export async function listAllEvalDatasets(): Promise<EvalDatasetListResponse> {
+  const datasets: EvalDataset[] = [];
+  let offset = 0;
+  let total: number;
+  do {
+    const page = await listEvalDatasets({ limit: 200, offset });
+    total = page.total;
+    if (page.datasets.length === 0 && offset < total) {
+      throw new Error("Eval dataset listing ended before all datasets were returned");
+    }
+    datasets.push(...page.datasets);
+    offset += page.datasets.length;
+  } while (offset < total);
+  return { datasets, total, limit: datasets.length, offset: 0 };
+}
+
 
 export async function listEvalExamples(
   datasetId: string,
@@ -601,6 +647,23 @@ export async function listEvalExamples(
     { params: compactParams({ limit: 200, offset: 0, ...params }) }
   );
   return response.data;
+}
+
+/** Review must see every example, including candidates beyond the first page. */
+export async function listAllEvalExamples(datasetId: string): Promise<EvalExampleListResponse> {
+  const examples: EvalExample[] = [];
+  let offset = 0;
+  let total: number;
+  do {
+    const page = await listEvalExamples(datasetId, { limit: 500, offset });
+    total = page.total;
+    if (page.examples.length === 0 && offset < total) {
+      throw new Error("Eval example listing ended before all examples were returned");
+    }
+    examples.push(...page.examples);
+    offset += page.examples.length;
+  } while (offset < total);
+  return { examples, total, limit: examples.length, offset: 0 };
 }
 
 export async function createEvalDataset(payload: EvalDatasetCreate): Promise<EvalDataset> {
@@ -621,6 +684,32 @@ export async function createEvalExampleFromTrace(
 ): Promise<EvalExample> {
   const response = await api.post<EvalExample>(
     `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples:from-trace`,
+    payload
+  );
+  return response.data;
+}
+
+export async function getLatestKbFailureExample(
+  datasetId: string,
+  caseId: string
+): Promise<EvalExample | null> {
+  try {
+    const response = await api.get<EvalExample>(
+      `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/kb-failures/${encodeURIComponent(caseId)}`
+    );
+    return response.data;
+  } catch (error: unknown) {
+    if (isAxiosError(error) && error.response?.status === 404) return null;
+    throw error;
+  }
+}
+
+export async function saveKbFailureRevision(
+  datasetId: string,
+  payload: EvalKbFailureSavePayload
+): Promise<EvalKbFailureSaveResponse> {
+  const response = await api.post<EvalKbFailureSaveResponse>(
+    `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/kb-failures:save`,
     payload
   );
   return response.data;

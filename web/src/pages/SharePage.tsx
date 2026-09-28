@@ -1,7 +1,7 @@
 /**
- * Public Share Page — read-only conversation snapshot with artifacts.
+ * Share Page — read-only conversation snapshot with artifacts.
  *
- * Accessible at /share/:shareId (no auth required).
+ * Accessible at /share/:shareId (internal links require a current account).
  * Supports conversation shares from /api/v1/assistant/shares/:code.
  *
  * Phase 3 retheme: aligned to the single-accent (gold) palette shared with
@@ -20,6 +20,8 @@ import { ArrowRight, Download } from "lucide-react";
 import { formatFileSize, getFormatLabel } from "@/lib/format";
 import { QuizCard } from "@/pages/assistant/components/Quiz";
 import type { QuizData } from "@/pages/assistant/types";
+import { getAuthToken } from "@/lib/api";
+import { useAuthStore } from "@/store/useAuthStore";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -57,11 +59,22 @@ interface ConversationShareData {
   view_count: number;
   created_at: string;
   expires_at: string | null;
+  audience: "public" | "internal";
+}
+
+function shareRequestHeaders(): HeadersInit {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 // ── Component ────────────────────────────────────────────────────────
 
 export function SharePage() {
+  const userId = useAuthStore((state) => state.user?.user_id);
+  return <SharePageSession key={userId || "anonymous"} userId={userId} />;
+}
+
+function SharePageSession({ userId }: { userId?: string }) {
   const { t } = useTranslation();
   const { shareId } = useParams<{ shareId: string }>();
   const [convShare, setConvShare] = useState<ConversationShareData | null>(null);
@@ -80,10 +93,15 @@ export function SharePage() {
       try {
         const resp = await fetch(`/api/v1/assistant/shares/${shareId}`, {
           signal: controller.signal,
+          headers: shareRequestHeaders(),
         });
         if (!resp.ok) {
           throw new Error(
-            resp.status === 404
+            resp.status === 401
+              ? t("assistant.shareSignIn", "Sign in to open this internal link")
+              : resp.status === 403
+                ? t("assistant.shareSourceUnavailable", "You no longer have access to this link's sources")
+              : resp.status === 404
               ? t("assistant.sharedLinkUnavailable")
               : resp.status === 410
                 ? t("assistant.sharedLinkExpired")
@@ -163,6 +181,7 @@ export function SharePage() {
                 </h1>
                 <p className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] mt-0.5">
                   Shared · {snapshot.messages.length} messages
+                  {convShare.audience === "internal" && ` · ${t("assistant.shareInternalShort", "Internal")}`}
                   {artifact_count > 0 && ` · ${artifact_count} files`}
                   {view_count > 0 && ` · ${view_count} views`}
                 </p>
@@ -223,7 +242,7 @@ export function SharePage() {
                   {msgArtifacts.length > 0 && (
                     <div className="mt-3 space-y-2">
                       {msgArtifacts.map((art) => (
-                        <ArtifactCard key={art.artifact_id} artifact={art} shareCode={convShare.share_code} />
+                        <ArtifactCard key={art.artifact_id} artifact={art} shareCode={convShare.share_code} audience={convShare.audience} />
                       ))}
                     </div>
                   )}
@@ -238,6 +257,7 @@ export function SharePage() {
                         quizData={msg.quiz_data}
                         scope="share"
                         shareCode={convShare.share_code}
+                        userScopeId={convShare.audience === "internal" ? userId || "unauthenticated" : undefined}
                       />
                     </div>
                   )}
@@ -251,7 +271,7 @@ export function SharePage() {
           <section className="max-w-3xl mx-auto px-4 space-y-2" aria-label={t("assistant.sharedFiles")}>
             <h2 className="text-sm font-medium">{t("assistant.sharedFiles")}</h2>
             {placement.remaining.map((artifact) => (
-              <ArtifactCard key={artifact.artifact_id} artifact={artifact} shareCode={convShare.share_code} />
+              <ArtifactCard key={artifact.artifact_id} artifact={artifact} shareCode={convShare.share_code} audience={convShare.audience} />
             ))}
           </section>
         )}
@@ -284,18 +304,59 @@ export function SharePage() {
 
 // ── Inline Artifact Card ─────────────────────────────────────────────
 
-function ArtifactCard({ artifact, shareCode }: { artifact: ShareArtifact; shareCode: string }) {
+function ArtifactCard({ artifact, shareCode, audience }: { artifact: ShareArtifact; shareCode: string; audience: "public" | "internal" }) {
   const { t } = useTranslation();
   const downloadUrl = `/api/v1/assistant/shares/${shareCode}/artifact/${artifact.artifact_id}`;
   const isImage = artifact.type === "image" || artifact.mime_type?.startsWith("image/");
   const label = getFormatLabel(artifact.format, artifact.mime_type);
+  const [privateImageUrl, setPrivateImageUrl] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState(false);
+
+  useEffect(() => {
+    if (audience !== "internal" || !isImage) return;
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    void fetch(downloadUrl, { headers: shareRequestHeaders(), signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error("Artifact unavailable");
+        return response.blob();
+      })
+      .then((blob) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPrivateImageUrl(objectUrl);
+      })
+      .catch(() => { if (!controller.signal.aborted) setPrivateImageUrl(null); });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [audience, downloadUrl, isImage]);
+
+  const downloadInternal = async () => {
+    setDownloadError(false);
+    try {
+      const response = await fetch(downloadUrl, { headers: shareRequestHeaders() });
+      if (!response.ok) throw new Error("Artifact unavailable");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = artifact.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch {
+      setDownloadError(true);
+    }
+  };
 
   return (
     <div className="rounded-[10px] border border-[hsl(var(--assistant-border))] overflow-hidden bg-[hsl(var(--assistant-surface-bg))]">
-      {isImage && (
-        <a href={downloadUrl} target="_blank" rel="noopener noreferrer" className="block">
+      {isImage && (audience === "public" || privateImageUrl) && (
+        <a href={audience === "internal" ? privateImageUrl || "#" : downloadUrl} target="_blank" rel="noopener noreferrer" className="block">
           <img
-            src={downloadUrl}
+            src={audience === "internal" ? privateImageUrl || undefined : downloadUrl}
             alt={artifact.title}
             className="w-full max-h-[400px] object-contain bg-[hsl(var(--assistant-surface-soft))]"
             loading="lazy"
@@ -318,16 +379,21 @@ function ArtifactCard({ artifact, shareCode }: { artifact: ShareArtifact; shareC
             {label} · {formatFileSize(artifact.size_bytes)}
           </p>
         </div>
-        <a
-          href={downloadUrl}
-          download={artifact.filename}
-          className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
-          title={t("common.download")}
-          aria-label={t("common.download")}
-        >
-          <Download className="w-[14px] h-[14px]" />
-        </a>
+        {audience === "internal" ? (
+          <button type="button" onClick={() => void downloadInternal()}
+            className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
+            title={t("common.download")} aria-label={t("common.download")}>
+            <Download className="w-[14px] h-[14px]" />
+          </button>
+        ) : (
+          <a href={downloadUrl} download={artifact.filename}
+            className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
+            title={t("common.download")} aria-label={t("common.download")}>
+            <Download className="w-[14px] h-[14px]" />
+          </a>
+        )}
       </div>
+      {downloadError && <p role="alert" className="px-2.5 pb-2.5 text-xs text-[hsl(var(--assistant-text-secondary))]">{t("assistant.shareSourceUnavailable")}</p>}
     </div>
   );
 }

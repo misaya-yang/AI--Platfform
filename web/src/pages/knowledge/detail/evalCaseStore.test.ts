@@ -11,8 +11,13 @@ import {
   exampleToEvalCase,
   extractRelevantSegmentIds,
   findKbEvalDataset,
+  findKbEvalDatasetPaged,
   hashEvalCaseInput,
   hitTestEvalCaseId,
+  knowledgeFailureToImportItem,
+  sourceVersionsFromHits,
+  HIT_TEST_EVAL_SOURCE,
+  KB_FAILURE_EVAL_SPLIT,
   KB_EVAL_DATASET_SOURCE,
   KB_EVAL_SPLIT,
   kbEvalDatasetName,
@@ -64,6 +69,70 @@ test("exampleToEvalCase returns null without a usable input.query", () => {
   assert.equal(exampleToEvalCase(makeExample({ input: {} })), null);
   assert.equal(exampleToEvalCase(makeExample({ input: { query: "   " } })), null);
   assert.equal(exampleToEvalCase(makeExample({ input: { query: 42 } })), null);
+});
+
+test("pending failure observations stay out of the labelled retrieval workbench", () => {
+  assert.equal(exampleToEvalCase(makeExample({ metadata: { source_kind: "kb_failure" } })), null);
+});
+
+test("failure import keeps expectation separate from observed hits and requires review", () => {
+  const sourceHash = "a".repeat(64);
+  const hit = {
+    segment_id: "seg-1",
+    document_id: "doc-1",
+    source_version: 3,
+    source_hash: sourceHash,
+  };
+  const item = knowledgeFailureToImportItem({
+    kbDatasetId: "kb-1",
+    query: "  年假规则？ ",
+    expectedAnswer: "应提前五天申请",
+    observedHits: [hit],
+    source: HIT_TEST_EVAL_SOURCE,
+    sourceTraceId: "trace-1",
+    confirmedTraceId: "trace-1",
+    queryFingerprint: "fp-1",
+  });
+  assert.equal(item.split, KB_FAILURE_EVAL_SPLIT);
+  assert.deepEqual(item.input, { query: "年假规则？" });
+  assert.deepEqual(item.expected_output, { answer: "应提前五天申请" });
+  assert.equal(item.source_trace_id, "trace-1");
+  assert.deepEqual(item.metadata?.kb_observed_segment_ids, ["seg-1"]);
+  assert.deepEqual(item.metadata?.kb_source_versions, [{
+    kb_dataset_id: "kb-1",
+    document_id: "doc-1",
+    segment_id: "seg-1",
+    source_version: 3,
+    source_hash: sourceHash,
+  }]);
+  assert.equal(item.metadata?.review_status, "pending");
+  assert.equal(item.metadata?.behavior_confirmed, false);
+  assert.equal(item.metadata?.source_kind, "kb_failure");
+  const repeated = knowledgeFailureToImportItem({
+    kbDatasetId: "kb-1", query: "年假规则？", expectedAnswer: "另一个答案",
+    observedHits: [], source: HIT_TEST_EVAL_SOURCE, sourceTraceId: "trace-1",
+  });
+  assert.equal(repeated.case_id, item.case_id);
+  assert.throws(() => knowledgeFailureToImportItem({
+    kbDatasetId: "kb-1", query: "q", expectedAnswer: " ",
+    observedHits: [], source: HIT_TEST_EVAL_SOURCE,
+  }));
+});
+
+test("source references omit incomplete or unverified version identities", () => {
+  const refs = sourceVersionsFromHits("kb-1", [
+    { segment_id: "ok", document_id: "doc-1", source_version: 2, source_hash: "B".repeat(64) },
+    { segment_id: "stale-metadata", document_id: "doc-5", metadata: {
+      source_version: 7, source_hash: "c".repeat(64),
+    } },
+    { segment_id: "no-hash", document_id: "doc-2", source_version: 2 },
+    { segment_id: "bad-hash", document_id: "doc-3", source_version: 2, source_hash: "guess" },
+    { segment_id: "bad-version", document_id: "doc-4", source_version: 0, source_hash: "a".repeat(64) },
+  ]);
+  assert.deepEqual(refs, [{
+    kb_dataset_id: "kb-1", document_id: "doc-1", segment_id: "ok",
+    source_version: 2, source_hash: "b".repeat(64),
+  }]);
 });
 
 test("exampleToEvalCase trims the query", () => {
@@ -218,6 +287,21 @@ test("findKbEvalDataset matches by metadata.kb_dataset_id only", () => {
   const datasets = [unrelated, bare, linked] as any;
   assert.equal(findKbEvalDataset(datasets, "kb-1")?.dataset_id, "eval-linked");
   assert.equal(findKbEvalDataset(datasets, "kb-missing"), undefined);
+});
+
+test("linked eval dataset lookup reaches pages after the first 200", async () => {
+  const calls: number[] = [];
+  const unrelated = Array.from({ length: 200 }, (_, index) => ({
+    dataset_id: `eval-${index}`, metadata: { kb_dataset_id: `other-${index}` },
+  }));
+  const linked = { dataset_id: "eval-linked", metadata: { kb_dataset_id: "kb-1" } };
+  const found = await findKbEvalDatasetPaged("kb-1", async (offset) => {
+    calls.push(offset);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return { datasets: (offset === 0 ? unrelated : [linked]) as any, total: 201 };
+  });
+  assert.equal(found?.dataset_id, "eval-linked");
+  assert.deepEqual(calls, [0, 200]);
 });
 
 test("kbEvalDatasetName is deterministic per KB dataset", () => {

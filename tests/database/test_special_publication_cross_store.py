@@ -130,6 +130,7 @@ async def cross_store_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
                     dataset_id VARCHAR(255) PRIMARY KEY,
                     tenant_id VARCHAR(255) NOT NULL,
                     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
                     collection_name VARCHAR(255),
                     embedding_provider VARCHAR(255),
                     embedding_model VARCHAR(255),
@@ -557,6 +558,52 @@ async def _recover(world: World) -> None:
     assert await world.coordinator().recover_unfinished(await world.dataset())
     assert (await world.dataset())["content_revision"] > 0
     assert not await world.coordinator().recover_unfinished(await world.dataset())
+
+
+@pytest.mark.asyncio
+async def test_preparing_crash_requeues_original_execution_after_object_cleanup(
+    cross_store_world: World,
+) -> None:
+    world = cross_store_world
+    plan = await _prepare(world, "preparing-crash")
+    async with world.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE document_pipeline_executions "
+            "SET process_rule_id = 'pinned-rule', input_snapshot = $2::jsonb "
+            "WHERE execution_id = $1",
+            plan.generation_id,
+            json.dumps({"index_config": {"chunking": {"mode": "hierarchical"}}}),
+        )
+
+    await world.coordinator().abort_preparing(
+        await world.dataset(), plan.generation_id,
+        plan.generation_id, plan.source_hash,
+        resume_same_execution=True,
+    )
+
+    document = await _document(world)
+    ledger = await _ledger(world)
+    assert document["status"] == "waiting"
+    assert document["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == plan.generation_id
+    assert "_special_publication_generation_id" not in document["metadata"]
+    assert len(ledger) == 1 and ledger[0]["execution_id"] == plan.generation_id
+    assert ledger[0]["status"] == "running"
+    assert SOURCE_MANIFEST_KEY not in document["metadata"]
+    manifest = ledger[0]["manifest"]
+    assert "special_publication" not in manifest
+    assert manifest["preparing_replayed_after_restart"] is True
+    receipt = plan.object_manifest[0]
+    assert not await world.storage.image_exists(
+        world.tenant_id, world.document_id,
+        receipt["attachment_id"], "page_1.png",
+    )
+    with pytest.raises(RuntimeError, match="matching durable owner"):
+        await world.coordinator().abort_preparing(
+            await world.dataset(), plan.generation_id,
+            plan.generation_id, plan.source_hash,
+            resume_same_execution=True,
+        )
+    assert len(await _ledger(world)) == 1
 
 
 async def test_two_generations_and_fault_windows_share_one_cross_store_owner(

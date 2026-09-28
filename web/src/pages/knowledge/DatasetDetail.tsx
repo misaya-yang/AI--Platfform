@@ -115,6 +115,7 @@ export function KnowledgeDatasetDetailPage() {
   const [mainTab, setMainTab] = useState<DatasetMainTab>(() =>
     getDatasetMainTab(searchParams)
   );
+  const [settingsUnsaved, setSettingsUnsaved] = useState(false);
 
   useEffect(() => {
     const nextTab = getDatasetMainTab(searchParams);
@@ -122,6 +123,8 @@ export function KnowledgeDatasetDetailPage() {
   }, [searchParams, setSearchParams]);
 
   function handleMainTabChange(tab: DatasetMainTab) {
+    if (tab !== "settings" && mainTab === "settings" && settingsUnsaved
+      && !window.confirm(t("knowledge.detail.unsavedConfigLeave"))) return;
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set("tab", tab);
     if (tab !== "sources") {
@@ -178,7 +181,10 @@ export function KnowledgeDatasetDetailPage() {
             {/* 左侧：面包屑导航 */}
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
-                onClick={() => nav("/knowledge")}
+                onClick={() => {
+                  if (settingsUnsaved && !window.confirm(t("knowledge.detail.unsavedConfigLeave"))) return;
+                  nav("/knowledge");
+                }}
                 className="shrink-0 text-primary hover:text-primary/90 font-medium text-sm flex items-center gap-1"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -290,6 +296,7 @@ export function KnowledgeDatasetDetailPage() {
         {/* 文档管理 Tab（常驻挂载，隐藏切换以保留状态） */}
         <div className={mainTab === "documents" ? undefined : "hidden"}>
           <DocumentsTab
+            key={datasetId}
             datasetId={datasetId}
             docs={docs}
             docsQuery={docsQuery}
@@ -327,27 +334,24 @@ export function KnowledgeDatasetDetailPage() {
         {/* 数据来源 Tab（自包含组件，保持原条件挂载） */}
         {mainTab === "sources" && datasetId && (
           <SourcesTab
-            datasetId={datasetId}
             onUploadClick={openFilePicker}
             onUrlClick={() => setUrlDialogOpen(true)}
-            documentStats={{
-              total: sourcesQuery.data?.total_documents ?? documentTotal,
-              uploaded: sourcesQuery.data?.file_uploads.count ?? 0,
-              fromUrl: sourcesQuery.data?.url_imports.count ?? 0,
-              fromConfluence: (sourcesQuery.data?.confluence_bindings ?? []).reduce(
-                (total, binding) => total + binding.page_count,
-                0
-              ),
-            }}
+            sources={sourcesQuery.data ?? null}
+            sourcesLoading={sourcesQuery.isPending}
+            sourcesFailed={sourcesQuery.isError}
+            onRetrySources={() => void sourcesQuery.refetch()}
           />
         )}
 
         {/* 配置 Tab */}
         <div className={mainTab === "settings" ? undefined : "hidden"}>
           <SettingsTab
+            key={datasetId}
             datasetId={datasetId}
+            dataset={dataset}
             active={mainTab === "settings"}
             permission={dataset?.my_permission}
+            onUnsavedChange={setSettingsUnsaved}
             onDatasetRefetch={() => void dsQuery.refetch()}
           />
         </div>

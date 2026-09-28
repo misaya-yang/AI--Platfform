@@ -9,18 +9,21 @@
 import {
   createEvalDataset,
   getAgentTraceDetail,
-  importEvalExamples,
+  getLatestKbFailureExample,
   listEvalDatasets,
+  saveKbFailureRevision,
   type EvalDataset,
 } from "@/api/eval";
 import {
-  evalCaseToImportItem,
-  findKbEvalDataset,
+  findKbEvalDatasetPaged,
   HIT_TEST_EVAL_SOURCE,
-  hitTestEvalCaseId,
   kbEvalDatasetName,
+  knowledgeFailureToImportItem,
   KB_EVAL_DATASET_LIST_LIMIT,
   KB_EVAL_DATASET_SOURCE,
+  QA_EVAL_SOURCE,
+  sourceVersionsFromHits,
+  type KnowledgeFailureHit,
 } from "./evalCaseStore";
 
 /**
@@ -29,8 +32,9 @@ import {
  * writes to the eval store.
  */
 export async function resolveKbEvalDataset(kbDatasetId: string): Promise<EvalDataset> {
-  const listed = await listEvalDatasets({ limit: KB_EVAL_DATASET_LIST_LIMIT });
-  const found = findKbEvalDataset(listed.datasets, kbDatasetId);
+  const found = await findKbEvalDatasetPaged(kbDatasetId, (offset) =>
+    listEvalDatasets({ limit: KB_EVAL_DATASET_LIST_LIMIT, offset })
+  );
   if (found) return found;
   return createEvalDataset({
     name: kbEvalDatasetName(kbDatasetId),
@@ -40,28 +44,24 @@ export async function resolveKbEvalDataset(kbDatasetId: string): Promise<EvalDat
 }
 
 /**
- * One-click "send to eval set" (PRD §5-#23): persist a retrieval result as a
- * golden case — input=query, expected_output=relevant segments.
- *
- * The case_id is a deterministic hash of the query, so repeated sends of the
- * same query dedupe through `skip_duplicates` instead of piling up copies. The
- * hit-test console and QA tab share the id space: for one query the first
- * send wins and later sends report as skipped.
- *
- * The deterministic import path remains the idempotency authority. When the
- * gateway has already ingested the backend-generated RAG trace, the same row
- * carries source_trace_id; a short ingest race falls back to the unlinked case
- * instead of failing the user's golden-set action.
+ * Save a failed KB observation to the platform Eval review queue. The observed
+ * hits are evidence, not labels; the user supplies the expected answer. A
+ * repeated save of one trace is deduped by case_id in the authoritative store.
  */
-export async function sendRetrievalCaseToEvalDataset(params: {
+export async function saveKnowledgeFailureToEvalDataset(params: {
   kbDatasetId: string;
   query: string;
-  relevantSegmentIds: string[];
-  source?: string;
+  expectedAnswer: string;
+  observedHits: KnowledgeFailureHit[];
+  source: typeof HIT_TEST_EVAL_SOURCE | typeof QA_EVAL_SOURCE;
   sourceTraceId?: string;
-}): Promise<{ imported: number; skipped: number }> {
-  const query = params.query.trim();
-  if (!query) throw new Error("Cannot send an empty query to the eval set");
+  queryFingerprint?: string;
+  observedAnswer?: string;
+  failureReason?: string;
+}): Promise<{ created: boolean; revision: number }> {
+  if (!params.query.trim() || !params.expectedAnswer.trim()) {
+    throw new Error("Question and expected answer are required");
+  }
   const evalDataset = await resolveKbEvalDataset(params.kbDatasetId);
   let confirmedTraceId: string | undefined;
   if (params.sourceTraceId) {
@@ -74,20 +74,32 @@ export async function sendRetrievalCaseToEvalDataset(params: {
         confirmedTraceId = params.sourceTraceId;
         break;
       } catch {
-        // Trace ingest is best-effort and asynchronous; keep the golden case.
+        // Trace ingest is asynchronous; retain its ID in metadata for review.
       }
     }
   }
-  const item = evalCaseToImportItem({
-    caseId: hitTestEvalCaseId(params.kbDatasetId, query),
-    kbDatasetId: params.kbDatasetId,
-    query,
-    relevantSegmentIds: params.relevantSegmentIds,
-    source: params.source ?? HIT_TEST_EVAL_SOURCE,
-    sourceTraceId: confirmedTraceId,
+  const item = knowledgeFailureToImportItem({ ...params, confirmedTraceId });
+  const latest = await getLatestKbFailureExample(evalDataset.dataset_id, item.case_id);
+  const rawRevision = latest?.metadata?.case_revision;
+  const expectedRevision = latest
+    ? typeof rawRevision === "number" && Number.isInteger(rawRevision) && rawRevision > 0
+      ? rawRevision
+      : 1
+    : 0;
+  const response = await saveKbFailureRevision(evalDataset.dataset_id, {
+    case_id: item.case_id,
+    kb_dataset_id: params.kbDatasetId,
+    query: params.query.trim(),
+    expected_answer: params.expectedAnswer.trim(),
+    source: params.source,
+    observed_segment_ids: params.observedHits.map((hit) => hit.segment_id),
+    source_versions: sourceVersionsFromHits(params.kbDatasetId, params.observedHits),
+    source_trace_id: confirmedTraceId || null,
+    kb_trace_id: params.sourceTraceId || null,
+    query_fingerprint: params.queryFingerprint || null,
+    observed_answer: params.observedAnswer || null,
+    failure_reason: params.failureReason?.trim() || null,
+    expected_revision: expectedRevision,
   });
-  const response = await importEvalExamples(evalDataset.dataset_id, [item], {
-    mode: "skip_duplicates",
-  });
-  return { imported: response.imported, skipped: response.skipped };
+  return { created: response.created, revision: response.revision };
 }

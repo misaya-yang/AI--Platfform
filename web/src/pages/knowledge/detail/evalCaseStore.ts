@@ -21,6 +21,9 @@ import type { EvalDataset, EvalExample, EvalExampleImportItem } from "@/api/eval
 
 export const KB_EVAL_DATASET_SOURCE = "kb-retrieval-workbench";
 export const HIT_TEST_EVAL_SOURCE = "kb-hit-test";
+export const QA_EVAL_SOURCE = "kb-qa";
+export const KB_FAILURE_CASE_KIND = "kb_failure";
+export const KB_FAILURE_EVAL_SPLIT = "review";
 export const KB_EVAL_SPLIT = "regression";
 export const KB_EVAL_DATASET_LIST_LIMIT = 200;
 export const KB_EVAL_EXAMPLE_LIST_LIMIT = 500;
@@ -43,6 +46,24 @@ export function findKbEvalDataset(
   return datasets.find((dataset) => dataset.metadata?.kb_dataset_id === kbDatasetId);
 }
 
+/** Walk the tenant's eval datasets before deciding to create a KB link. */
+export async function findKbEvalDatasetPaged(
+  kbDatasetId: string,
+  loadPage: (offset: number) => Promise<{ datasets: EvalDataset[]; total: number }>
+): Promise<EvalDataset | undefined> {
+  let offset = 0;
+  while (true) {
+    const page = await loadPage(offset);
+    const found = findKbEvalDataset(page.datasets, kbDatasetId);
+    if (found) return found;
+    offset += page.datasets.length;
+    if (offset >= page.total) return undefined;
+    if (page.datasets.length === 0) {
+      throw new Error("Eval dataset listing ended before all datasets were returned");
+    }
+  }
+}
+
 /** Normalize `expected_output.relevant_segment_ids`: strings only, trimmed, deduped, order kept. */
 export function extractRelevantSegmentIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -63,6 +84,7 @@ function metadataCaseId(example: EvalExample): string {
  * (QA references, trace-derived cases) stay in the eval dataset untouched.
  */
 export function exampleToEvalCase(example: EvalExample): PersistedEvalCase | null {
+  if (example.metadata?.source_kind === KB_FAILURE_CASE_KIND) return null;
   const rawQuery = example.input?.query;
   const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
   if (!query) return null;
@@ -71,6 +93,78 @@ export function exampleToEvalCase(example: EvalExample): PersistedEvalCase | nul
     exampleId: example.example_id,
     query,
     relevantSegmentIds: extractRelevantSegmentIds(example.expected_output?.relevant_segment_ids),
+  };
+}
+
+export interface KnowledgeFailureHit {
+  segment_id: string;
+  document_id: string;
+  metadata?: Record<string, unknown>;
+  source_version?: number | null;
+  source_hash?: string | null;
+}
+
+/** Source identity is recorded only when the response contains a complete pair. */
+export function sourceVersionsFromHits(kbDatasetId: string, hits: KnowledgeFailureHit[]) {
+  return hits.flatMap((hit) => {
+    // Only top-level identities emitted by the API's generation fence count.
+    // Segment metadata can contain older, user-authored source fields.
+    const version = hit.source_version;
+    const hash = hit.source_hash;
+    if (
+      !hit.document_id || !hit.segment_id ||
+      typeof version !== "number" || !Number.isInteger(version) || version <= 0 ||
+      typeof hash !== "string" || !/^[0-9a-f]{64}$/i.test(hash)
+    ) return [];
+    return [{
+      kb_dataset_id: kbDatasetId,
+      document_id: hit.document_id,
+      segment_id: hit.segment_id,
+      source_version: version,
+      source_hash: hash.toLowerCase(),
+    }];
+  });
+}
+
+/** Keep a failed observation separate from reviewed regression labels. */
+export function knowledgeFailureToImportItem(params: {
+  kbDatasetId: string;
+  query: string;
+  expectedAnswer: string;
+  observedHits: KnowledgeFailureHit[];
+  source: typeof HIT_TEST_EVAL_SOURCE | typeof QA_EVAL_SOURCE;
+  sourceTraceId?: string;
+  confirmedTraceId?: string;
+  queryFingerprint?: string;
+  observedAnswer?: string;
+  failureReason?: string;
+}): EvalExampleImportItem {
+  const query = params.query.trim();
+  const expectedAnswer = params.expectedAnswer.trim();
+  if (!query || !expectedAnswer) throw new Error("Question and expected answer are required");
+  const observationId = params.sourceTraceId || params.queryFingerprint || query;
+  const caseId = `kb-failure-${params.source}-${hashEvalCaseInput(params.kbDatasetId)}-${hashEvalCaseInput(observationId)}`;
+  return {
+    case_id: caseId,
+    split: KB_FAILURE_EVAL_SPLIT,
+    input: { query },
+    expected_output: { answer: expectedAnswer },
+    expected_trajectory: {},
+    assertions: [],
+    source_trace_id: params.confirmedTraceId || null,
+    metadata: {
+      source: params.source,
+      source_kind: KB_FAILURE_CASE_KIND,
+      review_status: "pending",
+      behavior_confirmed: false,
+      kb_dataset_id: params.kbDatasetId,
+      kb_trace_id: params.sourceTraceId || null,
+      kb_query_fingerprint: params.queryFingerprint || null,
+      kb_observed_segment_ids: params.observedHits.map((hit) => hit.segment_id),
+      kb_source_versions: sourceVersionsFromHits(params.kbDatasetId, params.observedHits),
+      kb_observed_answer: params.observedAnswer || null,
+      kb_failure_reason: params.failureReason?.trim() || null,
+    },
   };
 }
 

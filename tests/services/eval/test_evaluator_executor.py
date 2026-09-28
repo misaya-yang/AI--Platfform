@@ -11,6 +11,7 @@ from ai_gateway_core.eval.evaluator_executor import (
     _parse_llm_score_response,
     _precise_cost_cents,
     build_trajectory_summary,
+    is_runnable_dataset_example,
 )
 
 
@@ -23,6 +24,46 @@ def test_critical_gate_uses_exact_counts_not_rounded_display_rate() -> None:
 def test_precise_eval_cost_is_unknown_without_catalog_pricing() -> None:
     assert _precise_cost_cents("unknown-eval-model", 1000, 1000) is None
     assert _precise_cost_cents("qwen3.7-plus", 1000, 1000) == 0.35
+
+
+def test_review_selection_preserves_legacy_and_requires_approval_and_promotion() -> None:
+    assert is_runnable_dataset_example({"split": "regression", "metadata": {}})
+    assert is_runnable_dataset_example({"split": "regression", "metadata": {"review_status": "approved"}})
+    for status in ("pending", "needs_fix", "rejected", "unexpected"):
+        assert not is_runnable_dataset_example({"split": "regression", "metadata": {"review_status": status}})
+    assert not is_runnable_dataset_example({"split": "review", "metadata": {"review_status": "approved"}})
+    assert not is_runnable_dataset_example({
+        "split": "regression", "source_trace_id": "trace-1",
+        "expected_output": {"answer": "expected"},
+        "metadata": {"case_id": "kb-case", "source_kind": "kb_failure", "review_status": "approved"},
+    })
+
+
+@pytest.mark.asyncio
+async def test_live_worker_rejects_already_queued_kb_case_before_candidate_dispatch() -> None:
+    class LiveRepo(FakeEvalRepository):
+        async def get_experiment_run(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"execution_config": {"evaluators": [{"evaluator_id": "eval-1"}]}}
+
+        async def list_experiment_run_cases(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{"metadata": {"source_kind": "kb_failure"}, "run_case_id": "case-1"}]
+
+    repo = LiveRepo()
+    dispatched = False
+
+    async def candidate_run(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal dispatched
+        dispatched = True
+        return {}
+
+    result = await EvaluatorExecutor(repo, candidate_run=candidate_run).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-kb-review", "evaluator_id": "eval-1", "run_mode": "live_candidate"},
+    )
+    assert result.status == "failed"
+    assert "source ACL" in str(result.error_message)
+    assert dispatched is False
+    assert [call[1]["status"] for call in repo.calls if call[0] == "update_experiment_run"] == ["running", "failed"]
 
 
 class FakeEvalRepository:
@@ -332,6 +373,46 @@ async def test_dataset_run_reads_one_frozen_manifest_and_reports_completeness() 
     page_calls = [call[1] for call in repo.calls if call[0] == "list_examples"]
     assert manifest_calls == [{"tenant_id": "tenant-a", "dataset_id": "dataset-1"}]
     assert page_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_run_excludes_unreviewed_cases_before_trace_resolution_or_scoring() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {"example_id": "legacy", "source_trace_id": "trace-1", "split": "regression"},
+        {"example_id": "approved", "source_trace_id": "trace-1", "split": "regression", "metadata": {"review_status": "approved"}},
+        {"example_id": "pending", "source_trace_id": None, "split": "regression", "metadata": {"review_status": "pending"}},
+        {"example_id": "needs-fix", "source_trace_id": None, "split": "regression", "metadata": {"review_status": "needs_fix"}},
+        {"example_id": "rejected", "source_trace_id": None, "split": "regression", "metadata": {"review_status": "rejected"}},
+        {"example_id": "review-split", "source_trace_id": None, "split": "review", "metadata": {"review_status": "approved"}},
+        {"example_id": "approved-kb", "source_trace_id": "trace-1", "split": "regression", "expected_output": {"answer": "expected"}, "metadata": {"case_id": "kb-case", "source_kind": "kb_failure", "review_status": "approved"}},
+    ]
+    result = await EvaluatorExecutor(repo).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-reviewed-only", "evaluator_id": "eval-1", "dataset_id": "dataset-1"},
+    )
+
+    assert result.status == "succeeded"
+    assert result.score_summary["expected_count"] == 2
+    assert result.scores_written == 2
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert {call[1]["payload"]["metadata"]["example_id"] for call in score_calls} == {"legacy", "approved"}
+
+
+@pytest.mark.asyncio
+async def test_dataset_run_with_only_pending_cases_writes_no_scores() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {"example_id": "pending", "source_trace_id": "trace-1", "split": "review", "metadata": {"review_status": "pending"}},
+    ]
+    result = await EvaluatorExecutor(repo).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-pending-only", "evaluator_id": "eval-1", "dataset_id": "dataset-1"},
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "No evaluation targets resolved"
+    assert not any(call[0] in {"get_trace_detail", "create_eval_score"} for call in repo.calls)
 
 
 @pytest.mark.asyncio

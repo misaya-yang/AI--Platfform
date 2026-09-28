@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -184,3 +185,55 @@ async def test_text_receipt_refuses_unverified_legacy_restore() -> None:
             KnowledgeIngestTask(dataset_id="dataset-a", document_id="doc-a"),
             {"tenant_id": "tenant-a"},
         )
+
+
+@pytest.mark.asyncio
+async def test_unbound_preparing_crash_requeues_original_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = "00000000-0000-4000-8000-000000000101"
+    item = {
+        "execution_id": generation, "generation_id": generation,
+        "dataset_id": "dataset-a", "document_id": "doc-a",
+        "source_hash": "a" * 64,
+    }
+
+    @asynccontextmanager
+    async def document_lease(_dataset_id: str, _document_id: str):
+        yield object()
+
+    database = SimpleNamespace(
+        list_unbound_special_preparations=AsyncMock(return_value=[item]),
+        document_index_update_lease=document_lease,
+        get_special_publication_manifest=AsyncMock(return_value={
+            "phase": "preparing", "publication_revision": None,
+            "generation_id": generation,
+        }),
+        get_dataset=AsyncMock(return_value={"dataset_id": "dataset-a"}),
+        list_unfinished_special_publication_datasets=AsyncMock(return_value=[]),
+    )
+    resumed: list[dict[str, Any]] = []
+
+    class Coordinator:
+        def __init__(self, _service: Any) -> None:
+            pass
+
+        async def abort_preparing(self, *_args: Any, **kwargs: Any) -> bool:
+            resumed.append(kwargs)
+            return True
+
+    monkeypatch.setattr(special_publication, "SpecialPublicationCoordinator", Coordinator)
+    worker = KnowledgeWorker(SimpleNamespace(
+        db=database, settings=SimpleNamespace(knowledge=None),
+    ))
+    worker.enqueue_claimed = AsyncMock()  # type: ignore[method-assign]
+    worker.enqueue = AsyncMock(side_effect=AssertionError("no new execution"))  # type: ignore[method-assign]
+
+    await worker._recover_unfinished_special_publications()
+
+    assert resumed == [{
+        "document_shared_lease_held": True,
+        "resume_same_execution": True,
+    }]
+    worker.enqueue_claimed.assert_awaited_once_with("dataset-a", "doc-a")
+    worker.enqueue.assert_not_awaited()

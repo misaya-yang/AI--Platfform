@@ -1,5 +1,5 @@
 """
-Artifact share API — kind-generic public sharing of agent artifacts.
+Artifact share API — kind-generic public and internal sharing of agent artifacts.
 
 Replaces the quiz-specific share endpoints (product-convergence PC-03).
 kind='quiz' freezes a snapshot of the quiz payload + answer keys; the public
@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from ai_gateway_core.quiz.public_projection import safe_quiz_options
 from ai_gateway_core.sharing import ArtifactShareManager
@@ -21,8 +21,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
-from ...services.assistant_entry.source_access import quiz_source_ids
+from ...services.assistant_entry.source_access import quiz_source_scope, source_scope_allowed
 from ..deps import get_user_context
+from ._internal_share_scope import freeze_source_scope, require_active_internal_user
 
 router = APIRouter(prefix="/artifact-shares", tags=["artifact-shares"])
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class ArtifactShareCreateRequest(BaseModel):
     max_attempts: int | None = Field(None, ge=1, description="Max attempts (None = unlimited)")
     require_name: bool = Field(True, description="Require name before taking")
     time_limit_minutes: int | None = Field(None, ge=1, description="Time limit per attempt in minutes (None = unlimited)")
+    audience: Literal["public", "internal"] = "public"
 
 
 class ArtifactShareCreateResponse(BaseModel):
@@ -48,6 +50,7 @@ class ArtifactShareCreateResponse(BaseModel):
     time_limit_minutes: int | None
     quiz_id: uuid.UUID
     quiz_title: str
+    audience: Literal["public", "internal"]
 
 
 class ArtifactShareRevokeResponse(BaseModel):
@@ -63,6 +66,7 @@ class ArtifactShareSummary(BaseModel):
     expires_at: datetime | None
     revoked_at: datetime | None
     require_name: bool
+    audience: Literal["public", "internal"] = "public"
 
 
 @router.get("", response_model=list[ArtifactShareSummary])
@@ -79,7 +83,7 @@ async def list_artifact_shares(
         raise HTTPException(503, "Database not available")
     rows = await db.fetch(
         """
-        SELECT id AS share_id, share_code, is_active, created_at, expires_at,
+        SELECT id AS share_id, share_code, is_active, created_at, expires_at, audience,
                revoked_at, require_name,
                (expires_at IS NOT NULL AND expires_at <= NOW()) AS expired
           FROM assistant.artifact_shares
@@ -98,7 +102,7 @@ async def create_artifact_share(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Create a public share with a frozen artifact snapshot."""
+    """Create a frozen artifact snapshot under the selected audience policy."""
     db = getattr(request.app.state, "database", None)
     if db is None:
         raise HTTPException(503, "Database not available")
@@ -119,8 +123,18 @@ async def create_artifact_share(
     )
     if not quiz_row:
         raise HTTPException(404, "Quiz not found or not authorized")
-    if await quiz_source_ids(request, body.quiz_id, user.tenant_id, require_origin=True):
-        raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
+    datasets, documents, versions = await quiz_source_scope(
+        request, body.quiz_id, user.tenant_id, require_origin=True,
+    )
+    source_scope = None
+    if body.audience == "public":
+        if datasets or documents or versions:
+            raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
+    else:
+        await require_active_internal_user(request, user, user.tenant_id or "")
+        source_scope = freeze_source_scope(datasets, documents, versions)
+        if not await source_scope_allowed(request, user, datasets, documents, versioned_refs=versions):
+            raise HTTPException(403, "Quiz source access has been revoked")
 
     # Freeze a snapshot: public questions + grading answer keys.
     q_rows = await db.fetch(
@@ -172,6 +186,8 @@ async def create_artifact_share(
         max_attempts=body.max_attempts,
         require_name=body.require_name,
         time_limit_minutes=body.time_limit_minutes,
+        audience=body.audience,
+        source_scope=source_scope,
     )
     return {**share, "quiz_id": body.quiz_id, "quiz_title": quiz_row["title"]}
 

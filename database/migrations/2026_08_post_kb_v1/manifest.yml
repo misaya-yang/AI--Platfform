@@ -1,6 +1,6 @@
 {
   "baseline_id": "2026_08_post_kb_v1",
-  "epoch": 4,
+  "epoch": 6,
   "changes": [
     {
       "sequence": 1,
@@ -88,6 +88,50 @@
       "resume_handler": null,
       "repair_handler": null,
       "notes": "R1 J03: fenced Rust execution ownership, durable original invocation and dispatch authority. Quiesce old Runtime before migration."
+    },
+    {
+      "sequence": 5,
+      "name": "knowledge_dataset_archive",
+      "file": "005_knowledge_dataset_archive.sql",
+      "sha256": "13a08304508c8ab686116e2d597a80a5079f27642c3cdac383a1285aca474b81",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('knowledge.datasets') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='datasets' AND column_name='is_archived')"
+      ],
+      "postconditions": [
+        "SELECT count(*)=4 FROM information_schema.columns WHERE table_schema='knowledge' AND table_name='datasets' AND column_name IN ('is_archived','archived_at','archived_by','archive_reason')",
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='knowledge.datasets'::regclass AND conname='dataset_archive_state_consistent')",
+        "SELECT to_regclass('knowledge.idx_datasets_archived_tenant_created_at') IS NOT NULL"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "KNO-01: owner-only reversible dataset archive; content, ACL and Agent bindings remain intact while new readers exclude archived datasets. Old Knowledge binaries must not serve archived rows."
+    },
+    {
+      "sequence": 6,
+      "name": "assistant_internal_share_scope",
+      "file": "006_assistant_internal_share_scope.sql",
+      "sha256": "d47e7d07ad46588859ccf136aa949c5467b363bc0ed4192a81e7cdcd40a29249",
+      "owner": "owner",
+      "transaction_mode": "transactional",
+      "rollback_class": "forward-fix-only",
+      "preconditions": [
+        "SELECT to_regclass('assistant.conversation_shares') IS NOT NULL AND to_regclass('assistant.artifact_shares') IS NOT NULL",
+        "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='assistant' AND table_name IN ('conversation_shares','artifact_shares') AND column_name='audience')"
+      ],
+      "postconditions": [
+        "SELECT count(*)=4 FROM information_schema.columns WHERE table_schema='assistant' AND table_name IN ('conversation_shares','artifact_shares') AND column_name IN ('audience','source_scope')",
+        "SELECT count(*)=4 FROM pg_constraint WHERE connamespace='assistant'::regnamespace AND conname IN ('conversation_shares_audience_check','conversation_shares_scope_check','artifact_shares_audience_check','artifact_shares_scope_check')"
+      ],
+      "timeout_seconds": 300,
+      "lock_budget_seconds": 10,
+      "resume_handler": null,
+      "repair_handler": null,
+      "notes": "AR-06: public shares retain their legacy audience by default; internal shares require a private JSON object source scope. New Gateway readers must enforce audience before internal writes are enabled."
     }
   ]
 }

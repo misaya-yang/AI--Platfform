@@ -699,6 +699,112 @@ class DatabaseAgentRepository(BaseRepository):
             next_cursor = _encode_cursor(last["updated_at"], last["agent_id"])
         return {"items": [_row_to_dict(row) for row in page], "next_cursor": next_cursor}
 
+    async def get_dataset_impact(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        user_id: str,
+        is_tenant_admin: bool,
+    ) -> dict[str, Any]:
+        """Count Agent references to a Dataset, revealing names only under Agent ACL."""
+        self._require_enabled()
+        rows = await self.fetch(
+            """
+            WITH draft_refs AS (
+                SELECT a.agent_id
+                FROM agent_draft_knowledge_bindings b
+                JOIN agents a
+                  ON a.tenant_id = b.tenant_id
+                 AND a.current_draft_id = b.draft_id
+                WHERE b.tenant_id = $1 AND b.dataset_id = $2
+            ),
+            version_refs AS (
+                SELECT v.agent_id,
+                       BOOL_OR(p.publication_id IS NOT NULL) AS active_publication,
+                       COUNT(DISTINCT v.agent_version_id) FILTER (
+                           WHERE p.publication_id IS NULL
+                       ) AS historical_version_count
+                FROM agent_version_knowledge_bindings b
+                JOIN agent_versions v
+                  ON v.tenant_id = b.tenant_id
+                 AND v.agent_version_id = b.agent_version_id
+                LEFT JOIN agent_publications p
+                  ON p.tenant_id = v.tenant_id
+                 AND p.agent_id = v.agent_id
+                 AND p.version_id = v.agent_version_id
+                 AND p.status = 'active'
+                WHERE b.tenant_id = $1 AND b.dataset_id = $2
+                GROUP BY v.agent_id
+            ),
+            referenced_agents AS (
+                SELECT agent_id FROM draft_refs
+                UNION
+                SELECT agent_id FROM version_refs
+            )
+            SELECT a.agent_id, a.name,
+                   a.deleted_at IS NULL
+                     AND current_draft.draft_id IS NOT NULL
+                     AND ($4::boolean OR self_member.principal_id IS NOT NULL) AS visible,
+                   d.agent_id IS NOT NULL AS current_draft,
+                   COALESCE(v.active_publication, FALSE) AS active_publication,
+                   COALESCE(v.historical_version_count, 0) AS historical_version_count
+            FROM referenced_agents r
+            JOIN agents a ON a.tenant_id = $1 AND a.agent_id = r.agent_id
+            LEFT JOIN agent_drafts current_draft
+              ON current_draft.tenant_id = a.tenant_id
+             AND current_draft.draft_id = a.current_draft_id
+            LEFT JOIN draft_refs d ON d.agent_id = a.agent_id
+            LEFT JOIN version_refs v ON v.agent_id = a.agent_id
+            LEFT JOIN agent_members self_member
+              ON self_member.tenant_id = a.tenant_id
+             AND self_member.agent_id = a.agent_id
+             AND self_member.principal_type = 'user'
+             AND self_member.principal_id = $3
+            ORDER BY a.name, a.agent_id
+            """,
+            tenant_id,
+            dataset_id,
+            user_id,
+            is_tenant_admin,
+        )
+        counts = {
+            category: {"visible": 0, "hidden": 0}
+            for category in ("current_draft", "active_publication", "historical_version")
+        }
+        visible_agents: list[dict[str, Any]] = []
+        hidden_agent_count = 0
+        for row in rows:
+            visible = bool(row["visible"])
+            bucket = "visible" if visible else "hidden"
+            current_draft = bool(row["current_draft"])
+            active_publication = bool(row["active_publication"])
+            historical_version_count = int(row["historical_version_count"])
+            if current_draft:
+                counts["current_draft"][bucket] += 1
+            if active_publication:
+                counts["active_publication"][bucket] += 1
+            if historical_version_count:
+                counts["historical_version"][bucket] += 1
+            if visible:
+                visible_agents.append(
+                    {
+                        "agent_id": str(row["agent_id"]),
+                        "name": str(row["name"]),
+                        "current_draft": current_draft,
+                        "active_publication": active_publication,
+                        "historical_version_count": historical_version_count,
+                    }
+                )
+            else:
+                hidden_agent_count += 1
+        return {
+            "dataset_id": dataset_id,
+            "visible_agents": visible_agents,
+            "hidden_agent_count": hidden_agent_count,
+            "counts": counts,
+        }
+
     async def get_agent(
         self,
         *,

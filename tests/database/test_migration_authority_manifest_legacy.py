@@ -175,6 +175,8 @@ def test_checked_in_epoch_and_legacy_manifests_are_valid_and_complete() -> None:
         (2, "gateway_eval_leases"),
         (3, "assistant_quiz_attempt_idempotency"),
         (4, "runtime_durable_recovery"),
+        (5, "knowledge_dataset_archive"),
+        (6, "assistant_internal_share_scope"),
     ]
     assert len(legacy.changes) == 108
     assert legacy.freeze_point == "112_kb_document_progress_retention.sql"

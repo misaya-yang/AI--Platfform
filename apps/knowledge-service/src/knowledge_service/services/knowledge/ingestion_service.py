@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -969,6 +970,7 @@ class IngestionService:
             chunks_to_embed = []  # (position, text, token_count, hash, meta, old_seg)
             unchanged_segments = []  # serving segment_ids kept as-is
             staged_resumable = []  # staged segment_ids only needing the flip
+            staged_candidates = []  # chunk inputs whose staged points need proof
             excess_segments = []  # old segment_ids beyond the new chunk range
             excess_vectors = []  # vector ids owned by excess segments
 
@@ -977,9 +979,11 @@ class IngestionService:
                 if old_seg and old_seg.get("content_hash") == content_hash:
                     if str(old_seg.get("status") or "completed") == "indexing":
                         # A prior generation persisted this exact content but
-                        # never flipped it to serving; finish the flip instead
-                        # of re-embedding it.
-                        staged_resumable.append(old_seg["segment_id"])
+                        # never flipped it to serving. Its vector must be
+                        # checked before we can finish the flip.
+                        staged_candidates.append(
+                            (pos, text, token_count, content_hash, chunk_meta, old_seg)
+                        )
                     else:
                         unchanged_segments.append(old_seg["segment_id"])
                         logger.debug(
@@ -1005,7 +1009,7 @@ class IngestionService:
             logger.info(
                 f"Incremental upsert for document {document_id}: "
                 f"{len(unchanged_segments)} unchanged, "
-                f"{len(staged_resumable)} staged-resumable, "
+                f"{len(staged_candidates)} staged candidates, "
                 f"{len(chunks_to_embed)} to embed, "
                 f"{len(excess_segments)} excess to delete after staging"
             )
@@ -1085,6 +1089,44 @@ class IngestionService:
                     tenant_id=dataset_tenant_id,
                     **({"lexical_config": lexical_config} if lexical_config.configured else {}),
                 )
+                if staged_candidates:
+                    staged_point_ids = [
+                        str(candidate[5].get("vector_id") or candidate[5]["segment_id"])
+                        for candidate in staged_candidates
+                    ]
+                    staged_points = await self._snapshot_points_for_rollback(
+                        collection=collection,
+                        point_ids=staged_point_ids,
+                        tenant_id=dataset_tenant_id,
+                        dataset_id=dataset_id,
+                    )
+                    for candidate, point_id in zip(
+                        staged_candidates, staged_point_ids, strict=True,
+                    ):
+                        pos, chunk_text, _, _, _, old_seg = candidate
+                        point = staged_points.get(point_id)
+                        if point is None:
+                            # A crash or external loss can leave a staged row
+                            # without its vector. Rebuild it before activation.
+                            chunks_to_embed.append(candidate)
+                            continue
+                        payload = getattr(point, "payload", None)
+                        if not isinstance(payload, dict) or any(
+                            payload.get(key) != value
+                            for key, value in (
+                                ("tenant_id", dataset_tenant_id),
+                                ("dataset_id", dataset_id),
+                                ("document_id", document_id),
+                                ("segment_id", old_seg["segment_id"]),
+                                ("position", pos),
+                                ("text", chunk_text),
+                            )
+                        ) or payload.get("content_type", "text") != "text":
+                            raise RuntimeError(
+                                "staged text vector identity changed before replay"
+                            )
+                        staged_resumable.append(old_seg["segment_id"])
+                    chunks_to_embed.sort(key=lambda chunk: chunk[0])
             except IndexLeaseUnavailableError:
                 # A concurrent lifecycle or blue-green transition owns the
                 # publication fence. This is retryable queue contention, not
@@ -1153,6 +1195,20 @@ class IngestionService:
                         async with semaphore:
                             try:
                                 vectors = await embedder.embed_documents(texts)
+                                if not isinstance(vectors, list) or len(vectors) != len(batch):
+                                    raise RuntimeError("embedding batch is incomplete")
+                                if any(
+                                    not isinstance(vector, list)
+                                    or len(vector) != dim
+                                    or any(
+                                        isinstance(value, bool)
+                                        or not isinstance(value, (int, float))
+                                        or not math.isfinite(value)
+                                        for value in vector
+                                    )
+                                    for vector in vectors
+                                ):
+                                    raise RuntimeError("embedding batch contains an invalid vector")
                                 return (batch_idx, vectors, batch)
                             except Exception as embed_err:
                                 text_lengths = [len(t) for t in texts]

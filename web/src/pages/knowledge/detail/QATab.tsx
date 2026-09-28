@@ -23,13 +23,12 @@ import {
   Send,
   Zap,
   Brain,
-  BookmarkPlus,
   Database,
 } from "lucide-react";
 
 import { qaQuery, qaQueryStream } from "@/api/knowledge";
-import { toast } from "@/hooks/use-toast";
-import { sendRetrievalCaseToEvalDataset } from "@/pages/knowledge/detail/kbEvalDataset";
+import { SaveKnowledgeFailureDialog } from "@/pages/knowledge/detail/SaveKnowledgeFailureDialog";
+import { QA_EVAL_SOURCE } from "@/pages/knowledge/detail/evalCaseStore";
 import type { LLMConfig, QAResponse, QAStreamEvent } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
@@ -55,6 +54,7 @@ type QAChatMessage = {
   role: "user" | "assistant";
   content: string;
   status: "pending" | "done" | "error";
+  query?: string;
   response?: QAResponse;
 };
 
@@ -104,46 +104,6 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
   const [qaShowSources, setQaShowSources] = useState(true);
   const [qaAutoScroll, setQaAutoScroll] = useState(true);
   const [qaStrictMode, setQaStrictMode] = useState(false);
-  const [sendingEvalMessageIds, setSendingEvalMessageIds] = useState<Set<string>>(new Set());
-
-  // One-click "send to eval set" (PRD §5-#23): a QA turn becomes a golden
-  // case — input=query, expected_output=the context segments the answer was
-  // grounded on. The case_id is shared with the hit-test console, so the same
-  // query dedupes instead of duplicating.
-  async function sendQaToEvalSet(message: QAChatMessage) {
-    if (!datasetId || !message.response || sendingEvalMessageIds.has(message.id)) return;
-    const queryText = message.response.query?.trim();
-    if (!queryText) return;
-    const segmentIds = message.response.context_segments.map((segment) => segment.segment_id);
-    setSendingEvalMessageIds((previous) => new Set(previous).add(message.id));
-    try {
-      const result = await sendRetrievalCaseToEvalDataset({
-        kbDatasetId: datasetId,
-        query: queryText,
-        relevantSegmentIds: segmentIds,
-        sourceTraceId: message.response.trace_id || undefined,
-      });
-      toast.success(
-        t("knowledge.detail.sentToEvalTitle"),
-        t("knowledge.detail.sentToEvalText", {
-          imported: result.imported,
-          skipped: result.skipped,
-        })
-      );
-    } catch (error: unknown) {
-      toast.error(
-        t("knowledge.detail.sendToEvalFailed"),
-        error instanceof Error ? error.message : String(error)
-      );
-    } finally {
-      setSendingEvalMessageIds((previous) => {
-        const next = new Set(previous);
-        next.delete(message.id);
-        return next;
-      });
-    }
-  }
-
   useEffect(() => {
     if (!qaAutoScroll) return;
     qaChatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -178,7 +138,7 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
     setQaMessages((prev) => [
       ...prev,
       { id: userMessageId, role: "user", content: queryText, status: "done" },
-      { id: assistantMessageId, role: "assistant", content: "", status: "pending" },
+      { id: assistantMessageId, role: "assistant", content: "", status: "pending", query: queryText },
     ]);
     const updateAssistant = (patch: Partial<QAChatMessage>) => {
       setQaMessages((prev) =>
@@ -634,6 +594,16 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
                             )}
                           </div>
 
+                          {msg.role === "assistant" && msg.status === "error" && msg.query && (
+                            <SaveKnowledgeFailureDialog
+                              kbDatasetId={datasetId}
+                              query={msg.query}
+                              observedHits={[]}
+                              source={QA_EVAL_SOURCE}
+                              testId={`send-qa-to-eval-${msg.id}`}
+                            />
+                          )}
+
                           {msg.role === "assistant" && msg.response && (
                             <div className="space-y-2">
                               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -650,21 +620,16 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
                                 </span>
                                 <span>{t("knowledge.detail.qaTotalTiming", { ms: msg.response.timing.total_ms })}</span>
                                 {msg.response.tokens_used && <span>Tokens {msg.response.tokens_used}</span>}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-6 px-2 text-xs"
-                                  onClick={() => sendQaToEvalSet(msg)}
-                                  disabled={sendingEvalMessageIds.has(msg.id)}
-                                  data-testid={`send-qa-to-eval-${msg.id}`}
-                                >
-                                  {sendingEvalMessageIds.has(msg.id) ? (
-                                    <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden="true" />
-                                  ) : (
-                                    <BookmarkPlus className="mr-1 h-3 w-3" aria-hidden="true" />
-                                  )}
-                                  {t("knowledge.detail.sendToEval")}
-                                </Button>
+                                <SaveKnowledgeFailureDialog
+                                  kbDatasetId={datasetId}
+                                  query={msg.query || msg.response.query}
+                                  observedHits={msg.response.context_segments}
+                                  source={QA_EVAL_SOURCE}
+                                  sourceTraceId={msg.response.trace_id || undefined}
+                                  queryFingerprint={msg.response.query_fingerprint || undefined}
+                                  observedAnswer={msg.response.answer}
+                                  testId={`send-qa-to-eval-${msg.id}`}
+                                />
                               </div>
 
                               {datasetId && msg.response.trace_id && msg.response.query_fingerprint && (

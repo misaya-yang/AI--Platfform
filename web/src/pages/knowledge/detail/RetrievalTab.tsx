@@ -10,11 +10,9 @@
  * it with `hidden`) so all state survives tab switches exactly as before.
  */
 
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import {
-  BookmarkPlus,
   HelpCircle,
   ImageIcon,
   Loader2,
@@ -23,8 +21,8 @@ import {
   Search,
 } from "lucide-react";
 
-import { toast } from "@/hooks/use-toast";
-import { sendRetrievalCaseToEvalDataset } from "@/pages/knowledge/detail/kbEvalDataset";
+import { SaveKnowledgeFailureDialog } from "@/pages/knowledge/detail/SaveKnowledgeFailureDialog";
+import { HIT_TEST_EVAL_SOURCE } from "@/pages/knowledge/detail/evalCaseStore";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -78,41 +76,11 @@ export function RetrievalTab({ datasetId, hitTest }: RetrievalTabProps) {
     hitMeta,
     hitTraceId,
     hitQueryFingerprint,
+    hitExecutedQuery,
     invalidateHitTestResults,
     runHitTest,
     runRagasScore,
   } = hitTest;
-
-  const [sendingHitsToEval, setSendingHitsToEval] = useState(false);
-
-  // One-click "send to eval set" (PRD §5-#23): the current query plus the hit
-  // segments become a golden case; repeated sends dedupe by case_id.
-  async function sendHitsToEvalSet() {
-    if (!datasetId || hitResults.length === 0 || sendingHitsToEval) return;
-    setSendingHitsToEval(true);
-    try {
-      const result = await sendRetrievalCaseToEvalDataset({
-        kbDatasetId: datasetId,
-        query,
-        relevantSegmentIds: hitResults.map((hit) => hit.segment_id),
-        sourceTraceId: hitTraceId || undefined,
-      });
-      toast.success(
-        t("knowledge.detail.sentToEvalTitle"),
-        t("knowledge.detail.sentToEvalText", {
-          imported: result.imported,
-          skipped: result.skipped,
-        })
-      );
-    } catch (error: unknown) {
-      toast.error(
-        t("knowledge.detail.sendToEvalFailed"),
-        error instanceof Error ? error.message : String(error)
-      );
-    } finally {
-      setSendingHitsToEval(false);
-    }
-  }
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -508,27 +476,25 @@ export function RetrievalTab({ datasetId, hitTest }: RetrievalTabProps) {
                 </Badge>
               )}
             </div>
-            {hitResults.length > 0 && (
+            {hitExecutedQuery && (
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={sendHitsToEvalSet}
-                  disabled={sendingHitsToEval || !datasetId}
-                  data-testid="send-hits-to-eval"
-                >
-                  {sendingHitsToEval ? (
-                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <BookmarkPlus className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
-                  )}
-                  {t("knowledge.detail.sendToEval")}
-                </Button>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span>{t("knowledge.detail.highestScore", { score: Math.max(...hitResults.map(h => h.score)).toFixed(4) })}</span>
-                  <span>·</span>
-                  <span>{t("knowledge.detail.lowestScore", { score: Math.min(...hitResults.map(h => h.score)).toFixed(4) })}</span>
-                </div>
+                <SaveKnowledgeFailureDialog
+                  kbDatasetId={datasetId}
+                  query={hitExecutedQuery}
+                  observedHits={hitResults}
+                  source={HIT_TEST_EVAL_SOURCE}
+                  sourceTraceId={hitTraceId || undefined}
+                  queryFingerprint={hitQueryFingerprint || undefined}
+                  disabled={hitLoading}
+                  testId="send-hits-to-eval"
+                />
+                {hitResults.length > 0 && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>{t("knowledge.detail.highestScore", { score: Math.max(...hitResults.map(h => h.score)).toFixed(4) })}</span>
+                    <span>·</span>
+                    <span>{t("knowledge.detail.lowestScore", { score: Math.min(...hitResults.map(h => h.score)).toFixed(4) })}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

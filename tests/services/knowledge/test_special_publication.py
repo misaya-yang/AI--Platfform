@@ -117,6 +117,17 @@ class Database:
         assert content_type == "text" and connection is self.connection
         return set(self.operator_disabled_positions)
 
+    async def resume_special_preparing_execution(
+        self, _execution_id: str, _document_id: str, _dataset_id: str,
+        _generation_id: str, _source_hash: str, *, connection: Any,
+    ) -> None:
+        assert connection is self.connection and connection.depth > 0
+        assert self.special["phase"] == "preparing" and self.execution_status == "running"
+        self.special = {}
+        self.document["status"] = "waiting"
+        self.document["metadata"].pop("_special_publication_generation_id", None)
+        self.events.append("preparing_requeued")
+
     async def get_special_publication_manifest(
         self, _execution_id: str, *, connection: Any = None,
     ) -> dict[str, Any]:
@@ -939,7 +950,8 @@ async def test_failed_object_cleanup_preserves_negative_until_recovery() -> None
     assert db.special["phase"] == "preparing" and db.revision < 0
     storage.fail_delete = False
     assert await coordinator.recover_unfinished(DATASET)
-    assert db.special["phase"] == "aborted" and db.revision > 0
+    assert db.special == {} and db.document["status"] == "waiting" and db.revision > 0
+    assert db.execution_status == "running"
     assert storage.objects == set()
 
 
@@ -954,6 +966,7 @@ async def test_false_object_delete_preserves_negative_until_verified_recovery() 
     storage.false_delete = False
     assert await coordinator.recover_unfinished(DATASET)
     assert storage.objects == set() and db.revision > 0
+    assert db.special == {} and db.document["status"] == "waiting"
 
 
 @pytest.mark.asyncio

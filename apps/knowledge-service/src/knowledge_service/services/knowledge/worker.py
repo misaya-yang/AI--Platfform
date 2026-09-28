@@ -395,7 +395,7 @@ class DurableEnqueueProxy(_KnowledgeReplayAdmission):
     ) -> bool:
         dataset = await self.service.db.get_dataset(dataset_id)
         if not dataset:
-            raise RuntimeError("dataset was deleted before enqueue")
+            return False
         index_config = dataset.get("index_config") or {}
         if not isinstance(index_config, dict):
             raise RuntimeError("dataset index_config is invalid")
@@ -415,6 +415,7 @@ class DurableEnqueueProxy(_KnowledgeReplayAdmission):
                 action=action,
                 recover_stage=recover_stage,
                 execution_id=execution_id,
+                pin_execution_rule=action in REPLAY_SNAPSHOT_ACTIONS,
             )
         )
 
@@ -784,13 +785,11 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     await coordinator.abort_preparing(
                         dataset, item["execution_id"], item["generation_id"],
                         item["source_hash"], document_shared_lease_held=True,
+                        resume_same_execution=True,
                     )
                     resume = True
                 if resume:
-                    await self.enqueue(
-                        dataset_id, document_id,
-                        action="recover", recover_stage="indexing",
-                    )
+                    await self.enqueue_claimed(dataset_id, document_id)
             except Exception:
                 logger.exception(
                     "Unbound special preparation recovery failed",
@@ -811,10 +810,15 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                 )
                 await coordinator.recover_unfinished(dataset)
                 if owner.get("phase") != "committed":
-                    await self.enqueue(
-                        str(owner["dataset_id"]), str(owner["document_id"]),
-                        action="recover", recover_stage="indexing",
-                    )
+                    if owner.get("phase") == "preparing":
+                        await self.enqueue_claimed(
+                            str(owner["dataset_id"]), str(owner["document_id"]),
+                        )
+                    else:
+                        await self.enqueue(
+                            str(owner["dataset_id"]), str(owner["document_id"]),
+                            action="recover", recover_stage="indexing",
+                        )
             except Exception:
                 logger.exception(
                     "Special publication recovery remains fenced",
@@ -834,7 +838,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
 
         dataset = await self.service.db.get_dataset(dataset_id)
         if not dataset:
-            raise RuntimeError("dataset was deleted before enqueue")
+            return False
         index_config = dataset.get("index_config") or {}
         if not isinstance(index_config, dict):
             raise RuntimeError("dataset index_config is invalid")
@@ -853,6 +857,7 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             action=action,
             recover_stage=recover_stage,
             execution_id=execution_id,
+            pin_execution_rule=action in REPLAY_SNAPSHOT_ACTIONS,
         ):
             logger.info(
                 "Skipped duplicate/ineligible document enqueue",
@@ -1300,6 +1305,15 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     connection=connection,
                 )
             except Exception:
+                # A specialized publisher can leave a durable preparing
+                # manifest before any external write. Its crash replay needs
+                # this exact rule; never begin that publisher without one.
+                if processing_mode in {"auto", "multimodal", "scanned"} or self._hierarchical_opted_in(
+                    index_config
+                ):
+                    raise RuntimeError(
+                        "special generation requires a durable process-rule snapshot"
+                    )
                 logger.warning(
                     "Process-rule snapshot record failed; non-replay generation continues",
                     extra={
@@ -1317,9 +1331,19 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             "processing_mode": processing_mode,
         }
         trigger_source = "recover" if action == "recover" else "worker"
+
+        @contextlib.asynccontextmanager
+        async def execution_transaction():
+            begin = getattr(connection, "transaction", None)
+            if callable(begin):
+                async with begin():
+                    yield
+            else:
+                yield
+
         try:
-            execution_id = str(
-                await record(
+            async with execution_transaction():
+                execution_id = str(await record(
                     task.document_id,
                     task.dataset_id,
                     action=action,
@@ -1327,43 +1351,25 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                     process_rule_id=process_rule_id,
                     input_snapshot=snapshot,
                     connection=connection,
+                ) or "").strip()
+                if not execution_id:
+                    raise RuntimeError("pipeline execution ledger returned no id")
+                linked = await link(
+                    task.document_id, execution_id, connection=connection,
                 )
-                or ""
-            ).strip()
+                if not linked:
+                    raise RuntimeError("pipeline execution link was not persisted")
         except Exception:
             if replay_action:
                 raise
             logger.warning(
-                "Pipeline execution ledger entry failed; non-replay generation continues",
+                "Pipeline execution record/link failed; non-replay generation continues",
                 extra={
                     "dataset_id": task.dataset_id,
                     "document_id": task.document_id,
                 },
                 exc_info=True,
             )
-            return linked_execution_id
-        if not execution_id:
-            if replay_action:
-                raise RuntimeError("pipeline execution ledger returned no id")
-            return linked_execution_id
-        try:
-            linked = await link(
-                task.document_id,
-                execution_id,
-                connection=connection,
-            )
-        except Exception:
-            if replay_action:
-                raise
-            logger.warning(
-                "Pipeline execution link failed; non-replay generation continues",
-                extra={"execution_id": execution_id},
-                exc_info=True,
-            )
-            return linked_execution_id
-        if not linked:
-            if replay_action:
-                raise RuntimeError("pipeline execution link was not persisted")
             return linked_execution_id
         return execution_id
 
@@ -1812,10 +1818,26 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
                 "structured parsing is disabled until a trusted source receipt exists"
             )
         verb = str(metadata.get(DOCUMENT_INGEST_ACTION_KEY) or "ingest").strip().lower()
-        if verb in REPLAY_SNAPSHOT_ACTIONS:
+        execution_id = str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip()
+        interrupted_ingest = False
+        if verb == "ingest" and execution_id:
+            execution = await self.service.db.get_pipeline_execution(
+                execution_id, connection=connection,
+            )
+            manifest = (execution or {}).get("manifest") if isinstance(execution, dict) else None
+            if isinstance(manifest, str):
+                try:
+                    manifest = json.loads(manifest)
+                except json.JSONDecodeError:
+                    manifest = None
+            interrupted_ingest = (
+                isinstance(manifest, dict)
+                and manifest.get("preparing_replayed_after_restart") is True
+            )
+        if verb in REPLAY_SNAPSHOT_ACTIONS or interrupted_ingest:
             replay_snapshot = await self._load_replay_snapshot(
                 task,
-                str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip(),
+                execution_id,
                 document,
                 expected_action=verb,
                 connection=connection,
@@ -1929,11 +1951,26 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             str(metadata.get(DOCUMENT_RECOVER_STAGE_KEY) or "").strip().lower()
         )
         execution_id = str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip()
+        replay_interrupted_ingest = False
+        if verb == "ingest" and execution_id:
+            get_execution = getattr(self.service.db, "get_pipeline_execution", None)
+            if callable(get_execution):
+                execution = await get_execution(execution_id, connection=connection)
+                manifest = (execution or {}).get("manifest") if isinstance(execution, dict) else None
+                if isinstance(manifest, str):
+                    try:
+                        manifest = json.loads(manifest)
+                    except json.JSONDecodeError:
+                        manifest = None
+                replay_interrupted_ingest = (
+                    isinstance(manifest, dict)
+                    and manifest.get("preparing_replayed_after_restart") is True
+                )
         # Addendum §1-T1.3: replay semantics belong to the VERB, not merely to
         # the presence of a ledger row. Both durable snapshots must agree;
         # failure or corruption is terminal instead of silently selecting the
         # dataset's current configuration.
-        if verb in REPLAY_SNAPSHOT_ACTIONS:
+        if verb in REPLAY_SNAPSHOT_ACTIONS or replay_interrupted_ingest:
             replay_snapshot = await self._load_replay_snapshot(
                 task,
                 execution_id,
@@ -2014,6 +2051,13 @@ class KnowledgeWorker(_KnowledgeReplayAdmission):
             )
 
         mode_str = replay_mode or metadata.get("processing_mode", "text_only")
+        if replay_interrupted_ingest and replay_mode == "auto":
+            # Auto detection may have durably selected a concrete mode before
+            # the preparing crash. Reuse that decision for this same execution
+            # instead of repeating a CAS that still expects metadata='auto'.
+            resolved_mode = metadata.get("processing_mode")
+            if resolved_mode in {"text_only", "scanned", "multimodal"}:
+                mode_str = resolved_mode
         file_size = doc.get("size_bytes", 0)
         is_large_file = file_size > self.large_file_threshold
 

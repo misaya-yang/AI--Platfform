@@ -58,7 +58,10 @@ class DurableQueueDatabase:
         action: str | None = None,
         recover_stage: str | None = None,
         execution_id: str | None = None,
+        pin_execution_rule: bool = False,
     ) -> bool:
+        if pin_execution_rule:
+            assert action in {"reprocess", "recover", "retry"} and execution_id
         async with self.document_index_update_lease(dataset_id, document_id):
             if self.status not in {"uploaded", "completed", "failed"}:
                 self.events.append("enqueue-duplicate")
@@ -614,6 +617,7 @@ async def test_enqueue_threads_recover_stage_for_recover_action() -> None:
             "document-a",
             action="recover",
             recover_stage="indexing",
+            execution_id="exec-recover",
         )
         is True
     )

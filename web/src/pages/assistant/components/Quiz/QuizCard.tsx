@@ -98,7 +98,7 @@ export function QuizCard({
   // all use the same key.
   const scopeId =
     scope === "share"
-      ? shareCode || "share-unknown"
+      ? `${shareCode || "share-unknown"}${userScopeId ? `:${userScopeId}` : ""}`
       : userScopeId || authUserId || "user";
 
   // --- hydrate -----------------------------------------------------------

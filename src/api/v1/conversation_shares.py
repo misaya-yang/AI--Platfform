@@ -1,4 +1,4 @@
-"""Conversation Share API — share assistant conversations with artifacts as public snapshots."""
+"""Conversation Share API — frozen public or access-controlled internal snapshots."""
 
 from __future__ import annotations
 
@@ -9,21 +9,30 @@ import string
 import uuid
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.quiz import QuizGrader
 from ai_gateway_core.quiz.public_projection import safe_quiz_options
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
 from ...services.agent_runtime.thread_store import AgentThreadStore
-from ...services.assistant_entry.source_access import conversation_sources, quiz_source_scope
+from ...services.assistant_entry.source_access import (
+    conversation_sources,
+    quiz_source_scope,
+    source_scope_allowed,
+)
 from ..deps import enforce_rate_limit, get_user_context
 from ._artifact_headers import attachment_content_disposition
+from ._internal_share_scope import (
+    freeze_source_scope,
+    require_active_internal_user,
+    require_internal_share_access,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/assistant", tags=["conversation-shares"])
@@ -35,6 +44,7 @@ class CreateShareRequest(BaseModel):
     expires_days: int | None = Field(None, ge=1, le=365)
     include_artifacts: bool = True
     preview_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    audience: Literal["public", "internal"] = "public"
 
 
 class ShareResponse(BaseModel):
@@ -45,6 +55,7 @@ class ShareResponse(BaseModel):
     artifact_count: int
     created_at: str
     expires_at: str | None
+    audience: Literal["public", "internal"]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -73,10 +84,11 @@ async def _collect_quiz_payloads(
     *,
     tenant_id: str,
     user_id: str,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    audience: Literal["public", "internal"],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], tuple[set[str], set[tuple[str, str]], set[tuple[str, str, int, str]]]]:
     """Freeze quiz content referenced by ``metadata.quiz_id`` on assistant messages.
 
-    Returns a ``(public_quizzes, answer_keys)`` tuple:
+    Returns public quiz data, private grading keys, and source references:
 
     * ``public_quizzes`` — ``quiz_id → quiz payload`` safe to expose to anonymous
       viewers (questions + options, no answers). Embedded onto the snapshot
@@ -86,6 +98,7 @@ async def _collect_quiz_payloads(
       ``correct_answer`` + ``explanation``. Stored separately in the snapshot;
       **never returned by the public GET**. Used purely for grading anon
       submissions server-side.
+    * source references — kept outside the snapshot for internal ACL checks.
     """
     quiz_ids: list[str] = []
     seen: set[str] = set()
@@ -102,6 +115,9 @@ async def _collect_quiz_payloads(
 
     public_quizzes: dict[str, dict[str, Any]] = {}
     answer_keys: dict[str, dict[str, Any]] = {}
+    quiz_datasets: set[str] = set()
+    quiz_documents: set[tuple[str, str]] = set()
+    quiz_versions: set[tuple[str, str, int, str]] = set()
 
     for quiz_id in quiz_ids:
         try:
@@ -117,10 +133,14 @@ async def _collect_quiz_payloads(
         )
         if not quiz_row:
             raise HTTPException(409, "A referenced quiz cannot be verified for sharing")
-        dataset_ids = quiz_row["dataset_ids"]
+        dataset_ids = quiz_row["dataset_ids"] or []
         if isinstance(dataset_ids, str):
             dataset_ids = json.loads(dataset_ids)
-        if dataset_ids:
+        if not isinstance(dataset_ids, list) or any(
+            not isinstance(item, str) or not item for item in dataset_ids
+        ):
+            raise HTTPException(409, "Quiz source rights cannot be verified for sharing")
+        if dataset_ids and audience == "public":
             raise HTTPException(409, "Quiz content derived from private knowledge cannot be shared anonymously")
         try:
             inherited_datasets, inherited_documents, inherited_versions = await quiz_source_scope(
@@ -128,8 +148,12 @@ async def _collect_quiz_payloads(
             )
         except HTTPException as exc:
             raise HTTPException(409, "Quiz source rights cannot be verified for sharing") from exc
-        if inherited_datasets or inherited_documents or inherited_versions:
+        if audience == "public" and (inherited_datasets or inherited_documents or inherited_versions):
             raise HTTPException(409, "Quiz content derived from knowledge cannot be shared anonymously")
+        quiz_datasets.update(str(item) for item in dataset_ids or [])
+        quiz_datasets.update(inherited_datasets)
+        quiz_documents.update(inherited_documents)
+        quiz_versions.update(inherited_versions)
         q_rows = await db.fetch(
             "SELECT id, question_num, question_type, question_text, options, correct_answer, explanation "
             "FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
@@ -184,7 +208,7 @@ async def _collect_quiz_payloads(
         }
         answer_keys[quiz_id] = {"questions": grading_questions}
 
-    return public_quizzes, answer_keys
+    return public_quizzes, answer_keys, (quiz_datasets, quiz_documents, quiz_versions)
 
 
 def _strip_snapshot_for_public(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -205,22 +229,30 @@ def _json_value(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-def _snapshot_hash(snapshot: dict[str, Any], *, include_artifacts: bool, expires_days: int | None) -> str:
+def _snapshot_hash(
+    snapshot: dict[str, Any], *, include_artifacts: bool, expires_days: int | None,
+    audience: str = "public", source_scope: dict[str, Any] | None = None,
+) -> str:
     payload = {
         "snapshot": snapshot,
         "include_artifacts": include_artifacts,
         "expires_days": expires_days,
+        "audience": audience,
+        "source_scope": source_scope,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()
 
 
-def _require_safe_share_snapshot(snapshot: Any) -> dict[str, Any]:
+def _require_safe_share_snapshot(snapshot: Any, audience: str = "public") -> dict[str, Any]:
+    expected = (
+        (3, "verified_internal_source_scope") if audience == "internal"
+        else (2, "verified_no_private_knowledge")
+    )
     if (
         not isinstance(snapshot, dict)
-        or snapshot.get("share_snapshot_version") != 2
-        or snapshot.get("source_policy") != "verified_no_private_knowledge"
+        or (snapshot.get("share_snapshot_version"), snapshot.get("source_policy")) != expected
     ):
         raise HTTPException(410, "This older share needs a new source-rights review")
     return snapshot
@@ -232,7 +264,8 @@ async def _build_share_snapshot(
     session_id: str,
     user: UserContext,
     include_artifacts: bool,
-) -> tuple[dict[str, Any], str]:
+    audience: Literal["public", "internal"] = "public",
+) -> tuple[dict[str, Any], str, dict[str, Any] | None]:
     """Build the exact visitor snapshot from owner-scoped, source-checked facts."""
     db = _get_db(request)
     session = await db.fetchrow(
@@ -259,7 +292,7 @@ async def _build_share_snapshot(
                 raise HTTPException(409, "Older assistant messages have unverified source rights")
 
     sources = await conversation_sources(request, user, session_id)
-    if sources.dataset_ids or sources.document_ids or sources.source_versions:
+    if audience == "public" and (sources.dataset_ids or sources.document_ids or sources.source_versions):
         raise HTTPException(409, "Knowledge-derived content cannot be shared anonymously")
 
     store = getattr(request.app.state, "agent_thread_store", None) or AgentThreadStore(db)
@@ -292,7 +325,7 @@ async def _build_share_snapshot(
             items = readonly.get("items") if isinstance(readonly, dict) else None
             if not isinstance(items, list):
                 raise HTTPException(409, "Conversation source rights cannot be verified")
-            if any(isinstance(item, dict) and item.get("kind") == "knowledge" for item in items):
+            if audience == "public" and any(isinstance(item, dict) and item.get("kind") == "knowledge" for item in items):
                 raise HTTPException(409, "Private knowledge content cannot be shared anonymously")
             checked_runs.add(str(row["run_id"]))
         for message in runtime_messages:
@@ -343,9 +376,10 @@ async def _build_share_snapshot(
                 public["metadata"] = safe_meta
         public_messages.append(public)
 
-    public_quizzes, answer_keys = await _collect_quiz_payloads(
+    public_quizzes, answer_keys, quiz_scope = await _collect_quiz_payloads(
         request,
         db, public_messages, tenant_id=user.tenant_id or "", user_id=user.user_id,
+        audience=audience,
     )
     for message in public_messages:
         quiz_id = (message.get("metadata") or {}).get("quiz_id")
@@ -354,14 +388,23 @@ async def _build_share_snapshot(
     raw_meta = _json_value(session["metadata"]) or {}
     title = raw_meta.get("title", "") if isinstance(raw_meta, dict) else ""
     snapshot: dict[str, Any] = {
-        "share_snapshot_version": 2,
-        "source_policy": "verified_no_private_knowledge",
+        "share_snapshot_version": 3 if audience == "internal" else 2,
+        "source_policy": "verified_internal_source_scope" if audience == "internal" else "verified_no_private_knowledge",
         "messages": public_messages,
         "artifacts": artifacts_data,
     }
     if answer_keys:
         snapshot["quiz_answer_keys"] = answer_keys
-    return snapshot, title
+    source_scope = None
+    if audience == "internal":
+        await require_active_internal_user(request, user, user.tenant_id or "")
+        dataset_ids = frozenset(set(sources.dataset_ids) | quiz_scope[0])
+        document_ids = frozenset(set(sources.document_ids) | quiz_scope[1])
+        versions = frozenset(set(sources.source_versions) | quiz_scope[2])
+        source_scope = freeze_source_scope(dataset_ids, document_ids, versions)
+        if not await source_scope_allowed(request, user, dataset_ids, document_ids, versioned_refs=versions):
+            raise HTTPException(403, "Share source access has been revoked")
+    return snapshot, title, source_scope
 
 
 # ── Create Share ─────────────────────────────────────────────────────
@@ -374,13 +417,15 @@ async def preview_share(
     user: UserContext = Depends(get_user_context),
     include_artifacts: bool = True,
     expires_days: int | None = Query(default=None, ge=1, le=365),
+    audience: Literal["public", "internal"] = "public",
 ):
     """Show the owner exactly what a visitor will receive before sharing."""
-    snapshot, title = await _build_share_snapshot(
+    snapshot, title, source_scope = await _build_share_snapshot(
         request,
         session_id=session_id,
         user=user,
         include_artifacts=include_artifacts,
+        audience=audience,
     )
     return {
         "title": title,
@@ -388,12 +433,14 @@ async def preview_share(
         "artifacts": snapshot["artifacts"],
         "message_count": len(snapshot["messages"]),
         "artifact_count": len(snapshot["artifacts"]),
-        "audience": "anyone_with_link",
+        "audience": audience,
         "expires_days": expires_days,
         "preview_hash": _snapshot_hash(
             snapshot,
             include_artifacts=include_artifacts,
             expires_days=expires_days,
+            audience=audience,
+            source_scope=source_scope,
         ),
     }
 
@@ -405,18 +452,21 @@ async def create_share(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Create a public share link for a conversation with artifacts."""
+    """Create a frozen conversation link under the selected audience policy."""
     db = _get_db(request)
-    snapshot, title = await _build_share_snapshot(
+    snapshot, title, source_scope = await _build_share_snapshot(
         request,
         session_id=session_id,
         user=user,
         include_artifacts=body.include_artifacts,
+        audience=body.audience,
     )
     expected_hash = _snapshot_hash(
         snapshot,
         include_artifacts=body.include_artifacts,
         expires_days=body.expires_days,
+        audience=body.audience,
+        source_scope=source_scope,
     )
     if body.preview_hash != expected_hash:
         raise HTTPException(409, "Share preview changed. Review it again before creating a link")
@@ -434,7 +484,6 @@ async def create_share(
         share_code = _generate_share_code()
     else:
         raise HTTPException(409, "Could not generate unique share code, try again")
-        share_code = _generate_share_code()
 
     expires_at = None
     if body.expires_days:
@@ -443,8 +492,9 @@ async def create_share(
     await db.execute(
         """
         INSERT INTO conversation_shares
-            (share_code, session_id, user_id, tenant_id, title, snapshot, message_count, artifact_count, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+            (share_code, session_id, user_id, tenant_id, title, snapshot, message_count,
+             artifact_count, expires_at, audience, source_scope)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11::jsonb)
         """,
         share_code,
         session_id,
@@ -455,6 +505,8 @@ async def create_share(
         len(history),
         len(artifacts_data),
         expires_at,
+        body.audience,
+        json.dumps(source_scope) if source_scope is not None else None,
     )
 
     share_url = f"/share/{share_code}"
@@ -470,24 +522,31 @@ async def create_share(
         artifact_count=len(artifacts_data),
         created_at=datetime.now(timezone.utc).isoformat(),
         expires_at=expires_at.isoformat() if expires_at else None,
+        audience=body.audience,
     )
 
 
-# ── Public: Get Shared Conversation ──────────────────────────────────
+# ── Visitor: Get Shared Conversation ─────────────────────────────────
 
 
 @router.get("/shares/{share_code}")
 async def get_share(share_code: str, request: Request):
-    """Public endpoint — no auth required. Returns the shared conversation snapshot."""
+    """Return a share only after its audience and live source checks pass."""
     db = _get_db(request)
     row = await db.fetchrow(
         "SELECT * FROM conversation_shares WHERE share_code = $1 AND is_active = TRUE",
         share_code,
     )
-    if not row:
+    if not row or not row["is_active"]:
         raise HTTPException(404, "Share not found or expired")
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
+
+    audience = row.get("audience") or "public"
+    if audience == "internal":
+        await require_internal_share_access(request, row)
+    elif audience != "public":
+        raise HTTPException(410, "Share audience cannot be verified")
 
     with suppress(Exception):
         await db.execute(
@@ -495,10 +554,10 @@ async def get_share(share_code: str, request: Request):
             share_code,
         )
 
-    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]), audience)
     snapshot = _strip_snapshot_for_public(snapshot)
 
-    return {
+    result = {
         "share_code": share_code,
         "title": row["title"],
         "snapshot": snapshot,
@@ -507,10 +566,12 @@ async def get_share(share_code: str, request: Request):
         "view_count": (row["view_count"] or 0) + 1,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+        "audience": audience,
     }
+    return JSONResponse(result, headers={"Cache-Control": "no-store"}) if audience == "internal" else result
 
 
-# ── Public: Submit Anonymous Quiz Attempt ────────────────────────────
+# ── Visitor: Submit Shared Quiz Attempt ──────────────────────────────
 
 
 class SharedQuizSubmitRequest(BaseModel):
@@ -541,9 +602,9 @@ async def submit_shared_quiz(
     body: SharedQuizSubmitRequest,
     request: Request,
 ):
-    """Grade an anonymous viewer's answers against the frozen quiz snapshot.
+    """Grade a permitted viewer's answers against the frozen quiz snapshot.
 
-    * No auth required. Rate-limited by IP via ``enforce_rate_limit``.
+    * Public links remain anonymous; internal links require current source access.
     * Keyed by ``(share_code, anon_id, quiz_id)`` using the trusted anonymous
       middleware identity — one attempt per viewer per quiz; resubmits return
       the cached result rather than re-grading.
@@ -555,7 +616,8 @@ async def submit_shared_quiz(
     db = _get_db(request)
 
     row = await db.fetchrow(
-        "SELECT snapshot, expires_at, is_active FROM conversation_shares WHERE share_code = $1",
+        "SELECT snapshot, expires_at, is_active, audience, source_scope, tenant_id "
+        "FROM conversation_shares WHERE share_code = $1",
         share_code,
     )
     if not row or not row["is_active"]:
@@ -563,12 +625,19 @@ async def submit_shared_quiz(
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
+    audience = row.get("audience") or "public"
+    if audience == "internal":
+        user = await require_internal_share_access(request, row)
+    elif audience == "public":
+        user = None
+    else:
+        raise HTTPException(410, "Share audience cannot be verified")
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]), audience)
     answer_keys = snapshot.get("quiz_answer_keys") if isinstance(snapshot, dict) else None
     if not isinstance(answer_keys, dict) or quiz_id not in answer_keys:
         raise HTTPException(404, "Quiz not found in this share")
 
-    anon_id = _resolve_anon_id(request)
+    anon_id = f"user:{user.user_id}" if user else _resolve_anon_id(request)
 
     # Replay cached attempt if this anon viewer already submitted.
     try:
@@ -587,7 +656,7 @@ async def submit_shared_quiz(
             prior["result"] if isinstance(prior["result"], dict) else json.loads(prior["result"])
         )
         cached["cached"] = True
-        return cached
+        return JSONResponse(cached, headers={"Cache-Control": "no-store"}) if user else cached
 
     grader = QuizGrader()
     grading_questions = answer_keys[quiz_id].get("questions", [])
@@ -626,21 +695,22 @@ async def submit_shared_quiz(
                 else json.loads(replay["result"])
             )
             cached["cached"] = True
-            return cached
+            return JSONResponse(cached, headers={"Cache-Control": "no-store"}) if user else cached
         raise HTTPException(500, "Failed to record attempt")
 
-    return result_payload
+    return JSONResponse(result_payload, headers={"Cache-Control": "no-store"}) if user else result_payload
 
 
-# ── Public: Download Shared Artifact ─────────────────────────────────
+# ── Visitor: Download Shared Artifact ────────────────────────────────
 
 
 @router.get("/shares/{share_code}/artifact/{artifact_id}")
 async def download_shared_artifact(share_code: str, artifact_id: str, request: Request):
-    """Public endpoint — download an artifact from a shared conversation."""
+    """Download only after checking the share and current viewer rights."""
     db = _get_db(request)
     row = await db.fetchrow(
-        "SELECT snapshot, expires_at, is_active, session_id, tenant_id, user_id "
+        "SELECT snapshot, expires_at, is_active, session_id, tenant_id, user_id, "
+        "audience, source_scope "
         "FROM conversation_shares WHERE share_code = $1",
         share_code,
     )
@@ -649,7 +719,12 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]))
+    audience = row.get("audience") or "public"
+    if audience == "internal":
+        await require_internal_share_access(request, row)
+    elif audience != "public":
+        raise HTTPException(410, "Share audience cannot be verified")
+    snapshot = _require_safe_share_snapshot(_json_value(row["snapshot"]), audience)
     artifact_ids = [a["artifact_id"] for a in snapshot.get("artifacts", [])]
     if artifact_id not in artifact_ids:
         raise HTTPException(404, "Artifact not in this share")
@@ -680,6 +755,7 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
             headers={
                 "Content-Disposition": attachment_content_disposition(artifact.filename),
                 "Content-Length": str(len(content)),
+                "Cache-Control": "no-store" if audience == "internal" else "private, max-age=0",
             },
         )
     except HTTPException:
@@ -704,7 +780,7 @@ async def list_shares(
     if session_id:
         rows = await db.fetch(
             "SELECT share_code, session_id, title, message_count, artifact_count, view_count, "
-            "is_active, created_at, expires_at FROM conversation_shares "
+            "is_active, created_at, expires_at, audience FROM conversation_shares "
             "WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3 "
             "ORDER BY created_at DESC LIMIT $4",
             user.tenant_id or "", user.user_id, session_id, limit,
@@ -712,7 +788,7 @@ async def list_shares(
     else:
         rows = await db.fetch(
             "SELECT share_code, session_id, title, message_count, artifact_count, view_count, "
-            "is_active, created_at, expires_at FROM conversation_shares "
+            "is_active, created_at, expires_at, audience FROM conversation_shares "
             "WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT $3",
             user.tenant_id or "", user.user_id, limit,
         )

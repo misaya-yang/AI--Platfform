@@ -3,7 +3,7 @@
  * Generation happens through the in-chat generate_quiz assistant tool.
  */
 
-import { api } from "@/lib/api";
+import { api, getAuthToken } from "@/lib/api";
 import type { QuizData, QuizAttemptResult } from "@/pages/assistant/types";
 
 export async function getQuiz(quizId: string): Promise<QuizData> {
@@ -41,11 +41,15 @@ export async function submitSharedQuiz(
   quizId: string,
   answers: Record<string, string>,
 ): Promise<QuizAttemptResult & { cached?: boolean }> {
+  const token = getAuthToken();
   const resp = await fetch(
     `/api/v1/assistant/shares/${encodeURIComponent(shareCode)}/quiz/${encodeURIComponent(quizId)}/submit`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       credentials: "include", // send ag_anon_id cookie
       body: JSON.stringify({ answers }),
     },
@@ -63,6 +67,7 @@ export interface ShareQuizRequest {
   expires_hours?: number;
   max_attempts?: number;
   require_name?: boolean;
+  audience?: "public" | "internal";
 }
 
 export interface ShareQuizResponse {
@@ -75,6 +80,7 @@ export interface ShareQuizResponse {
   require_name: boolean;
   max_attempts: number | null;
   time_limit_minutes: number | null;
+  audience: "public" | "internal";
 }
 
 export async function createQuizShare(
@@ -97,6 +103,7 @@ export interface QuizShareSummary {
   expires_at: string | null;
   revoked_at: string | null;
   require_name: boolean;
+  audience: "public" | "internal";
 }
 
 export async function listQuizShares(quizId: string): Promise<QuizShareSummary[]> {

@@ -525,6 +525,67 @@ async def test_replay_snapshot_pins_chunking_config_into_standard_engine() -> No
 
 
 @pytest.mark.asyncio
+async def test_replayed_preparing_ingest_keeps_original_execution_config() -> None:
+    worker, database, service = make_worker(
+        metadata={"_document_pipeline_execution_id": "exec-pinned"},
+    )
+    _seed_replay_execution(
+        database,
+        action="ingest",
+        index_config={"chunking": {"mode": "automatic", "chunk_size": 300}},
+    )
+    database.executions["exec-pinned"]["manifest"] = {
+        "preparing_replayed_after_restart": True,
+    }
+    database.dataset["index_config"] = {
+        "chunking": {"mode": "automatic", "chunk_size": 999},
+    }
+
+    manifest = await worker._process_task(make_task(), connection=object())
+
+    assert manifest == ["seg-rebuilt"]
+    assert service.ingest_calls == [{
+        "dataset_id": "dataset-a",
+        "document_id": "doc-a",
+        "chunking_config_override": {"mode": "automatic", "chunk_size": 300},
+    }]
+
+
+@pytest.mark.asyncio
+async def test_replayed_auto_scanned_ingest_reuses_durable_detected_mode() -> None:
+    worker, database, _service = make_worker(metadata={
+        "_document_pipeline_execution_id": "exec-pinned",
+        "processing_mode": "scanned",
+    })
+    _seed_replay_execution(database, action="ingest", processing_mode="auto")
+    database.executions["exec-pinned"]["manifest"] = {
+        "preparing_replayed_after_restart": True,
+    }
+    worker._process_scanned = AsyncMock(return_value=None)
+    worker._process_with_auto_detection = AsyncMock(return_value=None)
+
+    await worker._process_task(make_task(), connection=object())
+
+    worker._process_scanned.assert_awaited_once()
+    worker._process_with_auto_detection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_replayed_ingest_uses_pinned_config_before_dispatch() -> None:
+    worker, database, _service = make_worker(metadata={
+        "_document_pipeline_execution_id": "exec-pinned",
+    })
+    _seed_replay_execution(database, action="ingest")
+    database.executions["exec-pinned"]["manifest"] = {
+        "preparing_replayed_after_restart": True,
+    }
+    database.documents["doc-a"]["status"] = "parsing"
+    database.dataset["index_config"] = "corrupt-live-config"
+
+    await worker._prepare_document_generation(make_task(), connection=object())
+
+
+@pytest.mark.asyncio
 async def test_prepare_replay_ignores_malformed_live_index_config() -> None:
     worker, database, _service = make_worker(
         metadata={"_document_ingest_action": "reprocess"}
@@ -985,6 +1046,27 @@ async def test_generation_open_records_and_pins_process_rule() -> None:
     }
     assert database.rule_pins == [("doc-a", "rule-1")]
     assert database.documents["doc-a"]["process_rule_id"] == "rule-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("special_path", ["hierarchical", "multimodal", "auto"])
+async def test_special_generation_refuses_missing_rule_before_publication(
+    special_path: str,
+) -> None:
+    worker, database, _service = make_worker()
+    if special_path == "hierarchical":
+        database.dataset["index_config"] = {"chunking": {"mode": "hierarchical"}}
+    else:
+        database.documents["doc-a"]["metadata"]["processing_mode"] = special_path
+    database.record_process_rule = AsyncMock(side_effect=RuntimeError("rule store offline"))
+
+    with pytest.raises(RuntimeError, match="durable process-rule snapshot"):
+        await worker._ensure_pipeline_execution(
+            make_task(), "ingest", "", connection=None,
+        )
+
+    assert database.records == []
+    assert database.rule_pins == []
 
 
 @pytest.mark.asyncio

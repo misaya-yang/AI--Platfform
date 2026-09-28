@@ -96,6 +96,7 @@ export function useHitTestConsole(datasetId?: string) {
   const [hitMeta, setHitMeta] = useState<Record<string, unknown>>({});
   const [hitTraceId, setHitTraceId] = useState("");
   const [hitQueryFingerprint, setHitQueryFingerprint] = useState("");
+  const [hitExecutedQuery, setHitExecutedQuery] = useState("");
 
   function invalidateHitTestResults() {
     hitTestControllerRef.current?.abort();
@@ -107,6 +108,7 @@ export function useHitTestConsole(datasetId?: string) {
     setHitMeta({});
     setHitTraceId("");
     setHitQueryFingerprint("");
+    setHitExecutedQuery("");
     setRagasResults([]);
     setRagasJudgeModel(null);
   }
@@ -154,6 +156,7 @@ export function useHitTestConsole(datasetId?: string) {
     setHitMeta({});
     setHitTraceId("");
     setHitQueryFingerprint("");
+    setHitExecutedQuery("");
     setRagasResults([]);
     setRagasJudgeModel(null);
     return () => hitTestControllerRef.current?.abort();
@@ -205,6 +208,7 @@ export function useHitTestConsole(datasetId?: string) {
   async function runHitTest() {
     if (!datasetId || !query.trim()) return;
     const requestDatasetId = datasetId;
+    const requestQuery = query.trim();
     hitTestControllerRef.current?.abort();
     const controller = new AbortController();
     hitTestControllerRef.current = controller;
@@ -213,12 +217,13 @@ export function useHitTestConsole(datasetId?: string) {
     setRagasLoading(false);
     setHitResults([]);
     setHitMeta({});
+    setHitExecutedQuery("");
     setRagasResults([]);
     setRagasJudgeModel(null);
     try {
       const res = await hitTest(requestDatasetId, {
         ...presetRequestConfig,
-        query,
+        query: requestQuery,
         top_k: topK,
         mode,
         dense_weight: mode === "hybrid" ? denseWeight : undefined,
@@ -239,6 +244,7 @@ export function useHitTestConsole(datasetId?: string) {
       setHitMeta(res.metadata || {});
       setHitTraceId(res.trace_id || "");
       setHitQueryFingerprint(res.query_fingerprint || "");
+      setHitExecutedQuery(requestQuery);
     } catch (err: unknown) {
       const candidate = err as { code?: string; name?: string };
       if (
@@ -294,6 +300,7 @@ export function useHitTestConsole(datasetId?: string) {
     hitMeta,
     hitTraceId,
     hitQueryFingerprint,
+    hitExecutedQuery,
     invalidateHitTestResults,
     runHitTest,
     runRagasScore,

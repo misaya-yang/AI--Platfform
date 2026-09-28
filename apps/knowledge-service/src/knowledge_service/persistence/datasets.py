@@ -460,7 +460,7 @@ class DatasetPersistenceMixin:
             values.append(value)
             assignments.append(f"{field} = ${len(values)}{cast}")
 
-        predicates = ["dataset_id = $1", "is_deleted = FALSE"]
+        predicates = ["dataset_id = $1", "is_deleted = FALSE", "is_archived = FALSE"]
         if expected is not None:
             for field in (
                 "embedding_provider",
@@ -692,6 +692,8 @@ class DatasetPersistenceMixin:
         action: str | None = None,
         recover_stage: str | None = None,
         execution_id: str | None = None,
+        pin_execution_rule: bool = False,
+        connection: Any | None = None,
     ) -> bool:
         """Durably move one eligible document into the queued generation.
 
@@ -712,6 +714,11 @@ class DatasetPersistenceMixin:
         if normalized_stage and normalized_action != "recover":
             raise ValueError("recover_stage is only valid with the recover action")
         normalized_execution_id = str(execution_id or "").strip() or None
+        if pin_execution_rule and (
+            normalized_action not in {"reprocess", "recover", "retry"}
+            or not normalized_execution_id
+        ):
+            raise ValueError("replay rule pin requires a replay execution")
 
         # Build the exact metadata patch in Python; the UPDATE merges it over
         # the authoritative row after stripping stage/exec keys so a verb can
@@ -725,7 +732,15 @@ class DatasetPersistenceMixin:
             if normalized_execution_id:
                 metadata_patch[DOCUMENT_PIPELINE_EXECUTION_KEY] = normalized_execution_id
 
-        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+        @contextlib.asynccontextmanager
+        async def claim_connection():
+            if connection is not None:
+                yield connection
+            else:
+                async with self.document_index_update_lease(dataset_id, document_id) as leased:
+                    yield leased
+
+        async with claim_connection() as conn:
             await self._require_dataset_ingestion_identity(
                 conn,
                 dataset_id,
@@ -737,6 +752,14 @@ class DatasetPersistenceMixin:
                 SET status = 'waiting',
                     progress = 0,
                     error = NULL,
+                    process_rule_id = CASE
+                        WHEN $5::boolean THEN (
+                            SELECT execution.process_rule_id
+                            FROM document_pipeline_executions AS execution
+                            WHERE execution.execution_id = $6
+                        )
+                        ELSE process_rule_id
+                    END,
                     -- This claim opens a new pipeline generation. Stage
                     -- timestamps describe that generation only; retaining a
                     -- prior run makes the UI report ever-growing parsing /
@@ -793,7 +816,8 @@ class DatasetPersistenceMixin:
                                 ->> 'desired_archived' = 'false'
                   )
                   -- A row already queued under a verb belongs to that verb:
-                  -- only an identical re-claim may re-pin it. A different
+                  -- only an identical re-claim by the same execution may
+                  -- refresh it. A different
                   -- verb (or a plain claim that would strip the marker) is
                   -- rejected so a queued generation can never be silently
                   -- swapped or demoted. Terminal rows are exempt: they never
@@ -808,12 +832,35 @@ class DatasetPersistenceMixin:
                         OR COALESCE(metadata ->> '{DOCUMENT_INGEST_ACTION_KEY}', '')
                             = $4
                   )
+                  -- A recovery requeue retains the running ledger link even
+                  -- while status is waiting. Another request may only reclaim
+                  -- the exact same execution, never replace that owner.
+                  AND (
+                        status <> 'waiting'
+                        OR COALESCE(metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}', '') = ''
+                        OR metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}' = $6
+                  )
+                  AND (
+                        NOT $5::boolean
+                        OR EXISTS (
+                            SELECT 1 FROM document_pipeline_executions AS execution
+                            WHERE execution.execution_id = $6
+                              AND execution.document_id = $1
+                              AND execution.dataset_id = $2
+                              AND execution.action = $4
+                              AND execution.status = 'running'
+                              AND execution.process_rule_id IS NOT NULL
+                              AND execution.input_snapshot <> '{{}}'::jsonb
+                        )
+                  )
                 RETURNING document_id
                 """,
                 document_id,
                 dataset_id,
                 json.dumps(metadata_patch) if metadata_patch is not None else None,
                 normalized_action or "",
+                pin_execution_rule,
+                normalized_execution_id,
             )
             return row is not None
 
@@ -1414,7 +1461,11 @@ class DatasetPersistenceMixin:
                     UPDATE document_pipeline_executions
                     SET status = $2,
                         error = $3,
-                        manifest = $4::jsonb,
+                        manifest = CASE
+                            WHEN jsonb_typeof($4::jsonb) = 'object' THEN
+                                COALESCE(manifest, '{}'::jsonb) || $4::jsonb
+                            ELSE $4::jsonb
+                        END,
                         completed_at = NOW()
                     WHERE execution_id = $1 AND status = 'running'
                     RETURNING execution_id
@@ -1560,6 +1611,74 @@ class DatasetPersistenceMixin:
             raise RuntimeError("database is not connected")
         async with self._pool.acquire() as conn, conn.transaction():
             return await _record(conn)
+
+    async def resume_special_preparing_execution(
+        self,
+        execution_id: str,
+        document_id: str,
+        dataset_id: str,
+        generation_id: str,
+        source_hash: str,
+        *,
+        connection: Any,
+    ) -> None:
+        """Requeue a crash-stopped preparation under its original execution.
+
+        The caller has verified cleanup of every predeclared object. No
+        candidate points can exist in the preparing phase, so the original
+        pinned input may be replayed without an external write duplication.
+        This mutation and the revision-fence release share one transaction.
+        """
+
+        execution = await connection.fetchrow(
+            "SELECT status, action, process_rule_id, input_snapshot, manifest "
+            "FROM document_pipeline_executions WHERE execution_id = $1 "
+            "AND document_id = $2 AND dataset_id = $3 FOR UPDATE",
+            execution_id, document_id, dataset_id,
+        )
+        document = await connection.fetchrow(
+            "SELECT status, metadata FROM documents "
+            "WHERE document_id = $1 AND dataset_id = $2 FOR UPDATE",
+            document_id, dataset_id,
+        )
+        if execution is None or document is None or execution["status"] != "running":
+            raise RuntimeError("special preparation replay lost its running owner")
+        manifest = _json_object(execution["manifest"])
+        special = _json_object(manifest.get(SPECIAL_PUBLICATION_MANIFEST_KEY))
+        metadata = _json_object(document["metadata"])
+        if (
+            special.get("phase") != "preparing"
+            or special.get("generation_id") != generation_id
+            or special.get("source_hash") != source_hash
+            or metadata.get(DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY) != generation_id
+            or metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) != execution_id
+            or document["status"] not in {"waiting", "parsing", "splitting", "indexing"}
+            or not _json_object(execution["input_snapshot"])
+            or not execution["process_rule_id"]
+        ):
+            raise RuntimeError("special preparation replay identity changed")
+        updated_execution = await connection.execute(
+            "UPDATE document_pipeline_executions "
+            "SET manifest = (COALESCE(manifest, '{}'::jsonb) - $2::text) "
+            "|| jsonb_build_object('preparing_replayed_after_restart', TRUE) "
+            "WHERE execution_id = $1 AND status = 'running'",
+            execution_id, SPECIAL_PUBLICATION_MANIFEST_KEY,
+        )
+        updated_document = await connection.execute(
+            "UPDATE documents SET status = 'waiting', progress = 0, error = NULL, "
+            "process_rule_id = $5, "
+            "started_at = NULL, parsing_started_at = NULL, "
+            "splitting_started_at = NULL, indexing_started_at = NULL, "
+            "updated_at = NOW(), "
+            "metadata = COALESCE(metadata, '{}'::jsonb) - $3::text "
+            "WHERE document_id = $1 AND dataset_id = $2 "
+            "AND metadata ->> $3::text = $4",
+            document_id, dataset_id,
+            DOCUMENT_SPECIAL_PUBLICATION_GENERATION_KEY, generation_id,
+            execution["process_rule_id"],
+        )
+        if updated_execution != "UPDATE 1" or updated_document != "UPDATE 1":
+            raise RuntimeError("special preparation replay CAS failed")
 
     async def advance_special_publication_manifest(
         self,
@@ -2201,6 +2320,7 @@ class DatasetPersistenceMixin:
         process_rule_id: str,
         *,
         connection: Any | None = None,
+        idle_only: bool = False,
     ) -> bool:
         """Pin the rule snapshot that governs this document's generations.
 
@@ -2221,10 +2341,12 @@ class DatasetPersistenceMixin:
                 UPDATE documents
                 SET process_rule_id = $2
                 WHERE document_id = $1
+                  AND (NOT $3::boolean OR status IN ('completed', 'error'))
                 RETURNING document_id
                 """,
                 normalized_document,
                 normalized_rule,
+                idle_only,
             )
             return row is not None
 
@@ -2274,12 +2396,12 @@ class DatasetPersistenceMixin:
                    embedding_provider, embedding_model, embedding_dimension,
                    embedding_config, index_config
             FROM datasets
-            WHERE dataset_id = $1 AND is_deleted = FALSE
+            WHERE dataset_id = $1 AND is_deleted = FALSE AND is_archived = FALSE
             """,
             dataset_id,
         )
         if not row:
-            raise RuntimeError("dataset was deleted before index write; refusing orphan content")
+            raise RuntimeError("dataset was deleted or archived before index write; refusing orphan content")
         if dataset_index_deletion_fence(dict(row)) is not None:
             raise RuntimeError("dataset index deletion is pending; refusing indexed-content access")
         if (
@@ -2594,20 +2716,20 @@ class DatasetPersistenceMixin:
         dataset_id: str,
         *,
         connection: Any | None = None,
+        include_archived: bool = False,
     ) -> dict[str, Any] | None:
         """获取 Dataset"""
         if not self._pool:
             return None
+        query = (
+            "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE"
+            + ("" if include_archived else " AND is_archived = FALSE")
+        )
         if connection is not None:
-            row = await connection.fetchrow(
-                "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE",
-                dataset_id,
-            )
+            row = await connection.fetchrow(query, dataset_id)
             return self._row_to_dict(row) if row else None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE", dataset_id
-            )
+            row = await conn.fetchrow(query, dataset_id)
             return self._row_to_dict(row) if row else None
 
     async def list_datasets(
@@ -2618,12 +2740,16 @@ class DatasetPersistenceMixin:
         offset: int = 0,
         before_created_at: Any | None = None,
         before_dataset_id: str | None = None,
+        archived_only: bool = False,
     ) -> list[dict[str, Any]]:
         """列出 Dataset"""
         if not self._pool:
             return []
 
-        query = "SELECT * FROM datasets WHERE is_deleted = FALSE"
+        query = (
+            "SELECT * FROM datasets WHERE is_deleted = FALSE"
+            + (" AND is_archived = TRUE" if archived_only else " AND is_archived = FALSE")
+        )
         params: list[Any] = []
         param_idx = 1
 
@@ -2650,6 +2776,126 @@ class DatasetPersistenceMixin:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
+
+    async def set_dataset_archived(
+        self,
+        dataset_id: str,
+        *,
+        archived: bool,
+        user_id: str,
+        tenant_id: str,
+        roles: list[str],
+        tenant_admin: bool,
+        connection: Any,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Change archive visibility without touching content, grants, or bindings.
+
+        The owner proof, current state, and revision increment share one row
+        lock and transaction. Repeating the desired state leaves the revision
+        unchanged.
+        """
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        if not dataset_id or not user_id:
+            raise ValueError("dataset and actor identity are required")
+        if connection is None:
+            raise RuntimeError("exclusive dataset index lease is required for archiving")
+        conn = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE FOR UPDATE",
+                dataset_id,
+            )
+            if row is None:
+                return None
+            dataset = self._row_to_dict(row)
+            same_tenant = bool(tenant_id and tenant_id == str(dataset.get("tenant_id") or ""))
+            owner_grant = await conn.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM dataset_permissions
+                       WHERE dataset_id = $1 AND permission = 'owner'
+                         AND (
+                           (subject_type = 'user' AND subject_id = $2)
+                           OR (subject_type = 'tenant_role' AND $3::boolean
+                               AND subject_tenant_id = $5
+                               AND subject_id = ANY($4::text[]))
+                         )
+                       FOR SHARE
+                   )""",
+                dataset_id, user_id, same_tenant, list(roles or []), tenant_id,
+            )
+            if not (
+                (same_tenant and tenant_admin)
+                or str(dataset.get("created_by") or "") == user_id
+                or owner_grant
+            ):
+                raise PermissionError("dataset owner permission changed")
+            if bool(dataset.get("is_archived")) == archived:
+                return dataset
+            if archived:
+                # The exclusive dataset lease proves no current writer can be
+                # between ledger creation, link, and terminal completion.
+                # Retire legacy/unlinked receipts and a completed document's
+                # missed best-effort close before testing active ownership.
+                # A nonterminal special manifest remains a hard blocker.
+                await conn.execute(
+                    f"""UPDATE document_pipeline_executions AS execution
+                       SET status = CASE
+                           WHEN document.metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                                = execution.execution_id
+                                AND document.status = 'completed'
+                           THEN 'completed' ELSE 'error' END,
+                           error = CASE
+                           WHEN document.metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                                = execution.execution_id
+                                AND document.status = 'completed'
+                           THEN NULL ELSE 'Execution was not active when dataset was archived' END,
+                           completed_at = NOW()
+                       FROM documents AS document
+                       WHERE execution.dataset_id = $1
+                         AND execution.document_id = document.document_id
+                         AND execution.status = 'running'
+                         AND COALESCE(execution.manifest -> 'special_publication'
+                                      ->> 'phase', '') NOT IN
+                             ('preparing', 'prepared', 'points_written')
+                         AND (
+                             document.metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                                 IS DISTINCT FROM execution.execution_id
+                             OR document.status IN ('completed', 'error')
+                         )""",
+                    dataset_id,
+                )
+            if archived and await conn.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM document_pipeline_executions
+                       WHERE dataset_id = $1 AND status = 'running'
+                   )""",
+                dataset_id,
+            ):
+                raise RuntimeError(
+                    "dataset has a running document execution; retry archive after recovery"
+                )
+            if int(dataset.get("content_revision") or 0) < 0:
+                raise RuntimeError("dataset index publication is still pending")
+            if dataset_index_deletion_fence(dataset) is not None:
+                raise RuntimeError("dataset index deletion is pending")
+            updated = await conn.fetchrow(
+                """UPDATE datasets
+                   SET is_archived = $2,
+                       archived_at = CASE WHEN $2 THEN NOW() ELSE NULL END,
+                       archived_by = CASE WHEN $2 THEN $3 ELSE NULL END,
+                       archive_reason = CASE WHEN $2 THEN $4 ELSE NULL END,
+                       content_revision = COALESCE(content_revision, 0) + 1,
+                       updated_at = NOW()
+                   WHERE dataset_id = $1 AND is_deleted = FALSE
+                   RETURNING *""",
+                dataset_id, archived, user_id, reason,
+            )
+            if updated is None:
+                raise RuntimeError("dataset archive changed during update")
+            return self._row_to_dict(updated)
 
     async def delete_dataset(
         self,

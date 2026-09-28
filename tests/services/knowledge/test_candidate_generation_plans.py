@@ -112,6 +112,91 @@ async def test_hierarchy_candidate_is_complete_stable_and_unpublished() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_vector", [[0.25], [float("nan"), 0.5]])
+async def test_hierarchy_candidate_refuses_invalid_provider_vector(
+    bad_vector: list[float],
+) -> None:
+    class InvalidEmbedder(_Embedder):
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [bad_vector for _ in texts]
+
+    indexer = HierarchicalIndexer(
+        _ReadOnlyVectors(), _ReadOnlyDatabase(),
+        embedder=InvalidEmbedder(),
+    )
+
+    with pytest.raises(RuntimeError, match="L3 embedding is incomplete or invalid"):
+        await indexer.prepare_document(
+            "document-a", "dataset-a", "alpha beta gamma delta epsilon",
+            generation_id=GENERATION_A,
+        )
+
+
+@pytest.mark.asyncio
+async def test_hierarchy_reprocess_resolves_current_model_for_each_generation() -> None:
+    class MutableDatabase(_ReadOnlyDatabase):
+        model = "model-a"
+
+        async def get_dataset(self, dataset_id: str) -> dict[str, Any]:
+            return {**await super().get_dataset(dataset_id), "embedding_model": self.model}
+
+    database = MutableDatabase()
+
+    class ModelEmbedder(_Embedder):
+        def __init__(self, model: str) -> None:
+            self.model = model
+            self.closed = False
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            if self.model == "invalid-model":
+                raise RuntimeError("configured embedding model rejected")
+            if self.model == "model-a":
+                # A config update between layer calls cannot mix L3 and L2
+                # embeddings in one unpublished candidate.
+                database.model = "model-b"
+            value = 1.0 if self.model == "model-a" else 2.0
+            return [[value, 0.5] for _ in texts]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    resolved: list[ModelEmbedder] = []
+
+    async def resolve(dataset_id: str) -> ModelEmbedder:
+        dataset = await database.get_dataset(dataset_id)
+        embedder = ModelEmbedder(dataset["embedding_model"])
+        resolved.append(embedder)
+        return embedder
+
+    indexer = HierarchicalIndexer(
+        _ReadOnlyVectors(), database, embedding_resolver=resolve,
+    )
+    options = {
+        "document_id": "document-a", "dataset_id": "dataset-a",
+        "text": "alpha beta gamma delta epsilon",
+    }
+    first = await indexer.prepare_document(generation_id=GENERATION_A, **options)
+    database.model = "model-b"
+    second = await indexer.prepare_document(generation_id=GENERATION_B, **options)
+    assert all(
+        point.vector == [1.0, 0.5]
+        for points in first.points_by_collection.values() for point in points
+    )
+    assert all(
+        point.vector == [2.0, 0.5]
+        for points in second.points_by_collection.values() for point in points
+    )
+
+    database.model = "invalid-model"
+    with pytest.raises(RuntimeError, match="embedding is incomplete"):
+        await indexer.prepare_document(generation_id=GENERATION_A, **options)
+    assert [embedder.model for embedder in resolved] == [
+        "model-a", "model-b", "invalid-model",
+    ]
+    assert all(embedder.closed for embedder in resolved)
+
+
+@pytest.mark.asyncio
 async def test_hierarchy_candidate_metadata_cannot_replace_serving_identity() -> None:
     indexer = HierarchicalIndexer(
         _ReadOnlyVectors(), _ReadOnlyDatabase(), embedder=_Embedder(),

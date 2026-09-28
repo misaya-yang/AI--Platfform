@@ -71,6 +71,30 @@ export async function getDataset(datasetId: string) {
   return data;
 }
 
+export interface DatasetAgentImpact {
+  dataset_id: string;
+  visible_agents: Array<{
+    agent_id: string;
+    name: string;
+    current_draft: boolean;
+    active_publication: boolean;
+    historical_version_count: number;
+  }>;
+  hidden_agent_count: number;
+  counts: {
+    current_draft: { visible: number; hidden: number };
+    active_publication: { visible: number; hidden: number };
+    historical_version: { visible: number; hidden: number };
+  };
+}
+
+export async function getDatasetAgentImpact(datasetId: string): Promise<DatasetAgentImpact> {
+  const { data } = await api.get<DatasetAgentImpact>(
+    `/api/v1/knowledge/datasets/${encodeURIComponent(datasetId)}/impact`
+  );
+  return data;
+}
+
 export async function updateDataset(datasetId: string, patch: Partial<Dataset>) {
   const { data } = await api.put<Dataset>(`/api/v1/knowledge/datasets/${datasetId}`, patch);
   return data;
@@ -1305,7 +1329,10 @@ export interface DatasetSources {
     space_name: string;
     page_count: number;
     status: string;
+    last_success_at: string | null;
+    has_problem: boolean;
   }>;
+  connector_status: "not_configured" | "available" | "unavailable";
   total_documents: number;
 }
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 TraceFamily = Literal["assistant", "langgraph_proxy", "rag"]
 TraceStatus = Literal["running", "succeeded", "failed", "cancelled", "timeout"]
@@ -258,6 +258,30 @@ class EvalExampleImportItem(BaseModel):
     source_span_id: str | None = None
 
 
+class EvalKbFailureSourceVersion(BaseModel):
+    kb_dataset_id: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
+    segment_id: str = Field(min_length=1)
+    source_version: StrictInt = Field(gt=0)
+    source_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class EvalKbFailureSave(BaseModel):
+    case_id: str = Field(min_length=1, max_length=160)
+    kb_dataset_id: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    expected_answer: str = Field(min_length=1)
+    source: Literal["kb-hit-test", "kb-qa"]
+    observed_segment_ids: list[str] = Field(default_factory=list)
+    source_versions: list[EvalKbFailureSourceVersion] = Field(default_factory=list)
+    source_trace_id: str | None = None
+    kb_trace_id: str | None = None
+    query_fingerprint: str | None = None
+    observed_answer: str | None = None
+    failure_reason: str | None = None
+    expected_revision: StrictInt = Field(ge=0)
+
+
 class EvalExampleUpdate(BaseModel):
     split: str | None = Field(default=None, max_length=32)
     input: dict[str, Any] | None = None
@@ -283,6 +307,12 @@ class EvalExample(BaseModel):
     source_span_id: str | None = None
     created_by: str
     created_at: datetime | None = None
+
+
+class EvalKbFailureSaveResponse(BaseModel):
+    example: EvalExample
+    created: bool
+    revision: int
 
 
 class EvalExamplesImportRequest(BaseModel):

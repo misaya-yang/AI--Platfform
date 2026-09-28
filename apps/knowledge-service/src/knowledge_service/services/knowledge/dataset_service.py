@@ -23,6 +23,7 @@ from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import (
     DatabaseStorage,
+    IndexLeaseUnavailableError,
     dataset_index_deletion_fence,
     dataset_ingestion_identity,
     index_config_has_reserved_deletion_fence,
@@ -683,7 +684,10 @@ class DatasetService:
 
     async def list_datasets_page(
         self, user: UserContext, *, limit: int = 200, cursor: str | None = None,
+        archived_only: bool = False,
     ) -> dict[str, Any]:
+        if archived_only:
+            _require_not_guest(user)
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValidationFailedError("dataset page limit must be in 1..200")
         kwargs: dict[str, Any] = {}
@@ -697,8 +701,11 @@ class DatasetService:
                 kwargs = {"before_created_at": created_at, "before_dataset_id": dataset_id}
             except (ValueError, RecursionError) as exc:
                 raise ValidationFailedError("invalid dataset pagination cursor") from exc
+        if archived_only:
+            kwargs["archived_only"] = True
         rows = await self.db.list_datasets(
-            tenant_id=user.tenant_id, include_public=True, limit=limit + 1, offset=0, **kwargs,
+            tenant_id=user.tenant_id, include_public=not archived_only,
+            limit=limit + 1, offset=0, **kwargs,
         )
         page = rows[:limit]
         next_cursor = None
@@ -709,15 +716,23 @@ class DatasetService:
                 created_at = datetime.fromisoformat(created_at)
             next_cursor = encode_query_cursor(created_at, str(last["dataset_id"]))
         # Advance on the scanned row, including pages whose rows ACL filters out.
-        return {"items": await self._visible_dataset_rows(user, page), "next_cursor": next_cursor}
+        return {
+            "items": await self._visible_dataset_rows(
+                user, page, required="owner" if archived_only else "viewer",
+            ),
+            "next_cursor": next_cursor,
+        }
 
     async def _visible_dataset_rows(
         self, user: UserContext, datasets: list[dict[str, Any]],
+        *, required: str = "viewer",
     ) -> list[dict[str, Any]]:
         visible: list[dict[str, Any]] = []
         for ds in datasets:
-            perm = await self._effective_dataset_permission(ds, user)
-            if _permission_rank(perm) >= 1:
+            perm = await self._effective_dataset_permission(
+                ds, user, allow_archived_owner=required == "owner",
+            )
+            if _permission_rank(perm) >= _permission_rank(required):
                 ds = dict(ds)
                 ds["my_permission"] = perm
                 visible.append(ds)
@@ -1251,6 +1266,57 @@ class DatasetService:
             "Concurrent lexical updates did not converge after three reconciliations"
         )
 
+    async def set_dataset_archived(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        archived: bool,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Owner-only reversible visibility transition for an existing dataset."""
+
+        _require_not_guest(user)
+        if type(archived) is not bool:
+            raise ValidationFailedError("archived must be a boolean")
+        normalized_reason = str(reason or "").strip() or None
+        if normalized_reason and len(normalized_reason) > 500:
+            raise ValidationFailedError("archive reason exceeds 500 characters")
+        dataset = await self.db.get_dataset(dataset_id, include_archived=True)
+        if not dataset:
+            raise ValidationFailedError("dataset not found")
+        permission = await self._effective_dataset_permission(
+            dataset, user, allow_archived_owner=True,
+        )
+        if permission != "owner":
+            raise PermissionDeniedError("Dataset owner permission required")
+        lease_factory = getattr(self.db, "dataset_index_delete_lease", None)
+        if not callable(lease_factory):
+            raise ValidationFailedError("dataset archive index lease is unavailable")
+        try:
+            async with lease_factory(dataset_id) as lease_connection:
+                updated = await self.db.set_dataset_archived(
+                    dataset_id,
+                    archived=archived,
+                    user_id=user.user_id,
+                    tenant_id=user.tenant_id,
+                    roles=list(user.roles or []),
+                    tenant_admin=(user.tier == "admin" or "admin" in (user.roles or [])),
+                    reason=normalized_reason,
+                    connection=lease_connection,
+                )
+        except IndexLeaseUnavailableError:
+            raise
+        except PermissionError as exc:
+            raise PermissionDeniedError("Dataset owner permission required") from exc
+        except RuntimeError as exc:
+            raise ValidationFailedError(str(exc)) from exc
+        if not updated:
+            raise ValidationFailedError("dataset not found")
+        result = self._redact_dataset_secrets(updated)
+        result["my_permission"] = "owner"
+        return result
+
     async def delete_dataset(
         self,
         user: UserContext,
@@ -1554,8 +1620,11 @@ class DatasetService:
             )
 
     async def _effective_dataset_permission(
-        self, dataset: dict[str, Any], user: UserContext
+        self, dataset: dict[str, Any], user: UserContext,
+        *, allow_archived_owner: bool = False,
     ) -> str | None:
+        if dataset.get("is_archived") and not allow_archived_owner:
+            return None
         dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
         user_tenant_id = str(user.tenant_id or "").strip()
         same_tenant = bool(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,8 +20,10 @@ from typing import Any
 import httpx
 
 from ...config import get_settings
+from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from .knowledge_service import KnowledgeService, RetrieveResult
+from .retrieval_service import dataset_retrieval_generation
 
 logger = get_logger(__name__)
 
@@ -365,6 +368,72 @@ class QAService:
             await self._llm_client.close()
             self._llm_client = None
 
+    async def _source_generation(self, user: Any, dataset_id: str) -> tuple[Any, ...] | None:
+        lookup = getattr(getattr(self.kb, "db", None), "published_source_identities", None)
+        require_access = getattr(self.kb, "require_dataset_access", None)
+        if not callable(lookup) or not callable(require_access):
+            return None
+        dataset = await require_access(user, dataset_id, required="viewer")
+        return dataset_retrieval_generation(dataset)
+
+    async def _context_segments(
+        self, user: Any, dataset_id: str, results: list[RetrieveResult],
+        *, source_generation: tuple[Any, ...] | None,
+        include_raw_results: bool,
+    ) -> list[dict[str, Any]]:
+        identities: dict[str, tuple[int, str]] = {}
+        if source_generation is not None and results:
+            require_access = self.kb.require_dataset_access
+
+            async def require_same_generation() -> None:
+                dataset = await require_access(user, dataset_id, required="viewer")
+                if dataset_retrieval_generation(dataset) != source_generation:
+                    raise ValidationFailedError(
+                        "dataset index generation changed during QA; retry the request"
+                    )
+
+            await require_same_generation()
+            document_ids = sorted({str(item.document_id) for item in results})
+            lookup = self.kb.db.published_source_identities
+            found = await lookup(dataset_id, user.tenant_id, document_ids)
+            if not isinstance(found, dict) or not set(found) <= set(document_ids):
+                raise ValidationFailedError("published QA source identities are invalid")
+            await require_same_generation()
+            identities = found
+
+        context_segments: list[dict[str, Any]] = []
+        for result in results:
+            source_metadata = result.metadata if isinstance(result.metadata, dict) else {}
+            nested = source_metadata.get("metadata")
+            nested = nested if isinstance(nested, dict) else {}
+            manual = (
+                source_metadata.get("source_type") == "manual"
+                or source_metadata.get("manual_source_override") is True
+                or nested.get("manual_source_override") is True
+            )
+            metadata = dict(source_metadata) if include_raw_results else {}
+            metadata.pop("source_version", None)
+            metadata.pop("source_hash", None)
+            item = {
+                "segment_id": result.segment_id,
+                "document_id": result.document_id,
+                "text": result.text,
+                "score": result.score,
+                "metadata": metadata,
+            }
+            identity = identities.get(result.document_id) if not manual else None
+            if (
+                isinstance(identity, (tuple, list)) and len(identity) == 2
+                and type(identity[0]) is int and identity[0] > 0
+                and isinstance(identity[1], str)
+                and re.fullmatch(r"[0-9a-f]{64}", identity[1])
+            ):
+                item["source_version"], item["source_hash"] = identity
+                if include_raw_results:
+                    metadata["source_version"], metadata["source_hash"] = identity
+            context_segments.append(item)
+        return context_segments
+
     def _format_context(
         self,
         results: list[RetrieveResult],
@@ -447,6 +516,7 @@ Please answer the question based on the context provided above."""
             QAResult with answer and metadata
         """
         start_time = time.time()
+        source_generation = await self._source_generation(user_context, dataset_id)
 
         # Step 1: Retrieve relevant segments
         retrieval_start = time.time()
@@ -488,16 +558,11 @@ Please answer the question based on the context provided above."""
         total_time = int((time.time() - start_time) * 1000)
 
         # Build result
-        context_segments = [
-            {
-                "segment_id": r.segment_id,
-                "document_id": r.document_id,
-                "text": r.text,
-                "score": r.score,
-                "metadata": r.metadata if include_raw_results else {},
-            }
-            for r in results
-        ]
+        context_segments = await self._context_segments(
+            user_context, dataset_id, results,
+            source_generation=source_generation,
+            include_raw_results=include_raw_results,
+        )
 
         return QAResult(
             query=query,
@@ -536,6 +601,7 @@ Please answer the question based on the context provided above."""
         - {"event": "done", "data": {"result": {...}}}
         """
         start_time = time.time()
+        source_generation = await self._source_generation(user_context, dataset_id)
 
         retrieval_start = time.time()
         results, meta = await self.kb.retrieve(
@@ -552,16 +618,11 @@ Please answer the question based on the context provided above."""
         )
         retrieval_time = int((time.time() - retrieval_start) * 1000)
 
-        context_segments = [
-            {
-                "segment_id": r.segment_id,
-                "document_id": r.document_id,
-                "text": r.text,
-                "score": r.score,
-                "metadata": r.metadata if include_raw_results else {},
-            }
-            for r in results
-        ]
+        context_segments = await self._context_segments(
+            user_context, dataset_id, results,
+            source_generation=source_generation,
+            include_raw_results=include_raw_results,
+        )
 
         yield {
             "event": "retrieval",

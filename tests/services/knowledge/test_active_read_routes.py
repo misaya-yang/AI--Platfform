@@ -20,6 +20,7 @@ from knowledge_service.api.routes.knowledge import (
     debug_dataset,
     force_complete_document,
     get_active_document_source,
+    get_dataset_sources,
     get_document_pipeline_execution,
     get_document_version,
     get_historical_document_source,
@@ -59,6 +60,69 @@ def test_manual_segment_is_not_attributed_to_immutable_document_version() -> Non
         {"metadata": {"manual_source_override": True}},
         "document-a", identities,
     )
+
+
+@pytest.mark.asyncio
+async def test_sources_route_distinguishes_unconfigured_sync_from_zero_updates() -> None:
+    service = SimpleNamespace(
+        require_dataset_access=AsyncMock(return_value=DATASET),
+        db=SimpleNamespace(count_documents_by_source_type=AsyncMock(return_value={
+            "upload": 2, "url": 1,
+        })),
+    )
+    request = Request({
+        "type": "http", "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(confluence_sync_service=None)),
+    })
+
+    result = await get_dataset_sources(request, "dataset-a", svc=service, user=ADMIN)
+
+    assert result["connector_status"] == "not_configured"
+    assert result["confluence_bindings"] == []
+    assert result["total_documents"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sources_route_keeps_sync_failure_distinct_from_empty_success() -> None:
+    connector = SimpleNamespace(list_bindings=AsyncMock(side_effect=RuntimeError("secret")))
+    service = SimpleNamespace(
+        require_dataset_access=AsyncMock(return_value=DATASET),
+        db=SimpleNamespace(count_documents_by_source_type=AsyncMock(return_value={
+            "upload": 1,
+        })),
+    )
+    request = Request({
+        "type": "http", "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(confluence_sync_service=connector)),
+    })
+
+    result = await get_dataset_sources(request, "dataset-a", svc=service, user=ADMIN)
+
+    assert result["connector_status"] == "unavailable"
+    assert result["confluence_bindings"] == []
+    assert result["total_documents"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sources_route_does_not_show_stale_error_after_successful_sync() -> None:
+    connector = SimpleNamespace(list_bindings=AsyncMock(return_value=[{
+        "binding_id": "binding-a", "space_name": "Space A",
+        "synced_page_count": 3, "status": "completed",
+        "last_sync_at": "2026-09-28T12:00:00Z", "last_error": "previous failure",
+    }]))
+    service = SimpleNamespace(
+        require_dataset_access=AsyncMock(return_value=DATASET),
+        db=SimpleNamespace(count_documents_by_source_type=AsyncMock(return_value={})),
+    )
+    request = Request({
+        "type": "http", "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(confluence_sync_service=connector)),
+    })
+
+    result = await get_dataset_sources(request, "dataset-a", svc=service, user=ADMIN)
+
+    assert result["confluence_bindings"][0]["has_problem"] is False
+    assert result["confluence_bindings"][0]["page_count"] == 3
 
 USER = UserContext(user_id="user-a", tenant_id="tenant-a")
 ADMIN = UserContext(user_id="admin-a", tenant_id="tenant-a", user_tier="admin")
@@ -312,6 +376,70 @@ async def test_retrieval_routes_map_publication_busy_to_retryable_conflict(
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.headers == {"Retry-After": "1"}
+
+
+@pytest.mark.asyncio
+async def test_hit_test_attaches_only_verified_published_source_identity() -> None:
+    digest = "a" * 64
+
+    class Service:
+        db = SimpleNamespace(published_source_identities=AsyncMock(
+            return_value={"document-a": (3, digest)},
+        ))
+
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict:
+            return DATASET
+
+        async def retrieve(self, **_kwargs: Any):
+            return [
+                SimpleNamespace(segment_id="segment-a", document_id="document-a",
+                                score=0.9, text="published", metadata={}),
+                SimpleNamespace(segment_id="segment-manual", document_id="document-a",
+                                score=0.8, text="manual", metadata={"source_type": "manual"}),
+            ], {"trace_id": "trace-a"}
+
+    service = Service()
+    result = await hit_test(
+        "dataset-a", payload=RetrieveRequestSchema(query="published"),
+        svc=service, user=ADMIN,
+    )
+
+    assert result["results"][0]["source_version"] == 3
+    assert result["results"][0]["source_hash"] == digest
+    assert result["results"][0]["metadata"]["source_hash"] == digest
+    assert result["results"][1]["source_version"] is None
+    assert result["results"][1]["source_hash"] is None
+    assert "source_hash" not in result["results"][1]["metadata"]
+    service.db.published_source_identities.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hit_test_refuses_version_attribution_after_generation_change() -> None:
+    calls = 0
+
+    class Service:
+        db = SimpleNamespace(published_source_identities=AsyncMock())
+
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict:
+            nonlocal calls
+            calls += 1
+            return {**DATASET, "content_revision": 8 if calls > 1 else 7}
+
+        async def retrieve(self, **_kwargs: Any):
+            return [SimpleNamespace(
+                segment_id="segment-a", document_id="document-a",
+                score=0.9, text="older", metadata={},
+            )], {}
+
+    service = Service()
+    with pytest.raises(HTTPException) as exc_info:
+        await hit_test(
+            "dataset-a", payload=RetrieveRequestSchema(query="published"),
+            svc=service, user=ADMIN,
+        )
+
+    assert exc_info.value.status_code == 400
+    service.db.published_source_identities.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -893,8 +1021,12 @@ class _VerbDatabase:
         self,
         document_id: str,
         process_rule_id: str,
+        *,
+        idle_only: bool = False,
     ) -> bool:
         if self.document is None or self.document.get("document_id") != document_id:
+            return False
+        if idle_only and self.document.get("status") not in {"completed", "error"}:
             return False
         self.document["process_rule_id"] = process_rule_id
         self.pins.append((document_id, process_rule_id))

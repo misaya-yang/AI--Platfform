@@ -7,8 +7,8 @@ Endpoints (load-bearing only):
 - POST /assistant/quiz/{quiz_id}/submit  — Submit answers for grading
 - GET  /assistant/quiz/{quiz_id}/attempts — List attempts for a quiz
 - DELETE /assistant/quiz/{quiz_id}       — Delete a quiz
-- GET  /quiz/shared/{share_code}         — Public share (alias over artifact_shares)
-- POST /quiz/shared/{share_code}/submit  — Anonymous submit (alias over artifact_shares)
+- GET  /quiz/shared/{share_code}         — Audience-checked share (alias over artifact_shares)
+- POST /quiz/shared/{share_code}/submit  — Audience-checked submit (alias over artifact_shares)
 
 Share creation/revocation moved to POST/DELETE /api/v1/artifact-shares
 (src/api/v1/artifact_shares.py); quiz generation moved to the in-chat tool.
@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from ai_gateway_core.quiz import QuizAccessService, QuizGrader
 from ai_gateway_core.quiz.quiz_access_service import QuizAttemptConflictError
@@ -32,7 +32,7 @@ from ai_gateway_core.sharing.artifact_share_manager import (
     AttemptLimitReachedError,
     ShareUnavailableError,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
@@ -43,6 +43,7 @@ from ...services.assistant_entry.source_access import (
     source_scope_allowed,
 )
 from ..deps import enforce_rate_limit, get_user_context
+from ._internal_share_scope import require_internal_share_access
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class PublicQuizResponse(BaseModel):
     question_count: int
     difficulty: str
     questions: list[QuizQuestionResponse]
+    audience: Literal["public", "internal"] = "public"
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,36 @@ def _share_http_error(error: ArtifactShareError) -> HTTPException:
         status_code=status_code,
         detail={"code": error.code, "message": message},
     )
+
+
+async def _require_shared_quiz_access(
+    request: Request, share_code: str,
+) -> tuple[str, str | None]:
+    """Select the share audience before any Quiz payload or attempt is read."""
+    db = getattr(request.app.state, "database", None)
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    row = await db.fetchrow(
+        "SELECT audience, source_scope, tenant_id, is_active, expires_at "
+        "FROM assistant.artifact_shares WHERE share_code = $1 AND kind = 'quiz'",
+        share_code,
+    )
+    unavailable = HTTPException(
+        404, detail={"code": "share_unavailable", "message": "Quiz not found or expired"},
+    )
+    if not row or not row["is_active"] or (
+        row["expires_at"] and row["expires_at"] <= datetime.now(timezone.utc)
+    ):
+        raise unavailable
+    audience = row.get("audience") or "public"
+    if audience == "internal":
+        user = await require_internal_share_access(request, row)
+        return audience, user.user_id
+    elif audience == "public":
+        await require_public_quiz_source_access(request, share_code)
+    else:
+        raise unavailable
+    return audience, None
 
 
 # ---------------------------------------------------------------------------
@@ -293,23 +325,25 @@ async def delete_quiz(
 
 
 # ---------------------------------------------------------------------------
-# Public endpoints (no auth required) — aliases over artifact_shares kind='quiz'
+# Share endpoints — public links stay anonymous; internal links require access
 # ---------------------------------------------------------------------------
 
 public_router = APIRouter(prefix="/quiz", tags=["quiz-public"])
 
 
 @public_router.get("/shared/{share_code}", response_model=PublicQuizResponse)
-async def get_shared_quiz(share_code: str, request: Request):
-    """Get a quiz for public taking (no auth required). Returns questions without answers."""
-    await require_public_quiz_source_access(request, share_code)
+async def get_shared_quiz(share_code: str, request: Request, response: Response):
+    """Get a shared quiz after audience and current source-right checks."""
+    audience, _user_id = await _require_shared_quiz_access(request, share_code)
     mgr = _get_share_manager(request)
-    artifact = await mgr.get_public_artifact(share_code)
+    artifact = await mgr.get_public_artifact(share_code, audience=audience)
     if not artifact:
         raise HTTPException(404, "Quiz not found, expired, or max attempts reached")
     # Option display order is shuffled per viewer; answer keys stay server-side.
     questions = artifact.get("questions", [])
     artifact["questions"] = _shuffle_options(questions)
+    if audience == "internal":
+        response.headers["Cache-Control"] = "no-store"
     return artifact
 
 
@@ -317,12 +351,16 @@ async def get_shared_quiz(share_code: str, request: Request):
     "/public/{share_code}/attempts/start",
     response_model=PublicQuizAttemptStartResponse,
 )
-async def start_shared_quiz_attempt(share_code: str, request: Request):
+async def start_shared_quiz_attempt(share_code: str, request: Request, response: Response):
     """Start the per-attempt clock and return a single-use opaque token."""
     await enforce_rate_limit(request, user=None, operation="quiz_attempt_start_public")
-    await require_public_quiz_source_access(request, share_code)
+    audience, user_id = await _require_shared_quiz_access(request, share_code)
+    if audience == "internal":
+        response.headers["Cache-Control"] = "no-store"
     try:
-        return await _get_share_manager(request).start_attempt(share_code)
+        return await _get_share_manager(request).start_attempt(
+            share_code, audience=audience, user_id=user_id,
+        )
     except ArtifactShareError as exc:
         raise _share_http_error(exc) from exc
 
@@ -332,11 +370,16 @@ async def get_shared_quiz_attempt_result(
     share_code: str,
     body: PublicQuizAttemptResultRequest,
     request: Request,
+    response: Response,
 ):
     await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
-    await require_public_quiz_source_access(request, share_code)
+    audience, user_id = await _require_shared_quiz_access(request, share_code)
+    if audience == "internal":
+        response.headers["Cache-Control"] = "no-store"
     try:
-        result = await _get_share_manager(request).get_attempt_result(share_code, body.attempt_token)
+        result = await _get_share_manager(request).get_attempt_result(
+            share_code, body.attempt_token, audience=audience, user_id=user_id,
+        )
     except ArtifactShareError as exc:
         raise _share_http_error(exc) from exc
     if result is None:
@@ -349,11 +392,14 @@ async def submit_shared_quiz(
     share_code: str,
     body: PublicQuizSubmitRequest,
     request: Request,
+    response: Response,
 ):
-    """Submit answers for a shared quiz (no auth required)."""
+    """Submit answers only while this viewer can read the shared quiz."""
     # Anonymous endpoint: IP-only rate limit to prevent submission spam
     await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
-    await require_public_quiz_source_access(request, share_code)
+    audience, user_id = await _require_shared_quiz_access(request, share_code)
+    if audience == "internal":
+        response.headers["Cache-Control"] = "no-store"
 
     mgr = _get_share_manager(request)
     client_ip = get_client_ip_from_request(request)
@@ -364,6 +410,8 @@ async def submit_shared_quiz(
             display_name=body.display_name,
             client_ip=client_ip,
             attempt_token=body.attempt_token,
+            audience=audience,
+            user_id=user_id,
         )
     except ArtifactShareError as exc:
         raise _share_http_error(exc) from exc

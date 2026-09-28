@@ -1,5 +1,5 @@
 """
-Artifact Share Manager — kind-generic public sharing of agent artifacts.
+Artifact Share Manager — frozen public and internal agent artifact links.
 
 A share is a frozen snapshot: `payload` (public content) + `answer_keys`
 (grading data, never served). kind='quiz' shares grade via QuizGrader and
@@ -85,7 +85,13 @@ def _sanitize_display_name(name: str | None) -> str | None:
     return html.escape(stripped)
 
 
-def _token_hash(token: str) -> str:
+def _token_hash(
+    token: str, *, audience: str = "public", user_id: str | None = None,
+) -> str:
+    if audience == "internal":
+        if not user_id:
+            raise AttemptInputError("A signed-in account is required for this attempt")
+        token = f"internal:{user_id}\0{token}"
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -97,7 +103,7 @@ def _raise_typed_database_error(exc: Exception) -> None:
 
 
 class ArtifactShareManager:
-    """Manages kind-generic public artifact shares."""
+    """Manages kind-generic artifact shares after route-level access checks."""
 
     def __init__(self, db: DatabaseStorageLike) -> None:
         self.db = db
@@ -115,22 +121,25 @@ class ArtifactShareManager:
         max_attempts: int | None = None,
         require_name: bool = True,
         time_limit_minutes: int | None = None,
+        audience: str = "public",
+        source_scope: dict[str, Any] | None = None,
     ) -> dict:
         """Create a shareable link with a frozen payload snapshot."""
+        if audience not in {"public", "internal"} or (audience == "internal") != (source_scope is not None):
+            raise ValueError("Invalid share audience or source scope")
+        if "source_scope" in payload:
+            raise ValueError("Source scope must not be stored in a share payload")
         share_code = secrets.token_urlsafe(SHARE_CODE_LENGTH)[:SHARE_CODE_LENGTH]
         share_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(hours=expires_hours) if expires_hours else None
 
-        await self.db.execute(
-            """
-            INSERT INTO assistant.artifact_shares (id, share_code, kind, title, payload,
-                                         answer_keys, tenant_id, created_by,
-                                         is_active, max_attempts, expires_at,
-                                         require_name, time_limit_minutes,
-                                         created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11, $12, $13)
-            """,
+        columns = (
+            "id, share_code, kind, title, payload, answer_keys, tenant_id, created_by, "
+            "is_active, max_attempts, expires_at, require_name, time_limit_minutes, created_at"
+        )
+        values = "$1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11, $12, $13"
+        arguments: tuple[Any, ...] = (
             uuid.UUID(share_id),
             share_code,
             kind,
@@ -145,6 +154,14 @@ class ArtifactShareManager:
             time_limit_minutes,
             now,
         )
+        if audience == "internal":
+            columns += ", audience, source_scope"
+            values += ", $14, $15::jsonb"
+            arguments += (audience, json.dumps(source_scope))
+        await self.db.execute(
+            f"INSERT INTO assistant.artifact_shares ({columns}) VALUES ({values})",
+            *arguments,
+        )
 
         logger.info("Created %s share %s by %s", kind, share_code, user_id or "anonymous")
         return {
@@ -156,13 +173,14 @@ class ArtifactShareManager:
             "require_name": require_name,
             "max_attempts": max_attempts,
             "time_limit_minutes": time_limit_minutes,
+            "audience": audience,
         }
 
     async def get_share_by_code(self, share_code: str) -> dict | None:
-        """Look up an active share by its public code (expiry/max-attempts enforced)."""
+        """Look up an active share by code with expiry enforced."""
         row = await self.db.fetchrow(
             """
-            SELECT id, share_code, kind, title, payload, answer_keys,
+            SELECT id, share_code, kind, title, payload, answer_keys, audience,
                    tenant_id, created_by, is_active, max_attempts, expires_at,
                    require_name, time_limit_minutes, attempt_count, created_at
             FROM assistant.artifact_shares
@@ -193,25 +211,33 @@ class ArtifactShareManager:
             "max_attempts": row["max_attempts"],
             "attempt_count": row["attempt_count"],
             "created_at": row["created_at"],
+            "audience": row.get("audience") or "public",
         }
 
-    async def get_public_artifact(self, share_code: str) -> dict | None:
-        """Public snapshot: payload only, never answer keys."""
+    async def get_public_artifact(self, share_code: str, *, audience: str = "public") -> dict | None:
+        """Audience-matched snapshot: payload only, never answer keys or sources."""
         share = await self.get_share_by_code(share_code)
-        if not share:
+        if not share or share["audience"] != audience:
             return None
         if share["max_attempts"] is not None and share["attempt_count"] >= share["max_attempts"]:
             return None
+        public_payload = {
+            key: value for key, value in share["payload"].items()
+            if key not in {"source_scope", "answer_keys", "audience", "tenant_id", "created_by"}
+        }
         return {
+            **public_payload,
             "share_code": share["share_code"],
             "kind": share["kind"],
             "title": share["title"],
             "require_name": share["require_name"],
             "time_limit_minutes": share["time_limit_minutes"],
-            **share["payload"],
+            "audience": share["audience"],
         }
 
-    async def start_attempt(self, share_code: str) -> dict[str, Any]:
+    async def start_attempt(
+        self, share_code: str, *, audience: str = "public", user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Issue a short-lived, opaque token whose clock starts now.
 
         Tokens are stored only as SHA-256 digests. Starting an attempt does not
@@ -219,7 +245,7 @@ class ArtifactShareManager:
         that decision so abandoned starts do not reduce the remaining quota.
         """
         share = await self.get_share_by_code(share_code)
-        if not share:
+        if not share or share["audience"] != audience:
             raise ShareUnavailableError("Share not found or expired")
         if (
             share["max_attempts"] is not None
@@ -264,7 +290,7 @@ class ArtifactShareManager:
               AND (max_attempts IS NULL OR attempt_count < max_attempts)
             """,
             uuid.uuid4(),
-            _token_hash(token),
+            _token_hash(token, audience=audience, user_id=user_id),
             started_at,
             expires_at,
             share_code,
@@ -277,7 +303,7 @@ class ArtifactShareManager:
             # public 404-vs-429 contract; submission remains authoritative.
             current = await self.get_share_by_code(share_code)
             if (
-                current
+                current and current["audience"] == audience
                 and current["max_attempts"] is not None
                 and current["attempt_count"] >= current["max_attempts"]
             ):
@@ -289,10 +315,13 @@ class ArtifactShareManager:
             "expires_at": expires_at,
         }
 
-    async def get_attempt_result(self, share_code: str, attempt_token: str) -> dict[str, Any] | None:
+    async def get_attempt_result(
+        self, share_code: str, attempt_token: str, *, audience: str = "public",
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Recover only the result bound to this active share and opaque token."""
         share = await self.get_share_by_code(share_code)
-        if not share:
+        if not share or share["audience"] != audience:
             raise ShareUnavailableError("Share not found or expired")
         if share["kind"] != "quiz" or not attempt_token:
             raise AttemptInputError("Attempt token is required")
@@ -301,7 +330,8 @@ class ArtifactShareManager:
             "JOIN assistant.artifact_share_attempt_tokens AS token "
             "ON token.token_hash = a.attempt_token_hash "
             "WHERE a.share_id = $1 AND token.token_hash = $2",
-            uuid.UUID(str(share["share_id"])), _token_hash(attempt_token),
+            uuid.UUID(str(share["share_id"])),
+            _token_hash(attempt_token, audience=audience, user_id=user_id),
         )
         if not row:
             return None
@@ -317,11 +347,13 @@ class ArtifactShareManager:
         display_name: str | None = None,
         client_ip: str | None = None,
         attempt_token: str | None = None,
+        audience: str = "public",
+        user_id: str | None = None,
     ) -> dict:
-        """Submit an anonymous attempt against a shared artifact."""
+        """Submit an audience-matched attempt against a shared artifact."""
         display_name = _sanitize_display_name(display_name)
         share = await self.get_share_by_code(share_code)
-        if not share:
+        if not share or share["audience"] != audience:
             raise ShareUnavailableError("Share not found or expired")
         if share["kind"] == "quiz":
             if not attempt_token or not attempt_token.strip():
@@ -332,7 +364,8 @@ class ArtifactShareManager:
                 "JOIN assistant.artifact_share_attempt_tokens AS token "
                 "ON token.token_hash = a.attempt_token_hash "
                 "WHERE a.share_id = $1 AND token.token_hash = $2",
-                uuid.UUID(str(share["share_id"])), _token_hash(attempt_token),
+                uuid.UUID(str(share["share_id"])),
+                _token_hash(attempt_token, audience=audience, user_id=user_id),
             )
             if prior:
                 old_answers = prior["answers"]
@@ -363,6 +396,8 @@ class ArtifactShareManager:
                 display_name=display_name,
                 client_ip=client_ip,
                 attempt_token=attempt_token,
+                audience=audience,
+                user_id=user_id,
             )
         else:
             # Generic shares do not yet have a per-kind attempt table. Their
@@ -477,6 +512,8 @@ class ArtifactShareManager:
         display_name: str | None,
         client_ip: str | None,
         attempt_token: str | None,
+        audience: str = "public",
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """Atomically consume identity/token/slot and persist the graded row."""
         payload = share.get("payload") or {}
@@ -494,7 +531,8 @@ class ArtifactShareManager:
                 )
                 """,
                 share["share_code"],
-                _token_hash(attempt_token) if attempt_token is not None else None,
+                _token_hash(attempt_token, audience=audience, user_id=user_id)
+                if attempt_token is not None else None,
                 display_name,
                 attempt_id,
                 uuid.UUID(str(quiz_id)),

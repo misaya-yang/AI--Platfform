@@ -23,12 +23,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from knowledge_service.services.knowledge.embedding import OpenAICompatibleEmbedding
 from knowledge_service.services.knowledge.ingestion_service import (
     IngestionService,
     _stable_index_node_id,
@@ -534,6 +537,132 @@ async def test_unchanged_content_skips_embedding_entirely() -> None:
     second_run_events = database.events[events_before:]
     assert not any(event.startswith("insert:") for event in second_run_events)
     assert not any(event.startswith("activate:") for event in second_run_events)
+
+
+@pytest.mark.asyncio
+async def test_crashed_staged_row_with_missing_point_is_reembedded_before_activation() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    row = text_rows(database)[0]
+    point_id = row["vector_id"]
+    row.update(status="indexing", enabled=False)
+    store.points.pop(point_id)
+    embedder = CountingEmbedder()
+    service = build_service(
+        dataset=dataset, database=database, store=store, embedder=embedder,
+    )
+
+    await service.ingest_document("dataset-a", "document-a")
+
+    assert database.status_updates[-1] == "completed"
+    assert embedder.embedded_texts
+    assert point_id in store.points
+    assert text_rows(database)[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_crashed_staged_row_with_foreign_point_refuses_activation() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    row = text_rows(database)[0]
+    point_id = row["vector_id"]
+    row.update(status="indexing", enabled=False)
+    original = deepcopy(store.points[point_id])
+    store.points[point_id] = original.model_copy(update={
+        "payload": {**original.payload, "document_id": "foreign-document"},
+    })
+    embedder = CountingEmbedder()
+    service = build_service(
+        dataset=dataset, database=database, store=store, embedder=embedder,
+    )
+
+    await service.ingest_document("dataset-a", "document-a")
+
+    assert database.status_updates[-1] == "error"
+    assert embedder.embedded_texts == []
+    assert text_rows(database)[0]["status"] == "indexing"
+    assert store.points[point_id].payload["document_id"] == "foreign-document"
+
+
+@pytest.mark.asyncio
+async def test_provider_http_failure_keeps_serving_text_generation() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    dataset.update(
+        embedding_provider="openai_compatible",
+        embedding_model="fixture-2",
+    )
+
+    def make_embedder(handler):
+        embedder = OpenAICompatibleEmbedding(
+            base_url="http://embeddings.invalid/v1", model="fixture-2", dimension=2,
+        )
+        embedder.MAX_RETRIES = 1
+        embedder._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return embedder
+
+    def success(request: httpx.Request) -> httpx.Response:
+        count = len(json.loads(request.content)["input"])
+        return httpx.Response(200, json={
+            "data": [{"index": i, "embedding": [0.25, 0.5]} for i in range(count)],
+        })
+
+    first = build_service(
+        dataset=dataset, database=database, store=store,
+        embedder=make_embedder(success),
+    )
+    await first.ingest_document("dataset-a", "document-a")
+    old_rows = deepcopy(text_rows(database))
+    old_points = deepcopy(store.points)
+    old_content = database.document["content"]
+
+    requests: list[httpx.Request] = []
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, json={"error": "provider unavailable"})
+
+    retry = build_service(
+        dataset=dataset, database=database, store=store,
+        embedder=make_embedder(fail),
+    )
+    await retry.ingest_document(
+        "dataset-a", "document-a", source_text_override=CHANGED_CONTENT,
+    )
+
+    assert requests
+    assert database.status_updates[-1] == "error"
+    assert database.document["content"] == old_content
+    assert text_rows(database) == old_rows
+    assert store.points == old_points
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_vector", [[0.25], [float("nan"), 0.5]])
+async def test_invalid_provider_vector_keeps_serving_generation(
+    bad_vector: list[float],
+) -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    old_rows = deepcopy(text_rows(database))
+    old_points = deepcopy(store.points)
+
+    class InvalidEmbedder(CountingEmbedder):
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            self.embedded_texts.extend(texts)
+            return [bad_vector for _ in texts]
+
+    service = build_service(
+        dataset=dataset, database=database, store=store,
+        embedder=InvalidEmbedder(),
+    )
+    await service.ingest_document(
+        "dataset-a", "document-a", source_text_override=CHANGED_CONTENT,
+    )
+
+    assert database.status_updates[-1] == "error"
+    assert database.document["content"] == SHORT_CONTENT
+    assert text_rows(database) == old_rows
+    assert store.points == old_points
 
 
 @pytest.mark.asyncio

@@ -92,8 +92,9 @@ class RecordingDatabase:
         return rule_id
 
     async def pin_document_process_rule(
-        self, document_id: str, process_rule_id: str
+        self, document_id: str, process_rule_id: str, *, idle_only: bool = False,
     ) -> bool:
+        del idle_only
         self.pins.append((document_id, process_rule_id))
         return True
 

@@ -15,12 +15,11 @@ import { installClientAuth, seedClientPrefs } from "./support/helpers";
  *      after a full page reload;
  *   4. JSONL import reuses the eval page's parse/validate/batch pipeline and
  *      lands in the same linked eval dataset;
- *   5. hit-test "send to eval set" persists the query + hit segments under a
- *      deterministic case_id (kb-hit-<dataset>-<hash>), so a repeated send
- *      reports as skipped instead of duplicating.
+ *   5. hit-test failures enter the same Eval store as pending review cases,
+ *      with a user supplied expectation and only verified source versions.
  *
- * The QA tab shares the same send helper (same case_id space), covered by the
- * hit-test path here; its SSE stream is not mocked in this suite.
+ * The QA tab shares the pending-case save dialog, but uses its own source
+ * identity. Its SSE stream is not mocked in this suite.
  *
  * Every route is fulfilled in-process with mutable stores, so the suite runs
  * against `pnpm dev` alone and never needs the live stack.
@@ -40,6 +39,7 @@ interface MockEvalExample {
   expected_trajectory: Record<string, unknown>;
   assertions: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
+  source_trace_id?: string | null;
   created_by: string;
   created_at?: string;
 }
@@ -170,7 +170,7 @@ function watchClientErrors(page: Page, allowedConsoleErrors: RegExp[] = []) {
 
 async function installEvalCasesHarness(
   page: Page,
-  options: { linkedDataset?: boolean } = {}
+  options: { linkedDataset?: boolean; zeroHits?: boolean; evalRunPermission?: boolean; incompleteSource?: boolean } = {}
 ) {
   const linked = options.linkedDataset !== false;
   const datasets: MockEvalDataset[] = linked ? [makeEvalDataset()] : [];
@@ -178,13 +178,17 @@ async function installEvalCasesHarness(
   const captured = {
     createdDatasets: [] as Array<Record<string, unknown>>,
     imports: [] as Array<{ mode?: string; examples: Array<Record<string, unknown>> }>,
+    failureSaves: [] as Array<Record<string, unknown>>,
+    savedFailureExamples: [] as MockEvalExample[],
     patches: [] as Array<{ exampleId: string; body: Record<string, unknown> }>,
     deletes: [] as string[],
   };
 
+  const permissions = ["console:dashboard:view", "knowledge:dataset:view", "console:eval:view"];
+  if (options.evalRunPermission !== false) permissions.push("console:eval:run");
   await installClientAuth(page, {
-    permissions: ["console:dashboard:view", "knowledge:dataset:view"],
-    effective_permissions: ["console:dashboard:view", "knowledge:dataset:view"],
+    permissions,
+    effective_permissions: permissions,
   });
   await seedClientPrefs(page, { locale: "zh-CN" });
 
@@ -238,13 +242,15 @@ async function installEvalCasesHarness(
     ) {
       await route.fulfill(
         jsonResponse({
-          results: [
+          results: options.zeroHits ? [] : [
             {
               segment_id: "seg-hit-1",
               document_id: "doc-handbook",
               score: 0.91,
               text: "年假申请应提前五天提交。",
               metadata: {},
+              source_version: 2,
+              source_hash: "a".repeat(64),
             },
             {
               segment_id: "seg-hit-2",
@@ -252,6 +258,10 @@ async function installEvalCasesHarness(
               score: 0.8,
               text: "报销需要发票与审批记录。",
               metadata: {},
+              ...(options.incompleteSource ? {} : {
+                source_version: 2,
+                source_hash: "b".repeat(64),
+              }),
             },
           ],
           metadata: { mode: "hybrid" },
@@ -292,6 +302,71 @@ async function installEvalCasesHarness(
         await route.fulfill(jsonResponse(created, 201));
         return;
       }
+    }
+
+    const failureGet = pathname.match(
+      /^\/api\/v1\/eval\/datasets\/[^/]+\/kb-failures\/([^/]+)$/
+    );
+    if (method === "GET" && failureGet) {
+      const caseId = decodeURIComponent(failureGet[1]);
+      const latest = captured.savedFailureExamples
+        .filter((example) => example.metadata.case_id === caseId)
+        .sort((a, b) => Number(b.metadata.case_revision) - Number(a.metadata.case_revision))[0];
+      await route.fulfill(latest
+        ? jsonResponse(latest)
+        : jsonResponse({ detail: "KB failure case not found" }, 404));
+      return;
+    }
+
+    if (method === "POST" && pathname === `/api/v1/eval/datasets/${EVAL_DATASET_ID}/kb-failures:save`) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      captured.failureSaves.push(body);
+      const latest = captured.savedFailureExamples
+        .filter((example) => example.metadata.case_id === body.case_id)
+        .sort((a, b) => Number(b.metadata.case_revision) - Number(a.metadata.case_revision))[0];
+      const revision = latest ? Number(latest.metadata.case_revision) : 0;
+      const unchanged = latest
+        && latest.expected_output.answer === body.expected_answer
+        && latest.metadata.kb_failure_reason === body.failure_reason
+        && latest.source_trace_id === body.source_trace_id;
+      if (unchanged) {
+        await route.fulfill(jsonResponse({ example: latest, created: false, revision }));
+        return;
+      }
+      if (body.expected_revision !== revision) {
+        await route.fulfill(jsonResponse({ detail: { error: "case_revision_conflict", current_revision: revision } }, 409));
+        return;
+      }
+      const created: MockEvalExample = {
+        example_id: `kb-failure-r${revision + 1}`,
+        dataset_id: EVAL_DATASET_ID,
+        tenant_id: "tenant-mock",
+        split: "review",
+        input: { query: body.query },
+        expected_output: { answer: body.expected_answer },
+        expected_trajectory: {},
+        assertions: [],
+        metadata: {
+          case_id: body.case_id,
+          case_revision: revision + 1,
+          source: body.source,
+          source_kind: "kb_failure",
+          review_status: "pending",
+          behavior_confirmed: false,
+          kb_dataset_id: body.kb_dataset_id,
+          kb_observed_segment_ids: body.observed_segment_ids,
+          kb_source_versions: body.source_versions,
+          kb_source_versions_verified: Array.isArray(body.source_versions) && body.source_versions.length > 0,
+          kb_failure_reason: body.failure_reason,
+          supersedes_example_id: latest?.example_id ?? null,
+        },
+        source_trace_id: typeof body.source_trace_id === "string" ? body.source_trace_id : null,
+        created_by: "user-mock",
+      };
+      captured.savedFailureExamples.push(created);
+      examples.push(created);
+      await route.fulfill(jsonResponse({ example: created, created: true, revision: revision + 1 }));
+      return;
     }
 
     if (
@@ -590,10 +665,13 @@ test.describe("@mock KB eval case persistence", () => {
     assertNoClientErrors();
   });
 
-  test("hit-test sends the query and hits to the eval set with a stable case_id", async ({
+  test("hit-test saves a pending failure with expectation and stable source version", async ({
     page,
   }) => {
-    const assertNoClientErrors = watchClientErrors(page);
+    // The first latest-revision lookup is expected to be 404 for a new case.
+    const assertNoClientErrors = watchClientErrors(page, [
+      /^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/,
+    ]);
     const captured = await installEvalCasesHarness(page);
     await page.goto(`/knowledge/${DATASET_ID}?tab=retrieval`);
 
@@ -603,30 +681,106 @@ test.describe("@mock KB eval case persistence", () => {
     const sendButton = page.getByTestId("send-hits-to-eval");
     await expect(sendButton).toBeVisible();
     await sendButton.click();
+    await page.getByLabel("期望答案").fill("年假申请应提前三天提交。");
+    await page.getByLabel("失败原因（选填）").fill("召回了旧规则");
+    await page.getByTestId("save-knowledge-failure").click();
 
-    await expect.poll(() => captured.imports.length).toBe(1);
-    expect(captured.imports[0].mode).toBe("skip_duplicates");
-    expect(captured.imports[0].examples).toHaveLength(1);
-    const sent = captured.imports[0].examples[0];
-    expect(String(sent.case_id)).toMatch(/^kb-hit-mock-eval-cases-[0-9a-f]{8}$/);
-    expect(sent.input).toEqual({ query: "年假怎么申请？" });
-    expect(sent.expected_output).toEqual({
-      relevant_segment_ids: ["seg-hit-1", "seg-hit-2"],
-    });
-    expect(sent.metadata).toMatchObject({
+    await expect.poll(() => captured.failureSaves.length).toBe(1);
+    const sent = captured.failureSaves[0];
+    expect(String(sent.case_id)).toMatch(/^kb-failure-kb-hit-test-[0-9a-f]{8}-[0-9a-f]{8}$/);
+    expect(sent.query).toBe("年假怎么申请？");
+    expect(sent.expected_answer).toBe("年假申请应提前三天提交。");
+    expect(sent.expected_revision).toBe(0);
+    expect(sent).toMatchObject({
       source: "kb-hit-test",
       kb_dataset_id: DATASET_ID,
+      observed_segment_ids: ["seg-hit-1", "seg-hit-2"],
+      source_versions: [{
+        kb_dataset_id: DATASET_ID,
+        document_id: "doc-handbook",
+        segment_id: "seg-hit-1",
+        source_version: 2,
+        source_hash: "a".repeat(64),
+      }, {
+        kb_dataset_id: DATASET_ID,
+        document_id: "doc-handbook",
+        segment_id: "seg-hit-2",
+        source_version: 2,
+        source_hash: "b".repeat(64),
+      }],
     });
-    await expect(page.getByText("已送评测集", { exact: true })).toBeVisible();
+    expect(captured.savedFailureExamples[0].metadata).toMatchObject({
+      source_kind: "kb_failure", review_status: "pending", case_revision: 1,
+    });
+    await expect(page.getByText("已保存到 Eval 审核队列", { exact: true })).toBeVisible();
 
-    // A repeated send of the same query dedupes instead of duplicating.
+    // An exact retry returns the same immutable revision without claiming an update.
     await sendButton.click();
-    await expect.poll(() => captured.imports.length).toBe(2);
-    // exact: the aria-live twin renders title+description in one span.
-    await expect(
-      page.getByText("新增 0 个；已存在跳过 1 个", { exact: true })
-    ).toBeVisible();
+    await page.getByLabel("期望答案").fill("年假申请应提前三天提交。");
+    await page.getByLabel("失败原因（选填）").fill("召回了旧规则");
+    await page.getByTestId("save-knowledge-failure").click();
+    await expect.poll(() => captured.failureSaves.length).toBe(2);
+    expect(captured.failureSaves[1].expected_revision).toBe(1);
+    expect(captured.savedFailureExamples).toHaveLength(1);
+    await expect(page.getByText("样本未更新", { exact: true })).toBeVisible();
+
+    // Changing the expectation appends revision 2; revision 1 keeps its meaning.
+    await sendButton.click();
+    await page.getByLabel("期望答案").fill("年假申请应提前四天提交。");
+    await page.getByLabel("失败原因（选填）").fill("期望答案已修正");
+    await page.getByTestId("save-knowledge-failure").click();
+    await expect.poll(() => captured.failureSaves.length).toBe(3);
+    expect(captured.failureSaves[2].expected_revision).toBe(1);
+    expect(captured.savedFailureExamples).toHaveLength(2);
+    expect(captured.savedFailureExamples[0].expected_output.answer).toBe("年假申请应提前三天提交。");
+    expect(captured.savedFailureExamples[1].expected_output.answer).toBe("年假申请应提前四天提交。");
+    expect(captured.savedFailureExamples[1].metadata.case_revision).toBe(2);
     assertNoClientErrors();
+  });
+
+  test("zero-hit retrieval can still save a pending case without invented sources", async ({ page }) => {
+    const assertNoClientErrors = watchClientErrors(page, [
+      /^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/,
+    ]);
+    const captured = await installEvalCasesHarness(page, { zeroHits: true });
+    await page.goto(`/knowledge/${DATASET_ID}?tab=retrieval`);
+
+    await page.getByPlaceholder("请输入文本").first().fill("找不到的规则？");
+    await page.getByRole("button", { name: "测试" }).first().click();
+    await page.getByTestId("send-hits-to-eval").click();
+    await expect(page.getByTestId("save-knowledge-failure-dialog")).toContainText("0 / 0");
+    await page.getByLabel("期望答案").fill("应明确说明资料不足。");
+    await page.getByTestId("save-knowledge-failure").click();
+
+    await expect.poll(() => captured.failureSaves.length).toBe(1);
+    expect(captured.savedFailureExamples[0].metadata).toMatchObject({
+      review_status: "pending",
+      kb_observed_segment_ids: [],
+      kb_source_versions: [],
+    });
+    assertNoClientErrors();
+  });
+
+  test("KB readers without Eval run permission see why saving is unavailable", async ({ page }) => {
+    const captured = await installEvalCasesHarness(page, { evalRunPermission: false });
+    await page.goto(`/knowledge/${DATASET_ID}?tab=retrieval`);
+    await page.getByPlaceholder("请输入文本").first().fill("年假怎么申请？");
+    await page.getByRole("button", { name: "测试" }).first().click();
+    await expect(page.getByTestId("send-hits-to-eval")).toBeDisabled();
+    await expect(page.getByRole("note")).toContainText("需要 Eval 运行权限");
+    expect(captured.failureSaves).toHaveLength(0);
+  });
+
+  test("a mixed result with missing source versions cannot enter the review store", async ({ page }) => {
+    const captured = await installEvalCasesHarness(page, { incompleteSource: true });
+    await page.goto(`/knowledge/${DATASET_ID}?tab=retrieval`);
+    await page.getByPlaceholder("请输入文本").first().fill("年假怎么申请？");
+    await page.getByRole("button", { name: "测试" }).first().click();
+    await page.getByTestId("send-hits-to-eval").click();
+    await page.getByLabel("期望答案").fill("应提前三天申请。");
+    await expect(page.getByTestId("save-knowledge-failure-dialog").getByRole("alert")).toContainText("切片缺少稳定来源版本");
+    await expect(page.getByTestId("save-knowledge-failure")).toBeDisabled();
+    expect(captured.failureSaves).toHaveLength(0);
   });
 
   test("workbench persistence controls stay usable at mobile width", async ({

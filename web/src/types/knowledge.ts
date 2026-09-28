@@ -439,6 +439,8 @@ export interface RetrieveHit {
   text: string;
   score: number;
   metadata?: Record<string, unknown>;
+  source_version?: number | null;
+  source_hash?: string | null;
 }
 
 export interface RetrieveResponse {
@@ -564,6 +566,8 @@ export interface QAContextSegment {
   text: string;
   score: number;
   metadata?: Record<string, unknown>;
+  source_version?: number | null;
+  source_hash?: string | null;
 }
 
 export interface QAResponse {
@@ -657,6 +661,13 @@ export interface DatasetConfig {
   dataset_id: string;
   chunking: ChunkingConfig;
   retrieval: RetrievalConfig;
+  parsing?: {
+    enabled: boolean;
+    source: "default" | "dataset";
+    backends: Array<{ name: string; available: boolean }>;
+    warnings: string[];
+  };
+  configuration_warnings?: string[];
   embedding: {
     provider: string;
     model: string;

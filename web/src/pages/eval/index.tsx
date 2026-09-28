@@ -1,4 +1,4 @@
-import { Alert, App as AntApp, Button, Descriptions, Input, InputNumber, Progress, Select, Space, Tabs } from "antd";
+import { Alert, App as AntApp, Button, Descriptions, Input, InputNumber, Pagination, Progress, Select, Space, Tabs } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -13,9 +13,9 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 
 import {
   createEvalDataset,
@@ -34,8 +34,9 @@ import {
   getEvalExperimentRunResults,
   getEvalSummary,
   importEvalExamples,
+  listAllEvalExamples,
   listAgentTraces,
-  listEvalDatasets,
+  listAllEvalDatasets,
   listEvalEvaluators,
   listEvalExamples,
   listEvalExperiments,
@@ -44,6 +45,7 @@ import {
   runEvalEvaluatorAsync,
   updateEvalExample,
   type EvalDataset,
+  type EvalExample,
   type EvalEvaluator,
   type EvalExperiment,
   type EvalExperimentCaseResult,
@@ -70,6 +72,7 @@ import { ExperimentRunComparison } from "./components/ExperimentRunComparison";
 import { ExperimentRunResults } from "./components/ExperimentRunResults";
 import { KbRagasPanel } from "./components/KbRagasPanel";
 import { TraceExplorerShell } from "./components/TraceExplorerShell";
+import { canApproveReviewExample, kbDeepLinkNavigationKey, kbFailureSourceVersions, latestReviewCandidates } from "./reviewQueue";
 
 import "./styles.css";
 
@@ -311,6 +314,7 @@ type ExampleActionOptions = {
 
 export function EvalPage() {
   const { t } = useTranslation();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const { message, modal } = AntApp.useApp();
   const canRunEvaluations = usePermission("console:eval:run");
@@ -386,7 +390,19 @@ export function EvalPage() {
   );
   const [traceOffset, setTraceOffset] = useState(0);
   const [activeRunTab, setActiveRunTab] = useState("experiment_runs");
-  const [activeAssetsTab, setActiveAssetsTab] = useState("golden_sets");
+  const [activeAssetsTab, setActiveAssetsTab] = useState(
+    searchParams.get("review") === "pending" ? "review_queue" : "golden_sets"
+  );
+  const [reviewPage, setReviewPage] = useState(1);
+  const [reviewBusyIds, setReviewBusyIds] = useState<Set<string>>(new Set());
+  const reviewInFlightRef = useRef(new Set<string>());
+  const selectedKbDatasetRef = useRef("");
+  useEffect(() => {
+    if (searchParams.get("review") === "pending") {
+      setActiveWorkbenchTab("assets");
+      setActiveAssetsTab("review_queue");
+    }
+  }, [location.key, searchParams]);
   const [contractPrefillRevision, setContractPrefillRevision] = useState(0);
   const serverFilters = useMemo(
     () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter, traceOffset),
@@ -471,7 +487,7 @@ export function EvalPage() {
 
   const datasetsQuery = useQuery({
     queryKey: ["eval", "datasets"],
-    queryFn: () => listEvalDatasets(),
+    queryFn: listAllEvalDatasets,
     staleTime: 30_000,
   });
 
@@ -493,6 +509,14 @@ export function EvalPage() {
     staleTime: 10_000,
   });
   const datasets = useMemo(() => datasetsQuery.data?.datasets || [], [datasetsQuery.data?.datasets]);
+  useEffect(() => {
+    const navigation = kbDeepLinkNavigationKey(location.key, kbDatasetFilter);
+    if (!kbDatasetFilter || selectedKbDatasetRef.current === navigation) return;
+    const linked = datasets.find((dataset) => dataset.metadata?.kb_dataset_id === kbDatasetFilter);
+    if (!linked) return;
+    setSelectedDatasetId(linked.dataset_id);
+    selectedKbDatasetRef.current = navigation;
+  }, [datasets, kbDatasetFilter, location.key]);
   const evaluators = useMemo(() => evaluatorsQuery.data?.evaluators || [], [evaluatorsQuery.data?.evaluators]);
   const ragasEvaluators = useMemo(() => {
     const listed = evaluators.filter((evaluator) => evaluator.evaluator_type === "ragas");
@@ -565,9 +589,9 @@ export function EvalPage() {
   useEffect(() => {
     if (!selectedExperimentId && experiments[0]?.experiment_id) {
       setSelectedExperimentId(experiments[0].experiment_id);
-      setSelectedDatasetId(experiments[0].dataset_id || undefined);
+      if (!kbDatasetFilter) setSelectedDatasetId(experiments[0].dataset_id || undefined);
     }
-  }, [experiments, selectedExperimentId]);
+  }, [experiments, selectedExperimentId, kbDatasetFilter]);
 
   useEffect(() => {
     setRunComparison(null);
@@ -611,6 +635,13 @@ export function EvalPage() {
     enabled: Boolean(activeDataset?.dataset_id),
     staleTime: 20_000,
   });
+  const reviewExamplesQuery = useQuery({
+    queryKey: ["eval", "review-examples", activeDataset?.dataset_id],
+    queryFn: () => listAllEvalExamples(activeDataset?.dataset_id || ""),
+    enabled: Boolean(activeDataset?.dataset_id) && activeWorkbenchTab === "assets" && activeAssetsTab === "review_queue",
+    staleTime: 20_000,
+  });
+  useEffect(() => setReviewPage(1), [activeDataset?.dataset_id]);
 
   const detailQuery = useQuery({
     queryKey: ["eval", "trace-detail", activeTraceFamily, selectedTraceId],
@@ -915,19 +946,44 @@ export function EvalPage() {
   });
 
   const reviewMutation = useMutation({
-    mutationFn: async (payload: { exampleId: string; status: "approved" | "rejected" | "needs_fix" }) => {
+    mutationFn: async (payload: { example: EvalExample; status: "approved" | "rejected" | "needs_fix" }) => {
       if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
-      return updateEvalExample(activeDataset.dataset_id, payload.exampleId, {
+      return updateEvalExample(activeDataset.dataset_id, payload.example.example_id, {
         review_status: payload.status,
+        ...(payload.example.metadata?.source_kind === "kb_failure"
+          ? { split: "review" }
+          : {}),
         metadata: { reviewed_from: "eval_console" },
       });
     },
-    onSuccess: async () => {
-      message.success(t("eval.score.submitted"));
+    onSuccess: async (_result, payload) => {
+      message.success(
+        payload.example.metadata?.source_kind === "kb_failure" && payload.status === "approved"
+          ? t("knowledge.detail.failureApprovedNotRunnable")
+          : t("eval.score.submitted")
+      );
       await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+      await queryClient.invalidateQueries({ queryKey: ["eval", "review-examples"] });
     },
     onError: (error) => message.error(toError(error).message),
+    onSettled: (_data, _error, payload) => {
+      if (!payload) return;
+      reviewInFlightRef.current.delete(payload.example.example_id);
+      setReviewBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(payload.example.example_id);
+        return next;
+      });
+    },
   });
+
+  function submitReview(example: EvalExample, status: "approved" | "rejected" | "needs_fix") {
+    if (!canRunEvaluations || reviewInFlightRef.current.has(example.example_id)) return;
+    if (status === "approved" && !canApproveReviewExample(example)) return;
+    reviewInFlightRef.current.add(example.example_id);
+    setReviewBusyIds((current) => new Set(current).add(example.example_id));
+    reviewMutation.mutate({ example, status });
+  }
 
   const baselineRun = comparableRuns.find((run) => run.run_id === baselineRunId) || null;
   const candidateRun = comparableRuns.find((run) => run.run_id === candidateRunId) || null;
@@ -1718,10 +1774,9 @@ export function EvalPage() {
     </WorkbenchPanel>
   );
 
-  const pendingExamples = (examplesQuery.data?.examples || []).filter(
-    (example) => example.metadata?.review_status === "pending"
-      || example.metadata?.review_status === "needs_fix"
-  );
+  const pendingExamples = latestReviewCandidates(reviewExamplesQuery.data?.examples || []);
+  const reviewPageCount = Math.max(1, Math.ceil(pendingExamples.length / 8));
+  const currentReviewPage = Math.min(reviewPage, reviewPageCount);
 
   const reviewQueueTab = (
     <WorkbenchPanel
@@ -1740,25 +1795,88 @@ export function EvalPage() {
         </Button>
       </Space>
       <div className="eval-review-list">
-        {pendingExamples.length > 0 ? pendingExamples.slice(0, 8).map((example) => (
-          <article className="eval-review-row" key={example.example_id}>
-            <div>
-              <strong>{String(example.metadata?.case_id || example.example_id)}</strong>
-              <span>{String(example.metadata?.review_status || "pending")} · {example.split}</span>
-            </div>
-            <Space size={8}>
-              <Button size="small" disabled={!canRunEvaluations} onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "approved" })}>
-                {t("common.approve", "Approve")}
-              </Button>
-              <Button size="small" disabled={!canRunEvaluations} onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "needs_fix" })}>
-                {t("common.review", "Needs fix")}
-              </Button>
-            </Space>
-          </article>
-        )) : (
+        {reviewExamplesQuery.isLoading ? (
+          <Alert type="info" showIcon title={t("knowledge.detail.failureReviewLoading")} />
+        ) : reviewExamplesQuery.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            title={t("knowledge.detail.failureReviewLoadFailed")}
+            action={<Button onClick={() => void reviewExamplesQuery.refetch()}>{t("common.retry")}</Button>}
+          />
+        ) : pendingExamples.length > 0 ? pendingExamples.slice((currentReviewPage - 1) * 8, currentReviewPage * 8).map((example) => {
+          const sourceVersions = kbFailureSourceVersions(example);
+          const kbTraceId = example.metadata?.kb_trace_id;
+          const kbDatasetId = example.metadata?.kb_dataset_id;
+          const isKbFailure = example.metadata?.source_kind === "kb_failure";
+          const canApprove = canApproveReviewExample(example);
+          const busy = reviewBusyIds.has(example.example_id) || reviewMutation.isPending;
+          return (
+            <article className="eval-review-row" key={example.example_id}>
+              <div>
+                <strong>{String(example.metadata?.case_id || example.example_id)}</strong>
+                <span>{String(example.metadata?.review_status || "pending")} · {example.split}
+                  {isKbFailure && ` · v${String(example.metadata?.case_revision || 1)}`}
+                </span>
+                {isKbFailure && (
+                  <div className="mt-2 space-y-1 text-xs">
+                    <p>{t("knowledge.detail.failureQuestion")}: {String(example.input?.query || "")}</p>
+                    <p>{t("knowledge.detail.failureExpectedAnswer")}: {String(example.expected_output?.answer || "")}</p>
+                    {typeof example.metadata?.kb_observed_answer === "string" && (
+                      <p>{t("knowledge.detail.failureObservedAnswer")}: {example.metadata.kb_observed_answer}</p>
+                    )}
+                    {typeof example.metadata?.kb_failure_reason === "string" && (
+                      <p>{t("knowledge.detail.failureReason")}: {example.metadata.kb_failure_reason}</p>
+                    )}
+                    {sourceVersions.length > 0 ? sourceVersions.map((source) => (
+                      <p key={`${source.document_id}:${source.segment_id}:${source.source_version}`}>
+                        {t(example.metadata?.kb_source_versions_verified === true
+                          ? "knowledge.detail.failureVerifiedSource"
+                          : "knowledge.detail.failureRecordedSource")}: {source.document_id} · v{source.source_version} · {source.source_hash.slice(0, 12)}…{" "}
+                        <a
+                          href={`/knowledge/${encodeURIComponent(source.kb_dataset_id)}?tab=documents&document_id=${encodeURIComponent(source.document_id)}`}
+                        >
+                          {t("knowledge.detail.failureOpenDocument")}
+                        </a>
+                      </p>
+                    )) : <p>{t("knowledge.detail.failureNoStableSource")}</p>}
+                    {example.source_trace_id && typeof kbDatasetId === "string" ? (
+                      <a href={`/eval?dataset_id=${encodeURIComponent(kbDatasetId)}&tab=traces&family=rag&trace_id=${encodeURIComponent(example.source_trace_id)}`}>
+                        {t("knowledge.detail.failureOpenTrace")}
+                      </a>
+                    ) : typeof kbTraceId === "string" && kbTraceId ? (
+                      <p>{t("knowledge.detail.failureTraceUnconfirmed")}</p>
+                    ) : null}
+                    {!canApprove && <p role="note">{t("knowledge.detail.failureApprovalNeedsTrace")}</p>}
+                    <p role="note">{t("knowledge.detail.failureApprovalDoesNotRun")}</p>
+                  </div>
+                )}
+              </div>
+              <Space size={8}>
+                <Button size="small" data-testid={`review-approve-${example.example_id}`} disabled={!canRunEvaluations || busy || !canApprove} onClick={() => submitReview(example, "approved")}>
+                  {t("common.approve", "Approve")}
+                </Button>
+                <Button size="small" data-testid={`review-needs-fix-${example.example_id}`} disabled={!canRunEvaluations || busy} onClick={() => submitReview(example, "needs_fix")}>
+                  {t("common.review", "Needs fix")}
+                </Button>
+              </Space>
+            </article>
+          );
+        }) : (
           <Alert type="info" showIcon title={t("eval.workbench.reviewEmpty", "No pending review cases for the active dataset")} />
         )}
       </div>
+      {pendingExamples.length > 8 && (
+        <Pagination
+          className="mt-3"
+          current={currentReviewPage}
+          pageSize={8}
+          total={pendingExamples.length}
+          showSizeChanger={false}
+          onChange={setReviewPage}
+          aria-label={t("knowledge.detail.failureReviewPages")}
+        />
+      )}
     </WorkbenchPanel>
   );
 

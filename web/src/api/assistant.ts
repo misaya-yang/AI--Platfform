@@ -761,6 +761,7 @@ export interface ShareInfo {
   artifact_count: number;
   created_at: string;
   expires_at: string | null;
+  audience: "public" | "internal";
 }
 
 export interface ConversationSharePreview {
@@ -769,7 +770,7 @@ export interface ConversationSharePreview {
   artifacts: Array<{ artifact_id: string; title: string; filename: string; type: string }>;
   message_count: number;
   artifact_count: number;
-  audience: "anyone_with_link";
+  audience: "public" | "internal";
   expires_days: number | null;
   preview_hash: string;
 }
@@ -782,7 +783,7 @@ export interface ExistingConversationShare extends ShareInfo {
 
 export async function previewConversationShare(
   sessionId: string,
-  options: { expires_days?: number; include_artifacts: boolean },
+  options: { expires_days?: number; include_artifacts: boolean; audience: "public" | "internal" },
 ): Promise<ConversationSharePreview> {
   const { data } = await api.get<ConversationSharePreview>(
     `/api/v1/assistant/sessions/${sessionId}/share-preview`,
@@ -804,7 +805,7 @@ export async function revokeConversationShare(shareCode: string): Promise<void> 
 
 export async function createConversationShare(
   sessionId: string,
-  options: { expires_days?: number; include_artifacts: boolean; preview_hash: string }
+  options: { expires_days?: number; include_artifacts: boolean; preview_hash: string; audience: "public" | "internal" }
 ): Promise<ShareInfo> {
   const { data } = await api.post<ShareInfo>(
     `/api/v1/assistant/sessions/${sessionId}/share`,

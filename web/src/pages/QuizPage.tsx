@@ -1,7 +1,7 @@
 /**
- * Public Quiz Page — Standalone quiz experience for shared links.
+ * Quiz Page — Standalone quiz experience for shared links.
  *
- * Accessible at /quiz/:shareCode (no auth required).
+ * Accessible at /quiz/:shareCode (internal links require a current account).
  * Fetches quiz from public API, allows name input, full quiz + score.
  */
 
@@ -14,6 +14,16 @@ import { cn } from "@/lib/utils";
 import type { QuizQuestionData, QuizAttemptResult } from "@/pages/assistant/types";
 import { QuizQuestion } from "@/pages/assistant/components/Quiz/QuizQuestion";
 import { QuizResult } from "@/pages/assistant/components/Quiz/QuizResult";
+import { getAuthToken } from "@/lib/api";
+import { useAuthStore } from "@/store/useAuthStore";
+
+function quizShareHeaders(json = false): HeadersInit {
+  const token = getAuthToken();
+  return {
+    ...(json ? { "Content-Type": "application/json" } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 interface PublicQuizData {
   quiz_id: string;
@@ -25,13 +35,20 @@ interface PublicQuizData {
   require_name: boolean;
   time_limit_minutes?: number | null;
   questions: QuizQuestionData[];
+  audience: "public" | "internal";
 }
 
 type PageState = "loading" | "intro" | "quiz" | "result" | "error";
 
 export function QuizPage() {
+  const userId = useAuthStore((state) => state.user?.user_id);
+  return <QuizPageSession key={userId || "anonymous"} userId={userId} />;
+}
+
+function QuizPageSession({ userId }: { userId?: string }) {
   const { t } = useTranslation();
   const { shareCode } = useParams<{ shareCode: string }>();
+  const sessionKey = `quiz_session_${shareCode}_${userId || "anonymous"}`;
   const [quiz, setQuiz] = useState<PublicQuizData | null>(null);
   const [pageState, setPageState] = useState<PageState>("loading");
   const [error, setError] = useState<string>("");
@@ -57,7 +74,7 @@ export function QuizPage() {
     const controller = new AbortController();
     let savedToken = "";
     try {
-      const saved = sessionStorage.getItem(`quiz_session_${shareCode}`);
+      const saved = sessionStorage.getItem(sessionKey);
       if (saved) {
         const parsed = JSON.parse(saved) as { token?: string; expiresAt?: string; answers?: Record<string, string>; displayName?: string };
         savedToken = parsed.token || "";
@@ -76,7 +93,7 @@ export function QuizPage() {
         if (savedToken) {
           const prior = await fetch(`/api/v1/quiz/public/${shareCode}/attempts/result`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: quizShareHeaders(true),
             body: JSON.stringify({ attempt_token: savedToken }),
             signal: controller.signal,
           });
@@ -87,14 +104,20 @@ export function QuizPage() {
         }
         const resp = await fetch(`/api/v1/quiz/shared/${shareCode}`, {
           signal: controller.signal,
+          headers: quizShareHeaders(),
         });
         if (!resp.ok) {
-          if (acceptedResult && resp.status === 404) {
+          if (acceptedResult && resp.status >= 500) {
+            setError(t("assistant.quiz.publicMetadataUnavailable"));
             setPageState("result");
             return;
           }
           throw new Error(
-            resp.status === 404
+            resp.status === 401
+              ? t("assistant.shareSignIn", "Sign in to open this internal link")
+              : resp.status === 403
+                ? t("assistant.shareSourceUnavailable", "You no longer have access to this link's sources")
+              : resp.status === 404
               ? t("assistant.quiz.publicNotFound")
               : t("assistant.quiz.publicLoadFailed"),
           );
@@ -112,7 +135,7 @@ export function QuizPage() {
 
     void loadQuiz();
     return () => controller.abort();
-  }, [shareCode, t]);
+  }, [shareCode, sessionKey, t]);
 
   const handleStart = useCallback(async () => {
     if (quiz?.require_name && !displayName.trim()) return;
@@ -121,13 +144,13 @@ export function QuizPage() {
       return;
     }
     try {
-      const response = await fetch(`/api/v1/quiz/public/${shareCode}/attempts/start`, { method: "POST" });
+      const response = await fetch(`/api/v1/quiz/public/${shareCode}/attempts/start`, { method: "POST", headers: quizShareHeaders() });
       if (!response.ok) throw new Error(t("assistant.quiz.publicStartFailed"));
       const started = await response.json() as { attempt_token: string; expires_at: string };
       setAttemptToken(started.attempt_token);
       setAttemptExpiresAt(started.expires_at);
       try {
-        sessionStorage.setItem(`quiz_session_${shareCode}`, JSON.stringify({
+        sessionStorage.setItem(sessionKey, JSON.stringify({
           token: started.attempt_token, expiresAt: started.expires_at,
           answers: selectedAnswers, displayName,
         }));
@@ -138,7 +161,7 @@ export function QuizPage() {
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : t("assistant.quiz.publicStartFailed"));
     }
-  }, [quiz, displayName, attemptToken, attemptExpiresAt, shareCode, selectedAnswers, t]);
+  }, [quiz, displayName, attemptToken, attemptExpiresAt, shareCode, sessionKey, selectedAnswers, t]);
 
   const handleSelect = useCallback(
     (label: string) => {
@@ -152,14 +175,14 @@ export function QuizPage() {
   useEffect(() => {
     if (!shareCode || !attemptToken) return;
     try {
-      sessionStorage.setItem(`quiz_session_${shareCode}`, JSON.stringify({
+      sessionStorage.setItem(sessionKey, JSON.stringify({
         token: attemptToken, expiresAt: attemptExpiresAt,
         answers: selectedAnswers, displayName,
       }));
     } catch {
       // A browser with storage disabled can finish the current tab's attempt.
     }
-  }, [shareCode, attemptToken, attemptExpiresAt, selectedAnswers, displayName]);
+  }, [shareCode, sessionKey, attemptToken, attemptExpiresAt, selectedAnswers, displayName]);
 
   const handleSubmit = useCallback(async () => {
     if (!quiz || submitting || submitInFlightRef.current || !attemptToken) return;
@@ -169,7 +192,7 @@ export function QuizPage() {
     try {
       const resp = await fetch(`/api/v1/quiz/shared/${shareCode}/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: quizShareHeaders(true),
         body: JSON.stringify({
           answers: selectedAnswers,
           display_name: displayName.trim() || null,
@@ -250,6 +273,7 @@ export function QuizPage() {
             <p className="text-xs text-muted-foreground">
               {questionCount} {t("assistant.quiz.questions")}
               {quiz?.difficulty && ` · ${quiz.difficulty}`}
+              {quiz?.audience === "internal" && ` · ${t("assistant.shareInternalShort", "Internal")}`}
             </p>
           </div>
         </div>

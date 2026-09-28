@@ -26,6 +26,26 @@ REQUIRED_ASSISTANT_HARD_BLOCKERS = (
 EVAL_GATE_METRICS_SCHEMA_VERSION = "eval-gate-metrics/v2"
 
 
+def is_runnable_dataset_example(example: Any) -> bool:
+    """Keep review candidates out of executable dataset manifests.
+
+    Older regression examples without review metadata remain runnable. A
+    reviewed candidate needs both explicit approval and promotion out of the
+    review split before it participates in a run.
+    """
+    if not isinstance(example, dict):
+        return True  # Preserve the unresolved-target failure for malformed rows.
+    if example.get("split") == "review":
+        return False
+    metadata = example.get("metadata")
+    review_status = metadata.get("review_status") if isinstance(metadata, dict) else None
+    if isinstance(metadata, dict) and metadata.get("source_kind") == "kb_failure":
+        # R2 stores review candidates. R3 must bind KB execution to a current
+        # user/source ACL before these cases can become runnable.
+        return False
+    return review_status is None or review_status == "approved"
+
+
 def _critical_cases_gate_passes(*, case_count: int, passed_count: int) -> bool:
     """Gate on exact counts so display rounding can never hide one failure."""
 
@@ -836,6 +856,20 @@ class EvaluatorExecutor:
             tenant_id=tenant_id,
             run_id=run_id,
         )
+        if any(
+            isinstance(case.get("metadata"), dict)
+            and case["metadata"].get("source_kind") == "kb_failure"
+            for case in run_cases
+        ):
+            error = "KB review cases cannot run without a source ACL execution contract"
+            await self.repository.update_experiment_run(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                status="failed",
+                error_message=error,
+                mark_finished=True,
+            )
+            return EvaluatorRunResult(run_id=run_id, status="failed", error_message=error)
         trial_results: list[dict[str, Any]] = []
         scores_written = 0
         infrastructure_errors: list[str] = []
@@ -1351,10 +1385,15 @@ class EvaluatorExecutor:
 
         frozen_manifest = tuple(manifest[:expected_count])
         unresolved_count = max(expected_count - len(frozen_manifest), 0)
+        runnable_manifest = tuple(
+            example for example in frozen_manifest
+            if is_runnable_dataset_example(example)
+        )
+        expected_count = len(runnable_manifest) + unresolved_count
         source_trace_ids = list(
             dict.fromkeys(
                 str(example["source_trace_id"])
-                for example in frozen_manifest
+                for example in runnable_manifest
                 if isinstance(example, dict)
                 and example.get("example_id")
                 and example.get("source_trace_id")
@@ -1371,7 +1410,7 @@ class EvaluatorExecutor:
             else {}
         )
         targets: list[dict[str, Any]] = []
-        for example in frozen_manifest:
+        for example in runnable_manifest:
             if not isinstance(example, dict):
                 unresolved_count += 1
                 continue

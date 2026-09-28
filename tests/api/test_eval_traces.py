@@ -12,6 +12,7 @@ from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from src.api.deps import AuthContext
 from src.api.schemas.eval import (
@@ -26,10 +27,12 @@ from src.api.schemas.eval import (
     EvalExperimentCreate,
     EvalExperimentRunCreate,
     EvalGateDryRunRequest,
+    EvalKbFailureSave,
     EvalTraceFeedbackRequest,
     KbRagasBatchScoreRequest,
     KbRagasScoreRetrievalRequest,
 )
+from src.api.v1 import _eval_dataset_routes as eval_dataset_routes_module
 from src.api.v1 import eval as eval_routes
 from src.api.v1.eval import (
     batch_score_kb_ragas_dataset,
@@ -53,6 +56,7 @@ from src.api.v1.eval import (
     get_eval_trace_detail,
     get_eval_trace_thread,
     get_kb_ragas_summary_endpoint,
+    get_latest_kb_failure_example,
     import_eval_examples,
     list_eval_datasets,
     list_eval_evaluators,
@@ -63,12 +67,14 @@ from src.api.v1.eval import (
     promote_eval_experiment_baseline,
     run_eval_evaluator_async,
     run_eval_experiment,
+    save_kb_failure_example,
     score_kb_ragas_retrieval,
     update_eval_example,
 )
 from src.config.settings import Settings
 from src.core.auth.permissions import Capability
 from src.core.auth.rbac import RBAC
+from src.core.auth.user_resolver import UserContext
 from src.main import create_app
 
 
@@ -232,6 +238,7 @@ class FakeTraceRepository:
         }
         self.imported_case_ids: set[str] = set()
         self.example_exists = True
+        self.kb_failure_rows: list[dict[str, Any]] = []
         self.evaluator = {
             "evaluator_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "tenant_id": "tenant-a",
@@ -331,6 +338,41 @@ class FakeTraceRepository:
     async def create_example_from_trace(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("example", kwargs))
         return self.example
+
+    async def get_example(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.calls.append(("get_example", kwargs))
+        return self.example if self.example_exists else None
+
+    async def get_latest_kb_failure_example(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.calls.append(("get_latest_kb_failure_example", kwargs))
+        rows = [row for row in self.kb_failure_rows if row["metadata"]["case_id"] == kwargs["case_id"]]
+        return max(rows, key=lambda row: row["metadata"]["case_revision"]) if rows else None
+
+    async def save_kb_failure_revision(self, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+        self.calls.append(("save_kb_failure_revision", kwargs))
+        payload = kwargs["payload"]
+        current = await self.get_latest_kb_failure_example(case_id=payload["case_id"])
+        revision = current["metadata"]["case_revision"] + 1 if current else 1
+        row = {
+            **self.example,
+            "example_id": f"{revision:08d}-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "split": "review",
+            "input": {"query": payload["query"]},
+            "expected_output": {"answer": payload["expected_answer"]},
+            "source_trace_id": payload.get("source_trace_id"),
+            "metadata": {
+                "case_id": payload["case_id"],
+                "case_revision": revision,
+                "source_kind": "kb_failure",
+                "review_status": "pending",
+                "kb_dataset_id": payload["kb_dataset_id"],
+                "kb_observed_segment_ids": payload["observed_segment_ids"],
+                "kb_source_versions": payload["source_versions"],
+                "kb_source_versions_verified": payload["source_versions_verified"],
+            },
+        }
+        self.kb_failure_rows.append(row)
+        return row, True
 
     async def update_example(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("update_example", kwargs))
@@ -448,6 +490,10 @@ class FakeTraceRepository:
     async def list_datasets(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_datasets", kwargs))
         return [self.dataset], 1
+
+    async def list_dataset_manifest(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(("list_dataset_manifest", kwargs))
+        return [self.dataset]
 
     async def list_examples(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_examples", kwargs))
@@ -1201,8 +1247,9 @@ async def test_eval_dataset_evaluator_experiment_workflow(monkeypatch):
     assert evaluator.evaluator_type == "human"
     assert experiment.dataset_id == dataset.dataset_id
     assert job.status == "queued"
-    assert [call[0] for call in repo.calls[-5:]] == [
+    assert [call[0] for call in repo.calls[-6:]] == [
         "dataset",
+        "get_dataset",
         "example",
         "evaluator",
         "experiment",
@@ -1465,6 +1512,243 @@ async def test_eval_example_review_import_and_export(monkeypatch) -> None:
     )
     assert exported.dataset.dataset_id == repo.dataset["dataset_id"]
     assert exported.examples[0].case_id in {"assistant.case.one", repo.example["example_id"]}
+
+
+@pytest.mark.asyncio
+async def test_kb_failure_save_checks_dataset_and_exact_source_identity(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.dataset["metadata"] = {"kb_dataset_id": "kb-1"}
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    async def visible(_request, _user):
+        return {"kb-1": "Knowledge base"}
+
+    async def authorized(_request, _user, refs):
+        return set(refs)
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", visible)
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_source_version_keys", authorized)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", roles=["user"], is_authenticated=True)
+    body = EvalKbFailureSave(
+        case_id="kb-failure-1", kb_dataset_id="kb-1", query="What changed?",
+        expected_answer="The revised policy", source="kb-hit-test",
+        observed_segment_ids=["seg-1"],
+        source_versions=[{
+            "kb_dataset_id": "kb-1", "document_id": "doc-1", "segment_id": "seg-1",
+            "source_version": 2, "source_hash": "a" * 64,
+        }],
+        expected_revision=0,
+    )
+    response = await save_kb_failure_example(
+        dataset_id=repo.dataset["dataset_id"], body=body, request=_request(), auth=auth, user=user,
+    )
+    assert response.created is True
+    assert response.revision == 1
+    assert response.example.metadata["kb_source_versions_verified"] is True
+    latest = await get_latest_kb_failure_example(
+        dataset_id=repo.dataset["dataset_id"], case_id=body.case_id,
+        request=_request(), auth=auth, user=user,
+    )
+    assert latest.example_id == response.example.example_id
+
+    with pytest.raises(HTTPException) as error:
+        await save_kb_failure_example(
+            dataset_id=repo.dataset["dataset_id"],
+            body=body.model_copy(update={"source_versions": []}),
+            request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 422
+
+    async def invisible(_request, _user):
+        return {}
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", invisible)
+    with pytest.raises(HTTPException) as error:
+        await save_kb_failure_example(
+            dataset_id=repo.dataset["dataset_id"],
+            body=body.model_copy(update={"source_versions": [], "observed_segment_ids": []}),
+            request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 403
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", visible)
+
+    async def deny_source(_request, _user, _refs):
+        return set()
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_source_version_keys", deny_source)
+    with pytest.raises(HTTPException) as error:
+        await save_kb_failure_example(
+            dataset_id=repo.dataset["dataset_id"], body=body,
+            request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 422
+
+
+def test_kb_failure_source_version_rejects_boolean() -> None:
+    with pytest.raises(ValidationError):
+        EvalKbFailureSave(
+            case_id="kb-failure-bool", kb_dataset_id="kb-1", query="q",
+            expected_answer="a", source="kb-hit-test", expected_revision=0,
+            source_versions=[{
+                "kb_dataset_id": "kb-1", "document_id": "doc-1", "segment_id": "seg-1",
+                "source_version": True, "source_hash": "a" * 64,
+            }],
+        )
+    with pytest.raises(ValidationError):
+        EvalKbFailureSave(
+            case_id="kb-failure-bool", kb_dataset_id="kb-1", query="q",
+            expected_answer="a", source="kb-hit-test", expected_revision=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_generic_eval_import_cannot_forge_kb_failure_provenance(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    with pytest.raises(HTTPException) as error:
+        await import_eval_examples(
+            dataset_id=repo.dataset["dataset_id"],
+            body=EvalExamplesImportRequest(examples=[{
+                "case_id": "forged", "input": {"query": "q"},
+                "expected_output": {"answer": "a"},
+                "metadata": {"source_kind": "kb_failure", "kb_source_versions_verified": True},
+            }]),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+    assert error.value.status_code == 422
+    assert not any(call[0] == "import_examples" for call in repo.calls)
+    with pytest.raises(HTTPException) as error:
+        await create_eval_example_from_trace(
+            dataset_id=repo.dataset["dataset_id"],
+            body=EvalExampleFromTraceCreate(
+                source_trace_id="11111111-1111-4111-8111-111111111111",
+                metadata={"source_kind": "kb_failure"},
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+    assert error.value.status_code == 422
+    with pytest.raises(HTTPException) as error:
+        await update_eval_example(
+            dataset_id=repo.dataset["dataset_id"], example_id=repo.example["example_id"],
+            body=EvalExampleUpdate(metadata={"case_revision": 999}),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+    assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_kb_failure_eval_reads_recheck_current_dataset_and_source_acl(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.dataset["metadata"] = {"kb_dataset_id": "kb-1"}
+    repo.example = {
+        **repo.example,
+        "metadata": {
+            "case_id": "kb-case", "source_kind": "kb_failure", "kb_dataset_id": "kb-1",
+            "kb_observed_segment_ids": ["seg-1"],
+            "kb_source_versions": [{
+                "kb_dataset_id": "kb-1", "document_id": "doc-1", "segment_id": "seg-1",
+                "source_version": 2, "source_hash": "a" * 64,
+            }],
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", roles=["user"], is_authenticated=True)
+
+    async def visible(_request, _user):
+        return {"kb-1": "Knowledge base"}
+
+    async def authorized(_request, _user, refs):
+        return set(refs)
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", visible)
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_source_version_keys", authorized)
+    listed = await list_eval_examples(
+        dataset_id=repo.dataset["dataset_id"], request=_request(), auth=auth, user=user,
+    )
+    assert listed.examples[0].metadata["case_id"] == "kb-case"
+    with pytest.raises(HTTPException) as error:
+        await update_eval_example(
+            dataset_id=repo.dataset["dataset_id"], example_id=repo.example["example_id"],
+            body=EvalExampleUpdate(expected_output={"answer": "mutated in place"}),
+            request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException) as error:
+        await delete_eval_example(
+            dataset_id=repo.dataset["dataset_id"], example_id=repo.example["example_id"],
+            request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 409
+    original_sources = repo.example["metadata"]["kb_source_versions"]
+    repo.example["metadata"]["kb_source_versions"] = []
+    with pytest.raises(HTTPException) as error:
+        await list_eval_examples(
+            dataset_id=repo.dataset["dataset_id"], request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 403
+    repo.example["metadata"]["kb_source_versions"] = original_sources
+
+    async def revoked(_request, _user, _refs):
+        return set()
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_source_version_keys", revoked)
+    with pytest.raises(HTTPException) as error:
+        await list_eval_examples(
+            dataset_id=repo.dataset["dataset_id"], request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 403
+    with pytest.raises(HTTPException) as error:
+        await export_eval_examples(
+            dataset_id=repo.dataset["dataset_id"], request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 403
+
+    async def invisible(_request, _user):
+        return {}
+
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", invisible)
+    catalog = await list_eval_datasets(request=_request(), auth=auth, user=user)
+    assert catalog.datasets == []
+    assert catalog.total == 0
+    with pytest.raises(HTTPException) as error:
+        await get_eval_dataset(
+            dataset_id=repo.dataset["dataset_id"], request=_request(), auth=auth, user=user,
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_eval_dataset_catalog_paginates_after_kb_acl_filter(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    catalog = [
+        {**repo.dataset, "dataset_id": "00000000-0000-4000-8000-000000000001", "metadata": {}},
+        {**repo.dataset, "dataset_id": "00000000-0000-4000-8000-000000000002", "metadata": {"kb_dataset_id": "private-kb"}},
+        {**repo.dataset, "dataset_id": "00000000-0000-4000-8000-000000000003", "metadata": {"kb_dataset_id": "visible-kb"}},
+        {**repo.dataset, "dataset_id": "00000000-0000-4000-8000-000000000004", "metadata": {}},
+    ]
+
+    async def manifest(**_kwargs):
+        return catalog
+
+    async def visible(_request, _user):
+        return {"visible-kb": "Visible"}
+
+    monkeypatch.setattr(repo, "list_dataset_manifest", manifest)
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    monkeypatch.setattr(eval_dataset_routes_module, "visible_dataset_names", visible)
+    auth = _auth()
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", roles=["user"], is_authenticated=True)
+    first = await list_eval_datasets(request=_request(), limit=2, offset=0, auth=auth, user=user)
+    second = await list_eval_datasets(request=_request(), limit=2, offset=2, auth=auth, user=user)
+    assert first.total == second.total == 3
+    assert [row.dataset_id for row in first.datasets] == [catalog[0]["dataset_id"], catalog[2]["dataset_id"]]
+    assert [row.dataset_id for row in second.datasets] == [catalog[3]["dataset_id"]]
 
 
 @pytest.mark.asyncio
@@ -1829,6 +2113,101 @@ async def test_eval_experiment_live_run_rejects_unconfirmed_trace_case(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_eval_live_run_ignores_pending_cases_and_freezes_only_approved(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    approved = {
+        **repo.example,
+        "split": "regression",
+        "input": {"message": "approved request"},
+        "metadata": {"case_id": "approved-case", "review_status": "approved"},
+    }
+    pending = {
+        **repo.example,
+        "example_id": "pending-id",
+        "split": "review",
+        "input": {"query": "KB failure"},
+        "metadata": {"case_id": "pending-case", "review_status": "pending", "behavior_confirmed": False},
+    }
+    approved_kb = {
+        **repo.example,
+        "example_id": "approved-kb-id",
+        "split": "review",
+        "input": {"query": "Approved KB question"},
+        "expected_output": {"answer": "Expected KB answer"},
+        "metadata": {"case_id": "approved-kb", "source_kind": "kb_failure", "review_status": "approved"},
+    }
+
+    async def manifest(**_kwargs):
+        return [pending, approved_kb, approved]
+
+    monkeypatch.setattr(repo, "list_example_manifest", manifest)
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    response = await run_eval_experiment(
+        experiment_id=repo.experiment["experiment_id"],
+        body=EvalExperimentRunCreate(
+            evaluator_ids=[repo.evaluator["evaluator_id"]], run_mode="live_candidate",
+        ),
+        request=_request(),
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    assert response.jobs[0].status == "queued"
+    payload = next(call[1] for call in repo.calls if call[0] == "live_experiment_run")
+    assert [example["metadata"]["case_id"] for example in payload["examples"]] == ["approved-case"]
+
+
+@pytest.mark.asyncio
+async def test_eval_live_run_with_only_pending_cases_is_not_enqueued(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.example = {
+        **repo.example,
+        "split": "review",
+        "input": {"query": "KB failure"},
+        "metadata": {"case_id": "pending-case", "review_status": "pending"},
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await run_eval_experiment(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalExperimentRunCreate(
+                evaluator_ids=[repo.evaluator["evaluator_id"]], run_mode="live_candidate",
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail == "Dataset has no approved examples"
+    assert not any(call[0] == "live_experiment_run" for call in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_eval_live_run_with_approved_kb_case_is_still_not_enqueued(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.example = {
+        **repo.example,
+        "split": "review",
+        "input": {"query": "KB question"},
+        "expected_output": {"answer": "Human approved answer"},
+        "metadata": {"case_id": "kb-approved", "source_kind": "kb_failure", "review_status": "approved"},
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    with pytest.raises(HTTPException) as error:
+        await run_eval_experiment(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalExperimentRunCreate(
+                evaluator_ids=[repo.evaluator["evaluator_id"]], run_mode="live_candidate",
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+    assert error.value.status_code == 422
+    assert error.value.detail == "Dataset has no approved examples"
+    assert not any(call[0] == "live_experiment_run" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_eval_baseline_promotion_requires_complete_verified_live_run(monkeypatch) -> None:
     repo = FakeTraceRepository()
     repo.experiment["baseline_run_id"] = None
@@ -2065,6 +2444,14 @@ def test_eval_dataset_subrouter_reexports_endpoint_identity() -> None:
             "POST",
             "/datasets/{dataset_id}/examples:from-trace",
         ): eval_routes.create_eval_example_from_trace,
+        (
+            "GET",
+            "/datasets/{dataset_id}/kb-failures/{case_id}",
+        ): eval_routes.get_latest_kb_failure_example,
+        (
+            "POST",
+            "/datasets/{dataset_id}/kb-failures:save",
+        ): eval_routes.save_kb_failure_example,
         ("POST", "/trace-feedback:preview"): eval_routes.preview_eval_trace_feedback,
     }
 
@@ -2086,6 +2473,8 @@ def test_eval_openapi_paths_are_registered() -> None:
     assert "/api/v1/eval/datasets/{dataset_id}/examples:import" in paths
     assert "/api/v1/eval/datasets/{dataset_id}/examples:export" in paths
     assert "/api/v1/eval/datasets/{dataset_id}/examples:from-trace" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/kb-failures/{case_id}" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/kb-failures:save" in paths
     assert "/api/v1/eval/trace-feedback:preview" in paths
     assert "/api/v1/eval/evaluators" in paths
     assert "/api/v1/eval/evaluators/{evaluator_id}:run-async" in paths

@@ -13,11 +13,16 @@ from src.core.auth.user_resolver import UserContext
 
 
 class _ShareDB:
-    def __init__(self, *, knowledge: bool = False, legacy: list | None = None, context_document: bool = False):
+    def __init__(self, *, knowledge: bool = False, legacy: list | None = None, context_document: bool = False, versioned_context: bool = False):
         self.knowledge = knowledge
         self.context_document = context_document
+        self.versioned_context = versioned_context
         self.legacy = legacy or []
         self.inserted: dict | None = None
+        self.inserted_scope: dict | None = None
+
+    async def get_user(self, user_id: str):
+        return {"user_id": user_id, "tenant_id": "tenant-a", "status": "active"}
 
     async def fetchrow(self, sql: str, *args):
         if "FROM assistant.sessions" in sql:
@@ -33,6 +38,8 @@ class _ShareDB:
     async def fetch(self, sql: str, *args):
         if "FROM assistant_runtime_items" in sql:
             assert args == ("session-a", "tenant-a", "user-a")
+            if self.versioned_context:
+                return [{"run_id": "run-a", "chunks": [{"dataset_id": "private", "document_id": "doc-a", "source_version": 2, "source_hash": "a" * 64}]}]
             return [{"run_id": "run-a", "chunks": [{"dataset_id": "private", "document_id": "doc-a"}]}] if self.context_document else []
         if "FROM assistant_runtime_snapshots" in sql:
             assert args == ("session-a", "tenant-a", "user-a")
@@ -50,6 +57,7 @@ class _ShareDB:
     async def execute(self, sql: str, *args):
         if "INSERT INTO conversation_shares" in sql:
             self.inserted = json.loads(args[5])
+            self.inserted_scope = json.loads(args[10]) if args[10] is not None else None
             return "INSERT 1"
         raise AssertionError(sql)
 
@@ -71,9 +79,22 @@ class _Store:
         ], 2)
 
 
+class _Proxy:
+    allowed = True
+
+    async def list_datasets(self, _user):
+        return [{"dataset_id": "private", "name": "Private"}] if self.allowed else []
+
+    async def authorize_documents(self, _user, _dataset_id, document_ids):
+        return set(document_ids) if self.allowed else set()
+
+    async def authorize_document_sources(self, _user, _dataset_id, references):
+        return {(item["document_id"], item["source_version"], item["source_hash"]) for item in references} if self.allowed else set()
+
+
 def _request(db: _ShareDB):
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        database=db, agent_thread_store=_Store(),
+        database=db, agent_thread_store=_Store(), kb_proxy=_Proxy(),
     )))
 
 
@@ -86,7 +107,7 @@ async def test_preview_and_create_share_use_same_safe_snapshot() -> None:
     db = _ShareDB()
     request = _request(db)
     preview = await shares.preview_share("session-a", request, _user(), True, None)
-    assert preview["audience"] == "anyone_with_link"
+    assert preview["audience"] == "public"
     assert preview["message_count"] == 2
     assert preview["artifact_count"] == 1
     assert preview["messages"][1]["metadata"] == {"artifact_ids": ["artifact-a"]}
@@ -175,3 +196,38 @@ async def test_create_rejects_missing_or_stale_preview_hash() -> None:
         )
     assert mismatch.value.status_code == 409
     assert db.inserted is None
+
+
+@pytest.mark.asyncio
+async def test_internal_share_freezes_version_outside_snapshot() -> None:
+    db = _ShareDB(knowledge=True, versioned_context=True)
+    request = _request(db)
+    preview = await shares.preview_share("session-a", request, _user(), True, None, "internal")
+    assert preview["audience"] == "internal"
+    assert "source_scope" not in json.dumps(preview)
+    result = await shares.create_share(
+        "session-a", shares.CreateShareRequest(audience="internal", preview_hash=preview["preview_hash"]),
+        request, _user(),
+    )
+    assert result.audience == "internal"
+    assert db.inserted_scope == {
+        "version": 1,
+        "dataset_ids": ["private"],
+        "document_ids": [["private", "doc-a"]],
+        "source_versions": [["private", "doc-a", 2, "a" * 64]],
+    }
+    assert '"source_scope":' not in json.dumps(db.inserted)
+    assert "a" * 64 not in json.dumps(db.inserted)
+
+
+@pytest.mark.asyncio
+async def test_internal_share_rejects_unversioned_and_revoked_sources() -> None:
+    with pytest.raises(HTTPException) as unversioned:
+        await shares.preview_share("session-a", _request(_ShareDB(knowledge=True, context_document=True)), _user(), True, None, "internal")
+    assert unversioned.value.status_code == 409
+
+    request = _request(_ShareDB(knowledge=True, versioned_context=True))
+    request.app.state.kb_proxy.allowed = False
+    with pytest.raises(HTTPException) as revoked:
+        await shares.preview_share("session-a", request, _user(), True, None, "internal")
+    assert revoked.value.status_code == 403

@@ -449,10 +449,9 @@ async def test_document_enqueue_claim_uses_dataset_then_document_lock_and_active
     assert "desired_archived' = 'false'" in compact
     # Dual-verb contract: the claim binds a third metadata-patch parameter;
     # for the default ingest it is NULL, which strips any stale verb markers.
-    # The fourth parameter carries the requested verb (empty string for the
-    # default ingest) so a waiting row already queued under a verb can only
-    # be re-claimed by an identical verb.
-    assert update_args == ("document-a", "dataset-a", None, "")
+    # The fourth parameter carries the requested verb (empty for ingest);
+    # the fifth and sixth bind the replay-rule CAS and execution owner.
+    assert update_args == ("document-a", "dataset-a", None, "", False, None)
     assert "WHEN $3::jsonb IS NULL THEN" in compact
     assert f"- '{DOCUMENT_INGEST_ACTION_KEY}'" in compact
     assert f"- '{DOCUMENT_RECOVER_STAGE_KEY}'" in compact

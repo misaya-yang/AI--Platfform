@@ -23,6 +23,31 @@ EXAMPLE_METADATA_PATCH_KEYS = (
     "owner",
     "review_status",
 )
+
+
+class EvalCaseRevisionConflict(ValueError):
+    def __init__(self, current_revision: int):
+        self.current_revision = current_revision
+        super().__init__(f"Eval case revision changed; current revision is {current_revision}")
+
+
+def _kb_case_revision(example: dict[str, Any]) -> int:
+    metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
+    value = metadata.get("case_revision")
+    return value if type(value) is int and value > 0 else 1
+
+
+def _latest_kb_case_revision(examples: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not examples:
+        return None
+    return max(
+        examples,
+        key=lambda example: (
+            _kb_case_revision(example),
+            example.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+            str(example.get("example_id") or ""),
+        ),
+    )
 EVAL_GATE_METRICS_SCHEMA_VERSION = "eval-gate-metrics/v2"
 EVAL_GATE_METRICS_REQUIRED_FIELDS = frozenset(
     {
@@ -1257,6 +1282,80 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def get_example(
+        self, *, tenant_id: str, dataset_id: str, example_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            """
+            SELECT * FROM eval_examples
+            WHERE tenant_id = $1 AND dataset_id = $2::uuid AND example_id = $3::uuid
+            """,
+            tenant_id, dataset_id, example_id,
+        )
+        return self._decode_eval_row(row) if row else None
+
+    async def review_kb_failure_example(
+        self, *, tenant_id: str, dataset_id: str, example_id: str,
+        review_status: str, reviewed_from: str,
+    ) -> dict[str, Any] | None:
+        if not self.enabled:
+            raise RuntimeError("Eval database is unavailable")
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM eval_examples
+                WHERE tenant_id = $1 AND dataset_id = $2::uuid AND example_id = $3::uuid
+                """,
+                tenant_id, dataset_id, example_id,
+            )
+            if not row:
+                return None
+            target = self._decode_eval_row(dict(row))
+            metadata = target.get("metadata") or {}
+            case_id = metadata.get("case_id")
+            if metadata.get("source_kind") != "kb_failure" or not case_id:
+                raise ValueError("Not a KB failure case")
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                f"eval-kb-failure:{tenant_id}:{dataset_id}:{case_id}",
+            )
+            rows = await conn.fetch(
+                """
+                SELECT * FROM eval_examples
+                WHERE tenant_id = $1 AND dataset_id = $2::uuid
+                  AND metadata->>'source_kind' = 'kb_failure'
+                  AND metadata->>'case_id' = $3
+                ORDER BY created_at DESC, example_id DESC
+                """,
+                tenant_id, dataset_id, case_id,
+            )
+            latest = _latest_kb_case_revision(
+                [self._decode_eval_row(dict(item)) for item in rows]
+            )
+            if not latest or latest["example_id"] != example_id:
+                raise EvalCaseRevisionConflict(_kb_case_revision(latest) if latest else 0)
+            if review_status == "approved" and not latest.get("source_trace_id"):
+                raise ValueError("A confirmed source trace is required before approval")
+            expected = latest.get("expected_output") or {}
+            if review_status == "approved" and not str(expected.get("answer") or "").strip():
+                raise ValueError("An expected answer is required before approval")
+            updated = await conn.fetchrow(
+                """
+                UPDATE eval_examples
+                SET split = $4,
+                    metadata = metadata || $5::jsonb
+                WHERE tenant_id = $1 AND dataset_id = $2::uuid AND example_id = $3::uuid
+                RETURNING *
+                """,
+                tenant_id, dataset_id, example_id,
+                "review",
+                self._json_dumps({
+                    "review_status": review_status,
+                    "reviewed_from": reviewed_from,
+                }),
+            )
+            return self._decode_eval_row(dict(updated)) if updated else None
+
     async def delete_example(
         self,
         *,
@@ -1343,6 +1442,117 @@ class AgentTraceRepository(BaseRepository):
                     existing_case_ids.add(case_id)
                     seen_in_request.add(case_id)
         return {"imported": len(imported), "skipped": skipped, "examples": imported}
+
+    async def get_latest_kb_failure_example(
+        self, *, tenant_id: str, dataset_id: str, case_id: str,
+    ) -> dict[str, Any] | None:
+        rows = await self.fetch(
+            """
+            SELECT * FROM eval_examples
+            WHERE tenant_id = $1 AND dataset_id = $2::uuid
+              AND metadata->>'source_kind' = 'kb_failure'
+              AND metadata->>'case_id' = $3
+            ORDER BY created_at DESC, example_id DESC
+            """,
+            tenant_id, dataset_id, case_id,
+        )
+        return _latest_kb_case_revision([self._decode_eval_row(row) for row in rows])
+
+    async def save_kb_failure_revision(
+        self, *, tenant_id: str, dataset_id: str, created_by: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Append an immutable revision under a per-case PostgreSQL lock.
+
+        The expected revision is a CAS token. An exact retry returns the
+        already stored revision without inserting another row.
+        """
+        if not self.enabled:
+            raise RuntimeError("Eval database is unavailable")
+        case_id = str(payload["case_id"])
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                f"eval-kb-failure:{tenant_id}:{dataset_id}:{case_id}",
+            )
+            dataset = await conn.fetchrow(
+                "SELECT dataset_id FROM eval_datasets WHERE tenant_id = $1 AND dataset_id = $2::uuid",
+                tenant_id, dataset_id,
+            )
+            if not dataset:
+                raise ValueError("Eval dataset not found")
+            rows = await conn.fetch(
+                """
+                SELECT * FROM eval_examples
+                WHERE tenant_id = $1 AND dataset_id = $2::uuid
+                  AND metadata->>'source_kind' = 'kb_failure'
+                  AND metadata->>'case_id' = $3
+                ORDER BY created_at DESC, example_id DESC
+                """,
+                tenant_id, dataset_id, case_id,
+            )
+            latest = _latest_kb_case_revision(
+                [self._decode_eval_row(dict(row)) for row in rows]
+            )
+            if latest and (latest.get("metadata") or {}).get("kb_dataset_id") != payload["kb_dataset_id"]:
+                raise ValueError("KB case belongs to a different knowledge dataset")
+            source_versions = [
+                {**source, "source_hash": str(source["source_hash"]).lower()}
+                for source in payload.get("source_versions") or []
+            ]
+            semantic_metadata = {
+                "source": payload["source"],
+                "source_kind": "kb_failure",
+                "kb_dataset_id": payload["kb_dataset_id"],
+                "kb_trace_id": payload.get("kb_trace_id"),
+                "kb_query_fingerprint": payload.get("query_fingerprint"),
+                "kb_observed_segment_ids": payload.get("observed_segment_ids") or [],
+                "kb_source_versions": source_versions,
+                "kb_source_versions_verified": payload.get("source_versions_verified") is True,
+                "kb_observed_answer": payload.get("observed_answer"),
+                "kb_failure_reason": str(payload.get("failure_reason") or "").strip() or None,
+            }
+            query = str(payload["query"]).strip()
+            expected_answer = str(payload["expected_answer"]).strip()
+            source_trace_id = payload.get("source_trace_id")
+            if latest:
+                metadata = latest.get("metadata") or {}
+                if (
+                    latest.get("input") == {"query": query}
+                    and latest.get("expected_output") == {"answer": expected_answer}
+                    and latest.get("source_trace_id") == source_trace_id
+                    and all(metadata.get(key) == value for key, value in semantic_metadata.items())
+                ):
+                    return latest, False
+            current_revision = _kb_case_revision(latest) if latest else 0
+            if payload["expected_revision"] != current_revision:
+                raise EvalCaseRevisionConflict(current_revision)
+            metadata = {
+                **semantic_metadata,
+                "case_id": case_id,
+                "case_revision": current_revision + 1,
+                "supersedes_example_id": latest.get("example_id") if latest else None,
+                "review_status": "pending",
+                "behavior_confirmed": False,
+            }
+            row = await conn.fetchrow(
+                """
+                INSERT INTO eval_examples (
+                    dataset_id, tenant_id, split, input, expected_output, metadata,
+                    source_trace_id, created_by
+                ) VALUES ($1::uuid, $2, 'review', $3::jsonb, $4::jsonb, $5::jsonb,
+                          $6::uuid, $7)
+                RETURNING *
+                """,
+                dataset_id, tenant_id,
+                self._json_dumps({"query": query}),
+                self._json_dumps({"answer": expected_answer}),
+                self._json_dumps(metadata),
+                source_trace_id, created_by,
+            )
+            if not row:
+                raise RuntimeError("Eval case revision insert returned no row")
+            return self._decode_eval_row(dict(row)), True
 
     async def create_evaluator(
         self,
@@ -3095,6 +3305,17 @@ class AgentTraceRepository(BaseRepository):
             offset,
         )
         return [self._decode_eval_row(row) for row in rows], total
+
+    async def list_dataset_manifest(self, *, tenant_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            """
+            SELECT * FROM eval_datasets
+            WHERE tenant_id = $1
+            ORDER BY created_at DESC, dataset_id DESC
+            """,
+            tenant_id,
+        )
+        return [self._decode_eval_row(row) for row in rows]
 
     async def get_dataset(
         self,

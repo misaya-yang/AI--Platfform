@@ -42,8 +42,12 @@ class _FakeDB:
         self.quiz_rows[quiz_id] = {
             "id": quiz_id, "tenant_id": "tenant-a", "created_by": "alex",
             "dataset_ids": [], "session_id": "source-session", "run_id": "source-run",
+            "title": "Verified quiz", "description": None, "question_count": 0, "difficulty": "easy",
         }
         self.source_snapshots = [{"run_id": "source-run", "snapshot": {"readonly_capabilities": {"items": []}}}]
+
+    async def get_user(self, user_id: str):
+        return {"user_id": user_id, "tenant_id": "tenant-a", "status": "active"}
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
         query = query.replace("assistant.", "")
@@ -216,6 +220,8 @@ class _FakeDB:
                 "time_limit_minutes": time_limit_minutes,
                 "attempt_count": 0,
                 "created_at": created_at,
+                "audience": args[13] if len(args) > 13 else "public",
+                "source_scope": json.loads(args[14]) if len(args) > 14 else None,
             }
         elif "UPDATE artifact_shares" in query:
             share_id = args[0]
@@ -420,6 +426,38 @@ async def test_timed_attempt_uses_single_use_start_token(fake_db: _FakeDB) -> No
             answers={},
             attempt_token=expired["attempt_token"],
         )
+
+
+@pytest.mark.asyncio
+async def test_internal_quiz_token_is_bound_to_signed_in_account(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz", title="Internal", payload={"quiz_id": str(uuid.uuid4())},
+        answer_keys=[], tenant_id="tenant-a", user_id="alex", audience="internal",
+        require_name=False,
+        source_scope={"version": 1, "dataset_ids": [], "document_ids": [], "source_versions": []},
+    )
+    started = await mgr.start_attempt(share["share_code"], audience="internal", user_id="user-a")
+    token = started["attempt_token"]
+    assert await mgr.get_attempt_result(
+        share["share_code"], token, audience="internal", user_id="user-b",
+    ) is None
+    with pytest.raises(AttemptInputError):
+        await mgr.submit_attempt(
+            share["share_code"], answers={}, attempt_token=token,
+            audience="internal", user_id="user-b",
+        )
+    result = await mgr.submit_attempt(
+        share["share_code"], answers={}, attempt_token=token,
+        audience="internal", user_id="user-a",
+    )
+    assert result["attempt_id"]
+    assert await mgr.get_attempt_result(
+        share["share_code"], token, audience="internal", user_id="user-b",
+    ) is None
+    assert (await mgr.get_attempt_result(
+        share["share_code"], token, audience="internal", user_id="user-a",
+    ))["attempt_id"] == result["attempt_id"]
 
 
 @pytest.mark.asyncio
@@ -854,3 +892,46 @@ def test_owner_share_list_is_scoped_and_excludes_grading_payload() -> None:
     result = response.json()
     assert len(result) == 1 and result[0]["expired"] is True
     assert "payload" not in result[0] and "answer_keys" not in result[0]
+
+
+def test_internal_quiz_create_keeps_immutable_sources_private(fake_db: _FakeDB, monkeypatch) -> None:
+    from src.api.v1 import artifact_shares
+    from src.core.auth.user_resolver import UserContext
+
+    quiz_id = str(uuid.uuid4())
+    fake_db.add_verified_quiz(quiz_id)
+    version_ref = ("dataset-a", "document-a", 3, "c" * 64)
+
+    async def quiz_sources(_request, _quiz_id, _tenant_id, *, require_origin):
+        assert require_origin
+        return frozenset({"dataset-a"}), frozenset({("dataset-a", "document-a")}), frozenset({version_ref})
+
+    async def allowed(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(artifact_shares, "quiz_source_scope", quiz_sources)
+    monkeypatch.setattr(artifact_shares, "source_scope_allowed", allowed)
+    app = FastAPI()
+    app.state.database = fake_db
+    app.include_router(artifact_shares_router)
+    app.dependency_overrides[artifact_shares.get_user_context] = lambda: UserContext(
+        user_id="alex", tenant_id="tenant-a", is_authenticated=True,
+    )
+    response = TestClient(app).post("/artifact-shares", json={
+        "kind": "quiz", "quiz_id": quiz_id, "audience": "internal",
+    })
+    assert response.status_code == 200
+    assert response.json()["audience"] == "internal"
+    row = next(iter(fake_db.shares.values()))
+    assert row["source_scope"]["source_versions"] == [["dataset-a", "document-a", 3, "c" * 64]]
+    assert "source_scope" not in row["payload"]
+    manager = ArtifactShareManager(db=fake_db)
+    assert asyncio.run(manager.get_public_artifact(row["share_code"])) is None
+    internal_payload = asyncio.run(manager.get_public_artifact(row["share_code"], audience="internal"))
+    assert internal_payload is not None and internal_payload["audience"] == "internal"
+    assert "source_scope" not in internal_payload
+
+    public = TestClient(app).post("/artifact-shares", json={
+        "kind": "quiz", "quiz_id": quiz_id, "audience": "public",
+    })
+    assert public.status_code == 409

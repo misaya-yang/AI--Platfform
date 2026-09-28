@@ -89,7 +89,8 @@ async def rule_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     document_id VARCHAR(255) PRIMARY KEY,
                     dataset_id VARCHAR(255) NOT NULL
                         REFERENCES datasets(dataset_id) ON DELETE CASCADE,
-                    process_rule_id VARCHAR(255)
+                    process_rule_id VARCHAR(255),
+                    status VARCHAR(50) NOT NULL DEFAULT 'completed'
                 );
                 CREATE TABLE document_pipeline_executions (
                     execution_id VARCHAR(255) PRIMARY KEY,

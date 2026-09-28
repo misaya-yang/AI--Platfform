@@ -10,7 +10,7 @@
  * embedding-model change.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Sliders,
@@ -39,7 +39,7 @@ import {
   updateDataset,
   type ChunkPreviewItem,
 } from "@/api/knowledge";
-import type { ChunkingMode, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
+import type { ChunkingMode, Dataset, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
 import {
   CHUNKING_CONFIG_API_FIELDS,
   DEFAULT_CHUNKING_CONFIG,
@@ -64,26 +64,88 @@ import { toast } from "@/hooks/use-toast";
 import { DATASET_EMBEDDING_MODELS as EMBEDDING_MODELS } from "@/pages/knowledge/detail/useDatasetUploadController";
 import { EmbeddingMigrationPanel } from "@/pages/knowledge/detail/EmbeddingMigrationPanel";
 import { MetadataRegistryCard } from "@/pages/knowledge/detail/MetadataRegistryCard";
+import { useAuthStore } from "@/store/useAuthStore";
+import { currentSettingsDraftKey, shouldLoadSettingsConfig } from "./settingsDraftScope";
+
+interface SettingsDraft {
+  version: 1;
+  configEditing: boolean;
+  retrievalEditing: boolean;
+  embeddingEditing: boolean;
+  chunkingMode: ChunkingMode;
+  chunkSize: number;
+  chunkOverlap: number;
+  retrievalMode: "vector" | "keyword" | "hybrid";
+  topK: number;
+  fusionStrategy: "weighted" | "rrf";
+  denseWeight: number;
+  rerankEnabled: boolean;
+  rerankModel: string;
+  mmrEnabled: boolean;
+  mmrLambda: number;
+  scoreThreshold: number;
+  embeddingModel: string;
+}
+
+function readSettingsDraft(key: string | null): SettingsDraft | null {
+  if (!key) return null;
+  try {
+    const raw = sessionStorage.getItem(key);
+    const draft: unknown = raw ? JSON.parse(raw) : null;
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return null;
+    const value = draft as Partial<SettingsDraft>;
+    return value.version === 1 && typeof value.configEditing === "boolean"
+      && typeof value.retrievalEditing === "boolean" && typeof value.embeddingEditing === "boolean"
+      && typeof value.chunkSize === "number" && typeof value.chunkOverlap === "number"
+      && typeof value.topK === "number" && typeof value.denseWeight === "number"
+      && typeof value.rerankEnabled === "boolean" && typeof value.mmrEnabled === "boolean"
+      && typeof value.mmrLambda === "number" && typeof value.scoreThreshold === "number"
+      && typeof value.rerankModel === "string" && typeof value.embeddingModel === "string"
+      && typeof value.chunkingMode === "string" && typeof value.retrievalMode === "string"
+      && typeof value.fusionStrategy === "string" ? value as SettingsDraft : null;
+  } catch { return null; }
+}
+
+function writeSettingsDraft(key: string | null, draft: SettingsDraft | null) {
+  if (!key) return;
+  try {
+    if (draft) sessionStorage.setItem(key, JSON.stringify(draft));
+    else sessionStorage.removeItem(key);
+  } catch { /* Keep the in-memory editor usable if tab storage is unavailable. */ }
+}
 
 interface SettingsTabProps {
   datasetId?: string;
+  dataset?: Dataset;
   active: boolean;
   permission?: string;
+  onUnsavedChange: (unsaved: boolean) => void;
   onDatasetRefetch: () => void;
 }
 
 export function SettingsTab({
   datasetId,
+  dataset,
   active,
   permission,
+  onUnsavedChange,
   onDatasetRefetch,
 }: SettingsTabProps) {
   const { t } = useTranslation();
+  const userId = useAuthStore((state) => state.user?.user_id);
+  const settingsDraftKey = userId && datasetId ? `kb-settings:${userId}:${datasetId}` : null;
 
   // Config
   const [datasetConfig, setDatasetConfig] = useState<DatasetConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState<DatasetDebugInfo | null>(null);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(false);
+  const [loadedDatasetId, setLoadedDatasetId] = useState<string | null>(null);
+  const lastLoadAttemptId = useRef<string | null>(null);
+  const currentDatasetId = useRef(datasetId);
+  const wasActive = useRef(false);
+  currentDatasetId.current = datasetId;
 
   // Config editing - Chunking
   const [configEditing, setConfigEditing] = useState(false);
@@ -117,6 +179,41 @@ export function SettingsTab({
 
   // API copy feedback
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const unsavedConfig = loadedDatasetId === datasetId
+    && (configEditing || retrievalEditing || embeddingEditing);
+
+  useEffect(() => {
+    const writableDraftKey = currentSettingsDraftKey(userId, datasetId, loadedDatasetId, draftReady);
+    if (!writableDraftKey) return;
+    if (!unsavedConfig) setDraftRestored(false);
+    writeSettingsDraft(writableDraftKey, unsavedConfig ? {
+      version: 1, configEditing, retrievalEditing, embeddingEditing,
+      chunkingMode: editChunkingMode, chunkSize: editChunkSize, chunkOverlap: editChunkOverlap,
+      retrievalMode: editRetrievalMode, topK: editTopK, fusionStrategy: editFusionStrategy,
+      denseWeight: editDenseWeight, rerankEnabled: editRerankEnabled, rerankModel: editRerankModel,
+      mmrEnabled: editMmrEnabled, mmrLambda: editMmrLambda, scoreThreshold: editScoreThreshold,
+      embeddingModel: editEmbeddingModel,
+    } : null);
+  }, [draftReady, userId, datasetId, loadedDatasetId, unsavedConfig, configEditing, retrievalEditing,
+    embeddingEditing, editChunkingMode, editChunkSize, editChunkOverlap,
+    editRetrievalMode, editTopK, editFusionStrategy, editDenseWeight,
+    editRerankEnabled, editRerankModel, editMmrEnabled, editMmrLambda,
+    editScoreThreshold, editEmbeddingModel]);
+
+  useEffect(() => {
+    onUnsavedChange(unsavedConfig);
+    return () => onUnsavedChange(false);
+  }, [onUnsavedChange, unsavedConfig]);
+
+  useEffect(() => {
+    if (!unsavedConfig) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [unsavedConfig]);
 
   // Helper function to copy text with feedback
   const handleCopy = async (text: string, key: string) => {
@@ -132,12 +229,22 @@ export function SettingsTab({
 
   const loadConfig = useCallback(async () => {
     if (!datasetId) return;
+    lastLoadAttemptId.current = datasetId;
     setConfigLoading(true);
     try {
       const [config, debug] = await Promise.all([
         getDatasetConfig(datasetId),
         debugDataset(datasetId).catch(() => null),
       ]);
+      if (currentDatasetId.current !== datasetId) return;
+      if (config.dataset_id !== datasetId) throw new Error("Dataset config identity mismatch");
+      // The route may reuse this component for another dataset. Reset the
+      // editor before marking the new dataset ready to write its own draft.
+      setDraftReady(false);
+      setConfigEditing(false);
+      setRetrievalEditing(false);
+      setEmbeddingEditing(false);
+      setDraftRestored(false);
       setDatasetConfig(config);
       setDebugInfo(debug);
 
@@ -145,7 +252,7 @@ export function SettingsTab({
       if (config?.chunking) {
         setEditChunkingMode(config.chunking.mode || "automatic");
         setEditChunkSize(config.chunking.chunk_size || 500);
-        setEditChunkOverlap(config.chunking.chunk_overlap || 50);
+        setEditChunkOverlap(config.chunking.chunk_overlap ?? 50);
       }
       // Initialize retrieval config
       if (config?.retrieval) {
@@ -172,12 +279,35 @@ export function SettingsTab({
         // Score threshold
         setEditScoreThreshold(config.retrieval.score_threshold ?? DEFAULT_RETRIEVAL_CONFIG.score_threshold);
       }
+      const draft = readSettingsDraft(settingsDraftKey);
+      if (draft) {
+        setConfigEditing(draft.configEditing);
+        setRetrievalEditing(draft.retrievalEditing);
+        setEmbeddingEditing(draft.embeddingEditing);
+        setEditChunkingMode(draft.chunkingMode);
+        setEditChunkSize(draft.chunkSize);
+        setEditChunkOverlap(draft.chunkOverlap);
+        setEditRetrievalMode(draft.retrievalMode);
+        setEditTopK(draft.topK);
+        setEditFusionStrategy(draft.fusionStrategy);
+        setEditDenseWeight(draft.denseWeight);
+        setEditBm25Weight(1 - draft.denseWeight);
+        setEditRerankEnabled(draft.rerankEnabled);
+        setEditRerankModel(draft.rerankModel);
+        setEditMmrEnabled(draft.mmrEnabled);
+        setEditMmrLambda(draft.mmrLambda);
+        setEditScoreThreshold(draft.scoreThreshold);
+        setEditEmbeddingModel(draft.embeddingModel);
+        setDraftRestored(true);
+      }
+      setLoadedDatasetId(datasetId);
+      setDraftReady(true);
     } catch (e) {
-      console.error("Failed to load config:", e);
+      if (currentDatasetId.current === datasetId) console.error("Failed to load config:", e);
     } finally {
-      setConfigLoading(false);
+      if (currentDatasetId.current === datasetId) setConfigLoading(false);
     }
-  }, [datasetId]);
+  }, [datasetId, settingsDraftKey]);
 
   const handleMigrationChange = useCallback(() => {
     onDatasetRefetch();
@@ -185,10 +315,11 @@ export function SettingsTab({
   }, [loadConfig, onDatasetRefetch]);
 
   useEffect(() => {
-    if (active && datasetId && !datasetConfig) {
+    if (shouldLoadSettingsConfig(datasetId, loadedDatasetId, lastLoadAttemptId.current, active, wasActive.current)) {
       void loadConfig();
     }
-  }, [datasetConfig, datasetId, loadConfig, active]);
+    wasActive.current = active;
+  }, [datasetId, loadedDatasetId, loadConfig, active]);
 
   /**
    * Chunking is REPLACED wholesale server-side, so build a complete object:
@@ -235,6 +366,7 @@ export function SettingsTab({
       // Reload config
       const config = await getDatasetConfig(datasetId);
       setDatasetConfig(config);
+      onDatasetRefetch();
     } catch (e) {
       console.error("Failed to save config:", e);
       toast.error(t("knowledge.detail.saveConfigFailed"), e instanceof Error ? e.message : String(e));
@@ -273,6 +405,7 @@ export function SettingsTab({
       // Reload config
       const config = await getDatasetConfig(datasetId);
       setDatasetConfig(config);
+      onDatasetRefetch();
     } catch (e) {
       console.error("Failed to save retrieval config:", e);
       toast.error(t("knowledge.detail.saveRetrievalFailed"), e instanceof Error ? e.message : String(e));
@@ -341,6 +474,11 @@ export function SettingsTab({
 
   return (
     <div className="grid grid-cols-2 gap-6">
+      {unsavedConfig && (
+        <p role="status" className="col-span-2 text-sm text-amber-700 dark:text-amber-400">
+          {t(draftRestored ? "knowledge.detail.configDraftRestored" : "knowledge.detail.unsavedConfigNotice")}
+        </p>
+      )}
       <div className="col-span-2">
         <MetadataRegistryCard
           datasetId={datasetId}
@@ -350,6 +488,11 @@ export function SettingsTab({
       </div>
       {/* 分块配置 */}
       <Card className="p-5">
+        <p className="mb-2 text-xs text-muted-foreground">
+          {t("knowledge.detail.configSource")}: {t(dataset?.index_config?.chunking
+            ? "knowledge.detail.configDatasetOverride" : "knowledge.detail.configDefaultInherited")}
+          {" · "}{t("knowledge.detail.chunkingSavedNotIndexed")}
+        </p>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-foreground flex items-center gap-2">
             <Sliders className="h-5 w-5 text-amber-600" />
@@ -496,7 +639,7 @@ export function SettingsTab({
                   if (datasetConfig?.chunking) {
                     setEditChunkingMode(datasetConfig.chunking.mode || "automatic");
                     setEditChunkSize(datasetConfig.chunking.chunk_size || 500);
-                    setEditChunkOverlap(datasetConfig.chunking.chunk_overlap || 50);
+                    setEditChunkOverlap(datasetConfig.chunking.chunk_overlap ?? 50);
                   }
                 }}
               >
@@ -545,10 +688,10 @@ export function SettingsTab({
                   <span className="text-[10px] text-muted-foreground/60">chars</span>
                 </div>
                 <p className="text-xl font-bold text-foreground mt-1 tabular-nums tracking-tight">
-                  {datasetConfig.chunking?.chunk_overlap || 300}
+                  {datasetConfig.chunking?.chunk_overlap ?? 50}
                 </p>
                 <div className="mt-2 h-1 rounded-full bg-muted overflow-hidden">
-                  <div className="h-full rounded-full bg-amber-500/40" style={{ width: `${Math.min(((datasetConfig.chunking?.chunk_overlap || 300) / (datasetConfig.chunking?.chunk_size || 2000)) * 100, 100)}%` }} />
+                  <div className="h-full rounded-full bg-amber-500/40" style={{ width: `${Math.min(((datasetConfig.chunking?.chunk_overlap ?? 50) / (datasetConfig.chunking?.chunk_size || 2000)) * 100, 100)}%` }} />
                 </div>
               </div>
             </div>
@@ -560,6 +703,11 @@ export function SettingsTab({
 
       {/* 检索配置 */}
       <Card className="p-5">
+        <p className="mb-2 text-xs text-muted-foreground">
+          {t("knowledge.detail.configSource")}: {t(dataset?.index_config?.retrieval
+            ? "knowledge.detail.configDatasetOverride" : "knowledge.detail.configDefaultInherited")}
+          {" · "}{t("knowledge.detail.retrievalQueryOnly")}
+        </p>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-foreground flex items-center gap-2">
             <Search className="h-5 w-5 text-emerald-600" />
@@ -794,19 +942,19 @@ export function SettingsTab({
                 <div className="flex items-center justify-between mb-2.5">
                   <p className="text-xs font-medium text-primary">{t("knowledge.detail.fusionWeight")}</p>
                   <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <span>{t("knowledge.detail.vectorWeight", { pct: ((datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100).toFixed(0) })}</span>
+                    <span>{t("knowledge.detail.vectorWeight", { pct: ((datasetConfig.retrieval.fusion?.alpha ?? DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100).toFixed(0) })}</span>
                     <span className="text-muted-foreground/40">|</span>
-                    <span>BM25 {((1 - (datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100).toFixed(0)}%</span>
+                    <span>BM25 {((1 - (datasetConfig.retrieval.fusion?.alpha ?? DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100).toFixed(0)}%</span>
                   </div>
                 </div>
                 <div className="h-2 rounded-full bg-muted/60 overflow-hidden flex">
                   <div
                     className="h-full bg-primary/60 rounded-l-full transition-[width] duration-200"
-                    style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100}%` }}
+                    style={{ width: `${(datasetConfig.retrieval.fusion?.alpha ?? DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100}%` }}
                   />
                   <div
                     className="h-full bg-amber-500/40 rounded-r-full transition-[width] duration-200"
-                    style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100}%` }}
+                    style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha ?? DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100}%` }}
                   />
                 </div>
               </div>
@@ -849,8 +997,32 @@ export function SettingsTab({
         )}
       </Card>
 
+      {datasetConfig?.parsing && (
+        <Card className="col-span-2 p-5 space-y-2">
+          <h3 className="font-semibold text-foreground">{t("knowledge.detail.parsingAvailability")}</h3>
+          <p className="text-sm text-muted-foreground">
+            {t(datasetConfig.parsing.enabled
+              ? "knowledge.detail.parsingConfigured" : "knowledge.detail.parsingDefault")}
+          </p>
+          {datasetConfig.parsing.backends.map((backend) => (
+            <p key={backend.name} className="text-sm">
+              {backend.name}: {t(backend.available
+                ? "knowledge.detail.parserAvailable" : "knowledge.detail.parserUnavailable")}
+            </p>
+          ))}
+          {datasetConfig.parsing.warnings.length > 0 && (
+            <p role="alert" className="text-sm text-amber-700 dark:text-amber-400">
+              {t("knowledge.detail.parserWarning")}
+            </p>
+          )}
+        </Card>
+      )}
+
       {/* Embedding 配置 */}
       <Card className="p-5">
+        <p className="mb-2 text-xs text-muted-foreground">
+          {t("knowledge.detail.embeddingEffect")}
+        </p>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-foreground flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-primary" />

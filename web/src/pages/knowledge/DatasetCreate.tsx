@@ -51,6 +51,66 @@ function createdDatasetDraftKey(userId: string | undefined): string | null {
   return userId ? `kb-create-dataset:${userId}` : null;
 }
 
+interface CreateFormDraft {
+  version: 1;
+  step: number;
+  name: string;
+  description: string;
+  visibility: VisibilityType;
+  kbType: KBType;
+  useCase: UseCase;
+  embeddingModel: string;
+  pendingUrls: Array<Pick<PendingUrl, "id" | "url" | "title">>;
+  urlInput: string;
+  urlTitle: string;
+  chunkingMode: ChunkingMode;
+  maxChunkSize: number;
+  metadataExtract: boolean;
+  excelHeaderConcat: boolean;
+  multiTurnRewrite: boolean;
+  rerankModel: string;
+  scoreThreshold: number;
+  maxRecall: number;
+}
+
+function createFormDraftKey(userId: string | undefined): string | null {
+  return userId ? `kb-create-form:${userId}` : null;
+}
+
+function readCreateFormDraft(key: string | null): CreateFormDraft | null {
+  if (!key) return null;
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const draft: unknown = JSON.parse(raw);
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return null;
+    const candidate = draft as Partial<CreateFormDraft>;
+    return candidate.version === 1 && typeof candidate.name === "string"
+      && typeof candidate.description === "string" && Array.isArray(candidate.pendingUrls)
+      && typeof candidate.step === "number" && typeof candidate.maxChunkSize === "number"
+      && typeof candidate.maxRecall === "number" && typeof candidate.scoreThreshold === "number"
+      && typeof candidate.visibility === "string" && typeof candidate.kbType === "string"
+      && typeof candidate.useCase === "string" && typeof candidate.embeddingModel === "string"
+      && typeof candidate.urlInput === "string" && typeof candidate.urlTitle === "string"
+      && typeof candidate.chunkingMode === "string" && typeof candidate.rerankModel === "string"
+      && typeof candidate.metadataExtract === "boolean" && typeof candidate.excelHeaderConcat === "boolean"
+      && typeof candidate.multiTurnRewrite === "boolean"
+      ? candidate as CreateFormDraft : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCreateFormDraft(key: string | null, draft: CreateFormDraft | null) {
+  if (!key) return;
+  try {
+    if (draft) sessionStorage.setItem(key, JSON.stringify(draft));
+    else sessionStorage.removeItem(key);
+  } catch {
+    // The create-request identity has its own required storage check.
+  }
+}
+
 function readCreatedDatasetDraft(key: string | null): string | null {
   if (!key) return null;
   try {
@@ -83,6 +143,8 @@ export default function DatasetCreatePage() {
   const { t } = useTranslation();
   const userId = useAuthStore((state) => state.user?.user_id);
   const createdDraftKey = createdDatasetDraftKey(userId);
+  const formDraftKey = createFormDraftKey(userId);
+  const [restoredFormDraftKey, setRestoredFormDraftKey] = useState<string | null>(null);
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -119,6 +181,45 @@ export default function DatasetCreatePage() {
   const [rerankModel, setRerankModel] = useState("default");
   const [scoreThreshold, setScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
   const [maxRecall, setMaxRecall] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
+
+  useEffect(() => {
+    if (!formDraftKey) return;
+    const draft = readCreateFormDraft(formDraftKey);
+    if (draft) {
+      setStep(Math.min(3, Math.max(1, draft.step)));
+      setName(draft.name);
+      setDescription(draft.description);
+      setVisibility(draft.visibility);
+      setKbType(draft.kbType);
+      setUseCase(draft.useCase);
+      setEmbeddingModel(draft.embeddingModel);
+      setPendingUrls(draft.pendingUrls.map((url) => ({ ...url, status: "pending" })));
+      setUrlInput(draft.urlInput);
+      setUrlTitle(draft.urlTitle);
+      setChunkingMode(draft.chunkingMode);
+      setMaxChunkSize(draft.maxChunkSize);
+      setMetadataExtract(draft.metadataExtract);
+      setExcelHeaderConcat(draft.excelHeaderConcat);
+      setMultiTurnRewrite(draft.multiTurnRewrite);
+      setRerankModel(draft.rerankModel);
+      setScoreThreshold(draft.scoreThreshold);
+      setMaxRecall(draft.maxRecall);
+    }
+    setRestoredFormDraftKey(formDraftKey);
+  }, [formDraftKey]);
+
+  useEffect(() => {
+    if (restoredFormDraftKey !== formDraftKey || !formDraftKey) return;
+    writeCreateFormDraft(formDraftKey, {
+      version: 1,
+      step, name, description, visibility, kbType, useCase, embeddingModel,
+      pendingUrls: pendingUrls.map(({ id, url, title }) => ({ id, url, title })),
+      urlInput, urlTitle, chunkingMode, maxChunkSize, metadataExtract,
+      excelHeaderConcat, multiTurnRewrite, rerankModel, scoreThreshold, maxRecall,
+    });
+  }, [restoredFormDraftKey, formDraftKey, step, name, description, visibility, kbType, useCase,
+    embeddingModel, pendingUrls, urlInput, urlTitle, chunkingMode, maxChunkSize,
+    metadataExtract, excelHeaderConcat, multiTurnRewrite, rerankModel, scoreThreshold, maxRecall]);
 
   useEffect(() => {
     const id = readCreatedDatasetDraft(createdDraftKey);
@@ -235,16 +336,28 @@ export default function DatasetCreatePage() {
 
   const handleSubmit = async () => {
     if (submitInFlight.current || checkingDraft || draftLookupFailure || recoveredDataset) return;
+    const [provider, model] = embeddingModel.split(":");
+    const selectedEmbeddingModel = EMBEDDING_MODELS.find(
+      (candidate) => candidate.provider === provider && candidate.model === model
+    );
+    if (!name.trim() || name.trim().length > MAX_NAME_LENGTH || !selectedEmbeddingModel) {
+      setStep(1);
+      setError(t("knowledge.create.invalidDraftConfig"));
+      return;
+    }
+    if (!Number.isFinite(maxChunkSize) || maxChunkSize < 50 || maxChunkSize > 6000
+      || !Number.isFinite(scoreThreshold) || scoreThreshold < 0 || scoreThreshold > 1
+      || !Number.isInteger(maxRecall) || maxRecall < 1 || maxRecall > 20) {
+      setStep(3);
+      setError(t("knowledge.create.invalidDraftConfig"));
+      return;
+    }
     submitInFlight.current = true;
     setIsSubmitting(true);
     setError(null);
     setOutcomeUnknown(false);
 
     try {
-      const [provider, model] = embeddingModel.split(":");
-      const selectedEmbeddingModel = EMBEDDING_MODELS.find(
-        (candidate) => candidate.provider === provider && candidate.model === model
-      );
       const rerankProvider = rerankModel.startsWith("bge-") ? "bge" : "dashscope";
 
       let datasetId = createdDatasetId;
@@ -413,6 +526,7 @@ export default function DatasetCreatePage() {
       }
 
       writeCreatedDatasetDraft(createdDraftKey, null);
+      writeCreateFormDraft(formDraftKey, null);
       navigate(`/knowledge/${datasetId}`);
     } catch (submitError) {
       console.error("Failed to create dataset:", submitError);
@@ -532,6 +646,16 @@ export default function DatasetCreatePage() {
         {checkingDraft && (
           <p role="status" className="mb-4 text-sm text-muted-foreground">
             {t("knowledge.create.checkingExistingDraft")}
+          </p>
+        )}
+        {restoredFormDraftKey === formDraftKey && (name || description || pendingUrls.length > 0) && (
+          <p role="status" className="mb-4 text-xs text-muted-foreground">
+            {t("knowledge.create.formDraftSaved")}
+          </p>
+        )}
+        {restoredFormDraftKey === formDraftKey && step > 1 && pendingFiles.length === 0 && (
+          <p className="mb-4 text-xs text-muted-foreground">
+            {t("knowledge.create.filesNotRestored")}
           </p>
         )}
         {recoveredDataset && (
@@ -681,6 +805,7 @@ export default function DatasetCreatePage() {
                 setError(t("knowledge.create.draftStorageUnavailable"));
                 return;
               }
+              writeCreateFormDraft(formDraftKey, null);
               window.location.reload();
             }}>
               {t("knowledge.create.startAnotherDataset")}

@@ -69,7 +69,7 @@ import {
 import {
   diffEvalCases,
   exampleToEvalCase,
-  findKbEvalDataset,
+  findKbEvalDatasetPaged,
   KB_EVAL_DATASET_LIST_LIMIT,
   KB_EVAL_DATASET_SOURCE,
   KB_EVAL_EXAMPLE_LIST_LIMIT,
@@ -318,9 +318,10 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
     setCasesError(null);
     (async () => {
       try {
-        const listed = await listEvalDatasets({ limit: KB_EVAL_DATASET_LIST_LIMIT });
+        const evalDataset = await findKbEvalDatasetPaged(datasetId, (offset) =>
+          listEvalDatasets({ limit: KB_EVAL_DATASET_LIST_LIMIT, offset })
+        );
         if (cancelled) return;
-        const evalDataset = findKbEvalDataset(listed.datasets, datasetId);
         if (!evalDataset) {
           setCases([]);
           setRemovedExampleIds([]);
