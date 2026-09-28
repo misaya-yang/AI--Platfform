@@ -38,7 +38,7 @@ from ...persistence.database import (
 from ...persistence.document_batches import DocumentBatchStore
 from ...persistence.document_metadata import MetadataRegistryRevisionConflict
 from ...services.knowledge.chunking import validate_persisted_chunking_config
-from ...services.knowledge.common import maybe_await
+from ...services.knowledge.common import SPECIALIZED_REBUILD_UNAVAILABLE, maybe_await
 from ...services.knowledge.document_detector import DocumentTypeDetector
 from ...services.knowledge.document_metadata import DocumentMetadataManager
 from ...services.knowledge.document_service import (
@@ -46,11 +46,12 @@ from ...services.knowledge.document_service import (
     _require_dataset_index_readable,
     _require_dataset_index_writable,
     _require_unchanged_dataset_content,
+    _with_display_status,
 )
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.query_observability import QueryObservationConflictError
 from ...services.knowledge.upload_budget import require_parser_budget
-from ...services.knowledge.worker import KnowledgeWorker
+from ...services.knowledge.worker import KnowledgeIngestTask, KnowledgeWorker
 from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
 from ..schemas.knowledge import (
     BatchDeleteSchema,
@@ -1713,6 +1714,27 @@ async def get_document(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/source")
+async def get_active_document_source(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Current serving source for citations, including editor identities."""
+    try:
+        await svc.get_document(user, dataset_id, document_id)
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        document = await _require_active_document(
+            svc, dataset=dataset, dataset_id=dataset_id, document_id=document_id,
+        )
+        return _with_display_status(document)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.post("/knowledge/{dataset_id}/documents/{document_id}/reindex")
 async def reindex_document(
     dataset_id: str,
@@ -1773,6 +1795,32 @@ async def reindex_document(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+async def _require_special_replay_admission(
+    worker: KnowledgeWorker,
+    dataset_id: str,
+    document_id: str,
+    document: dict[str, Any],
+    dataset: dict[str, Any],
+    *,
+    action: str,
+) -> None:
+    try:
+        await worker.require_safe_special_replay_admission(
+            KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id),
+            document, dataset, action=action,
+        )
+    except ValidationFailedError as exc:
+        if str(exc) == SPECIALIZED_REBUILD_UNAVAILABLE:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": SPECIALIZED_REBUILD_UNAVAILABLE,
+                    "message": "Specialized document replay requires administrator review",
+                },
+            ) from None
+        raise
+
+
 @router.post("/knowledge/{dataset_id}/documents/{document_id}/reprocess")
 async def reprocess_document(
     dataset_id: str,
@@ -1797,6 +1845,12 @@ async def reprocess_document(
                 status_code=409,
                 detail="Document is already queued; the durable queue owns this generation",
             )
+        await _require_special_replay_admission(
+            worker, dataset_id, document_id, document, dataset, action="reprocess",
+        )
+        _require_dataset_index_writable(
+            await svc.require_dataset_access(user, dataset_id, required="editor")
+        )
         execution_id = await _record_ingest_execution(
             svc,
             dataset_id=dataset_id,
@@ -1866,6 +1920,12 @@ async def recover_document(
                 status_code=409,
                 detail="Document is still processing; automatic crash recovery owns it",
             )
+        await _require_special_replay_admission(
+            worker, dataset_id, document_id, document, dataset, action="recover",
+        )
+        _require_dataset_index_writable(
+            await svc.require_dataset_access(user, dataset_id, required="editor")
+        )
         recover_stage = _latest_stage_reached(document)
         execution_id = await _record_ingest_execution(
             svc,
@@ -1944,6 +2004,12 @@ async def retry_document(
                 status_code=409,
                 detail="Document is still processing; wait for it to finish or be recovered",
             )
+        await _require_special_replay_admission(
+            worker, dataset_id, document_id, document, dataset, action="retry",
+        )
+        _require_dataset_index_writable(
+            await svc.require_dataset_access(user, dataset_id, required="editor")
+        )
         execution_id = await _record_ingest_execution(
             svc,
             dataset_id=dataset_id,
@@ -4407,7 +4473,7 @@ async def list_document_versions(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/{version_number}")
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/{version_number:int}")
 async def get_document_version(
     dataset_id: str,
     document_id: str,
@@ -4569,18 +4635,23 @@ async def restore_document_version(
         if not callable(lease_factory):
             raise ValidationFailedError("Document restore serialization is unavailable")
 
-        # Serialize the complete version/content transition against ingestion and
-        # manual segment changes. The DB transaction makes the hidden status,
-        # restored content, and audit versions visible together; a crash after
-        # commit but before local enqueue remains recoverable from `uploaded`.
+        # Keep the current source serving while a restored historical version
+        # is indexed. The candidate version and its marker are durable in one
+        # transaction; a crash before local enqueue remains recoverable from
+        # the waiting row without exposing a mixed source/segment generation.
         async with lease_factory(dataset_id, document_id) as lease_connection:
+            # A queued request that waited for another document writer must
+            # still have editor access when it acquires the write lease.
+            fresh_access = await svc.require_dataset_access(
+                user, dataset_id, required="editor"
+            )
             authoritative_dataset = await svc.db.get_dataset(
                 dataset_id,
                 connection=lease_connection,
             )
             if not authoritative_dataset or str(
                 authoritative_dataset.get("tenant_id") or ""
-            ) != str(dataset.get("tenant_id") or ""):
+            ) != str(fresh_access.get("tenant_id") or ""):
                 raise ValidationFailedError("Dataset identity changed; retry the restore")
             _require_dataset_index_writable(authoritative_dataset)
 
@@ -4601,6 +4672,12 @@ async def restore_document_version(
                 ):
                     raise ValidationFailedError("Document is not active and restore-ready")
 
+                await worker.require_safe_restore_admission(
+                    KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id),
+                    authoritative_dataset,
+                    connection=lease_connection,
+                )
+
                 # Read version content only after exact dataset/tenant/lifecycle
                 # ownership has been revalidated under the document lease.
                 version_to_restore = await svc.db.get_document_version(
@@ -4611,20 +4688,26 @@ async def restore_document_version(
                     raise ValidationFailedError(f"Version {version_number} not found")
 
                 current_content = str(doc.get("content") or "")
-                if current_content:
-                    current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
-                    await svc.db.create_document_version(
-                        document_id=document_id,
-                        content=current_content,
-                        content_hash=current_hash,
-                        change_type="updated",
-                        title=doc.get("title"),
-                        metadata=metadata if isinstance(metadata, dict) else {},
-                        change_reason=f"Before restore to version {version_number}",
-                        changed_by=user.user_id,
-                        confluence_version=doc.get("confluence_version"),
-                        connection=lease_connection,
-                    )
+                current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+                before_snapshot = await svc.db.create_document_version(
+                    document_id=document_id,
+                    content=current_content,
+                    content_hash=current_hash,
+                    change_type="pending_before_restore",
+                    title=doc.get("title"),
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                    change_reason=f"Before restore to version {version_number}",
+                    changed_by=user.user_id,
+                    confluence_version=doc.get("confluence_version"),
+                    connection=lease_connection,
+                    activate=False,
+                )
+                previous_version = (
+                    int(before_snapshot.get("version_number") or 0)
+                    if isinstance(before_snapshot, dict) else 0
+                )
+                if previous_version <= 0:
+                    raise RuntimeError("pre-restore source snapshot could not be saved")
 
                 restored_content = str(version_to_restore.get("content") or "")
                 await svc.db.update_document_status(
@@ -4634,18 +4717,12 @@ async def restore_document_version(
                     error="",
                     connection=lease_connection,
                 )
-                await svc.db.update_document_content(
-                    document_id,
-                    restored_content,
-                    connection=lease_connection,
-                )
-
                 restored_hash = hashlib.sha256(restored_content.encode("utf-8")).hexdigest()
                 new_version = await svc.db.create_document_version(
                     document_id=document_id,
                     content=restored_content,
                     content_hash=restored_hash,
-                    change_type="restored",
+                    change_type="pending_restore",
                     title=version_to_restore.get("title") or doc.get("title"),
                     metadata=(
                         version_to_restore.get("metadata")
@@ -4656,7 +4733,61 @@ async def restore_document_version(
                     changed_by=user.user_id,
                     confluence_version=version_to_restore.get("confluence_version"),
                     connection=lease_connection,
+                    activate=False,
                 )
+                candidate_version = (
+                    int(new_version.get("version_number") or 0)
+                    if isinstance(new_version, dict) else 0
+                )
+                if candidate_version <= 0:
+                    raise RuntimeError("restore candidate version could not be saved")
+                if candidate_version <= previous_version:
+                    raise RuntimeError("restore candidate version order is invalid")
+                index_config = copy.deepcopy(authoritative_dataset.get("index_config") or {})
+                if not isinstance(index_config, dict):
+                    raise ValidationFailedError("Restore index configuration is invalid")
+                chunking = index_config.get("chunking") or {}
+                if not isinstance(chunking, dict):
+                    raise ValidationFailedError("Restore chunking configuration is invalid")
+                validate_persisted_chunking_config(chunking)
+                replay_snapshot = {
+                    "index_config": index_config,
+                    "chunking": copy.deepcopy(chunking),
+                    "processing_mode": "text_only",
+                    "restore_source_version": version_number,
+                }
+                rule_id = await svc.db.record_process_rule(
+                    dataset_id,
+                    mode=str(chunking.get("mode") or "automatic"),
+                    rules=replay_snapshot,
+                    created_by=user.user_id,
+                    connection=lease_connection,
+                )
+                if not rule_id or not await svc.db.pin_document_process_rule(
+                    document_id, rule_id, connection=lease_connection,
+                ):
+                    raise RuntimeError("restore replay rule could not be pinned")
+                execution_id = await svc.db.record_pipeline_execution(
+                    document_id,
+                    dataset_id,
+                    action="reprocess",
+                    triggered_by=user.user_id,
+                    process_rule_id=rule_id,
+                    input_snapshot=replay_snapshot,
+                    connection=lease_connection,
+                )
+                if not execution_id:
+                    raise RuntimeError("restore replay execution could not be saved")
+                bound = await svc.db.set_pending_restore_version(
+                    document_id,
+                    dataset_id,
+                    previous_version,
+                    candidate_version,
+                    execution_id,
+                    connection=lease_connection,
+                )
+                if not bound:
+                    raise RuntimeError("restore candidate could not bind to queued document")
 
         enqueue_claimed = getattr(worker, "enqueue_claimed", None)
         if not callable(enqueue_claimed):
@@ -4667,16 +4798,22 @@ async def restore_document_version(
         await enqueue_claimed(dataset_id, document_id)
 
         return {
-            "status": "success",
+            "status": "pending",
             "document_id": document_id,
             "restored_from_version": version_number,
             "new_version": new_version.get("version_number") if new_version else None,
-            "message": f"Document restored to version {version_number}. Re-indexing started.",
+            "message": f"Restore of version {version_number} was queued; the previous version remains available until indexing succeeds.",
         }
 
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
+        if str(exc) == SPECIALIZED_REBUILD_UNAVAILABLE:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": SPECIALIZED_REBUILD_UNAVAILABLE,
+                        "message": "Specialized document restore requires administrator review"},
+            ) from None
         raise HTTPException(status_code=404, detail=str(exc))
 
 
@@ -4751,6 +4888,15 @@ class DatasetAuthorizeResponse(BaseModel):
     allowed_dataset_ids: list[str]
 
 
+class DocumentAuthorizeRequest(BaseModel):
+    dataset_id: str
+    document_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class DocumentAuthorizeResponse(BaseModel):
+    allowed_document_ids: list[str]
+
+
 @router.post(
     "/internal/knowledge/datasets/authorize",
     response_model=DatasetAuthorizeResponse,
@@ -4807,3 +4953,39 @@ async def authorize_gateway_datasets(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     return DatasetAuthorizeResponse(allowed_dataset_ids=allowed)
+
+
+@router.post(
+    "/internal/knowledge/documents/authorize",
+    response_model=DocumentAuthorizeResponse,
+    dependencies=[Depends(require_verified_gateway)],
+)
+async def authorize_gateway_documents(
+    request: Request,
+    body: DocumentAuthorizeRequest = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+) -> DocumentAuthorizeResponse:
+    """Check live document access for assistant history and derived artifacts."""
+    user_id = request.headers.get("X-User-Id", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id", "").strip()
+    if not user_id or not tenant_id:
+        raise HTTPException(status_code=401, detail={"code": "AUTH_DENIED"})
+    roles_raw = request.headers.get("X-User-Roles", "").strip()
+    user = UserContext(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        user_tier=request.headers.get("X-User-Tier", "normal").strip(),
+        user_type=request.headers.get("X-User-Type", "user").strip(),
+        roles=[role.strip() for role in roles_raw.split(",") if role.strip()] or ["user"],
+    )
+    try:
+        await svc.require_dataset_access(user, body.dataset_id, required="viewer")
+    except (PermissionDeniedError, ValidationFailedError):
+        return DocumentAuthorizeResponse(allowed_document_ids=[])
+    requested = sorted({str(item).strip() for item in body.document_ids if str(item).strip()})
+    if not requested:
+        return DocumentAuthorizeResponse(allowed_document_ids=[])
+    allowed = await svc.db.filter_active_document_ids(
+        body.dataset_id, tenant_id, requested,
+    )
+    return DocumentAuthorizeResponse(allowed_document_ids=sorted(allowed))

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
 from ...services.agent_runtime.thread_store import AgentThreadStore
+from ...services.assistant_entry.source_access import conversation_sources, quiz_source_scope
 from ..deps import enforce_rate_limit, get_user_context
 from ._artifact_headers import attachment_content_disposition
 
@@ -66,6 +67,7 @@ def _get_artifact_storage(request: Request):
 
 
 async def _collect_quiz_payloads(
+    request: Request,
     db,
     messages: list[dict[str, Any]],
     *,
@@ -120,6 +122,14 @@ async def _collect_quiz_payloads(
             dataset_ids = json.loads(dataset_ids)
         if dataset_ids:
             raise HTTPException(409, "Quiz content derived from private knowledge cannot be shared anonymously")
+        try:
+            inherited_datasets, inherited_documents = await quiz_source_scope(
+                request, quiz_uuid, tenant_id, require_origin=True,
+            )
+        except HTTPException as exc:
+            raise HTTPException(409, "Quiz source rights cannot be verified for sharing") from exc
+        if inherited_datasets or inherited_documents:
+            raise HTTPException(409, "Quiz content derived from knowledge cannot be shared anonymously")
         q_rows = await db.fetch(
             "SELECT id, question_num, question_type, question_text, options, correct_answer, explanation "
             "FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
@@ -248,6 +258,10 @@ async def _build_share_snapshot(
             if not isinstance(meta, dict) or meta.get("source_kind") != "image_generation":
                 raise HTTPException(409, "Older assistant messages have unverified source rights")
 
+    sources = await conversation_sources(request, user, session_id)
+    if sources.dataset_ids or sources.document_ids:
+        raise HTTPException(409, "Knowledge-derived content cannot be shared anonymously")
+
     store = getattr(request.app.state, "agent_thread_store", None) or AgentThreadStore(db)
     thread = await store.get_for_session(
         tenant_id=user.tenant_id,
@@ -330,6 +344,7 @@ async def _build_share_snapshot(
         public_messages.append(public)
 
     public_quizzes, answer_keys = await _collect_quiz_payloads(
+        request,
         db, public_messages, tenant_id=user.tenant_id or "", user_id=user.user_id,
     )
     for message in public_messages:

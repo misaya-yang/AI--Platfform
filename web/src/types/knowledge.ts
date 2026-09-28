@@ -135,6 +135,7 @@ export interface Document {
   display_status?: DocumentDisplayStatus;
   progress?: number;
   error?: string;
+  failure_code?: string;
   segment_count?: number;
   word_count?: number;
   char_count?: number;

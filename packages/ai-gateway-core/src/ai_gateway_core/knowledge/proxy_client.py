@@ -220,6 +220,31 @@ class KBProxyClient:
             logger.warning(f"KB list_datasets error: {e}")
             raise
 
+    async def authorize_documents(
+        self, user: Any, dataset_id: str, document_ids: list[str],
+    ) -> set[str]:
+        """Return currently readable document IDs from the KB authority."""
+        requested = sorted({str(item).strip() for item in document_ids if str(item).strip()})
+        if not requested:
+            return set()
+        allowed: set[str] = set()
+        for offset in range(0, len(requested), 500):
+            batch = requested[offset:offset + 500]
+            payload = await self._get_service_client().request_json(
+                "POST",
+                "/api/v1/internal/knowledge/documents/authorize",
+                headers=self._user_headers(user),
+                json={"dataset_id": dataset_id, "document_ids": batch},
+            )
+            raw = payload.get("allowed_document_ids") if isinstance(payload, dict) else None
+            if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+                raise ValueError("invalid document authorization response")
+            response_ids = set(raw)
+            if not response_ids <= set(batch):
+                raise ValueError("document authorization response contains unknown IDs")
+            allowed.update(response_ids)
+        return allowed
+
     async def retrieve(
         self,
         user: Any,

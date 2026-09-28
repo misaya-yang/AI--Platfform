@@ -13,20 +13,27 @@ from src.core.auth.user_resolver import UserContext
 
 
 class _ShareDB:
-    def __init__(self, *, knowledge: bool = False, legacy: list | None = None):
+    def __init__(self, *, knowledge: bool = False, legacy: list | None = None, context_document: bool = False):
         self.knowledge = knowledge
+        self.context_document = context_document
         self.legacy = legacy or []
         self.inserted: dict | None = None
 
     async def fetchrow(self, sql: str, *args):
         if "FROM assistant.sessions" in sql:
-            assert args == ("session-a", "user-a", "tenant-a")
+            assert args in {
+                ("session-a", "user-a", "tenant-a"),
+                ("session-a", "tenant-a", "user-a"),
+            }
             return {"history": self.legacy, "metadata": {"title": "Safe session"}}
         if "FROM conversation_shares" in sql:
             return None
         raise AssertionError(sql)
 
     async def fetch(self, sql: str, *args):
+        if "FROM assistant_runtime_items" in sql:
+            assert args == ("session-a", "tenant-a", "user-a")
+            return [{"run_id": "run-a", "chunks": [{"dataset_id": "private", "document_id": "doc-a"}]}] if self.context_document else []
         if "FROM assistant_runtime_snapshots" in sql:
             assert args == ("session-a", "tenant-a", "user-a")
             items = [{"kind": "knowledge", "payload": {"dataset_id": "private"}}] if self.knowledge else []
@@ -146,6 +153,12 @@ async def test_private_knowledge_and_unverified_legacy_history_cannot_be_shared(
     with pytest.raises(HTTPException) as private:
         await shares.preview_share("session-a", _request(_ShareDB(knowledge=True)), _user(), True, None)
     assert private.value.status_code == 409
+
+    with pytest.raises(HTTPException) as event_provenance:
+        await shares.preview_share(
+            "session-a", _request(_ShareDB(context_document=True)), _user(), True, None,
+        )
+    assert event_provenance.value.status_code == 409
 
     legacy = [{"role": "assistant", "content": "old", "metadata": {"model_id": "old"}}]
     with pytest.raises(HTTPException) as unknown:

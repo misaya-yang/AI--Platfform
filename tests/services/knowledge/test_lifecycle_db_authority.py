@@ -9,8 +9,10 @@ from knowledge_service.persistence.database import (
     CONFLUENCE_SYNC_GENERATION_KEY,
     DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PENDING_RESTORE_VERSION_KEY,
     DOCUMENT_PIPELINE_EXECUTION_KEY,
     DOCUMENT_RECOVER_STAGE_KEY,
+    DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
     DOCUMENT_UPLOAD_GENERATION_KEY,
     SOURCE_OWNED_DOCUMENT_METADATA_KEYS,
     DatabaseStorage,
@@ -522,7 +524,7 @@ async def test_recovery_claim_is_queued_skip_locked_and_lease_aware_for_default_
     assert "AND NOT COALESCE(" in compact
     assert "? '_index_deletion_fence', FALSE" in compact
     assert "desired_enabled' = 'true'" in compact
-    assert args == (15, 7)
+    assert args == (15, 7, False)
 
 
 @pytest.mark.asyncio
@@ -534,6 +536,16 @@ async def test_generic_metadata_preserves_marker_and_rejects_reserved_injection(
             "document-a",
             {"metadata": {DOCUMENT_LIFECYCLE_REINDEX_KEY: {"status": "pending"}}},
         )
+    with pytest.raises(ValueError, match="reserved"):
+        await database.update_document_fields(
+            "document-a",
+            {"metadata": {DOCUMENT_PENDING_RESTORE_VERSION_KEY: 3}},
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        await database.update_document_fields(
+            "document-a",
+            {"metadata": {DOCUMENT_RESTORED_SOURCE_VERSION_KEY: 3}},
+        )
     assert connection.execute_calls == []
 
     await database.update_document_fields(
@@ -543,6 +555,8 @@ async def test_generic_metadata_preserves_marker_and_rejects_reserved_injection(
     compact = normalized(connection.execute_calls[0][0])
     assert "metadata = $1::jsonb ||" in compact
     assert "jsonb_build_object('_document_lifecycle_reindex'" in compact
+    assert "jsonb_build_object('_document_pending_restore_version'" in compact
+    assert "jsonb_build_object('_document_restored_source_version'" in compact
 
 
 @pytest.mark.asyncio
@@ -812,7 +826,7 @@ async def test_count_documents_counts_dataset_rows() -> None:
 
     assert await database.count_documents("dataset-a") == 7
     query, args = connection.fetchval_calls[0]
-    assert normalized(query) == "SELECT COUNT(*) FROM documents WHERE dataset_id = $1"
+    assert normalized(query) == "SELECT COUNT(*) FROM documents AS d WHERE d.dataset_id = $1"
     assert args == ("dataset-a",)
 
 
@@ -829,7 +843,7 @@ async def test_count_segments_mirrors_list_segment_filters() -> None:
     )
     query, args = connection.fetchval_calls[0]
     compact = normalized(query)
-    assert "SELECT COUNT(*) FROM segments WHERE dataset_id = $1" in compact
-    assert "AND document_id = $2" in compact
-    assert "AND text ILIKE $3" in compact
+    assert "SELECT COUNT(*) FROM segments AS s WHERE s.dataset_id = $1" in compact
+    assert "AND s.document_id = $2" in compact
+    assert "AND s.text ILIKE $3" in compact
     assert args == ("dataset-a", "document-a", "%合规%")

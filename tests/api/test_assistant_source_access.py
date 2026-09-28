@@ -25,15 +25,15 @@ USER = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True
 THREAD = SimpleNamespace(session_id="session-a", runtime_thread_id="00000000-0000-0000-0000-000000000001")
 
 
-def request(*, visible=(), snapshots=None, legacy=None, kb_error=False):
+def request(*, visible=(), snapshots=None, legacy=None, kb_error=False, contexts=None, visible_docs=None):
     if snapshots is None:
         snapshots = [snapshot("run-a", ["private-a"]), snapshot("run-b", [])]
     async def fetch(query, *args):
-        assert "FROM assistant_runtime_snapshots" in query
+        assert "FROM assistant_runtime_snapshots" in query or "FROM assistant_runtime_items" in query
         assert "tenant_id = $2 AND user_id = $3" in query
-        assert "ORDER BY created_at" in query
+        assert "ORDER BY created_at" in query or "ORDER BY sequence" in query
         assert args == ("session-a", "tenant-a", "user-a")
-        return snapshots
+        return snapshots if "FROM assistant_runtime_snapshots" in query else (contexts or [])
     async def fetchrow(query, *args):
         assert "SELECT history FROM assistant.sessions" in query
         assert args == ("session-a", "tenant-a", "user-a")
@@ -43,9 +43,15 @@ def request(*, visible=(), snapshots=None, legacy=None, kb_error=False):
         if kb_error:
             raise RuntimeError("internal secret must not appear")
         return [{"dataset_id": item} for item in visible]
+    async def authorize_documents(user, dataset_id, document_ids):
+        assert user.user_id == "user-a"
+        if kb_error:
+            raise RuntimeError("internal secret must not appear")
+        permitted = visible_docs if visible_docs is not None else document_ids
+        return set(document_ids) & set(permitted)
     state = SimpleNamespace(
         database=SimpleNamespace(fetch=fetch, fetchrow=fetchrow),
-        kb_proxy=SimpleNamespace(list_datasets=list_datasets),
+        kb_proxy=SimpleNamespace(list_datasets=list_datasets, authorize_documents=authorize_documents),
         agent_runtime_control=SimpleNamespace(
             stream_thread_events=AsyncMock(), start_turn=AsyncMock(),
             get_approval=AsyncMock(), decide_approval=AsyncMock(return_value={"status": "rejected"}),
@@ -88,6 +94,157 @@ async def test_revocation_and_authority_outage_fail_closed(kb_error):
 async def test_no_knowledge_and_current_authorized_sources_keep_working():
     await require_conversation_source_access(request(snapshots=[], kb_error=True), USER, "session-a")
     await require_conversation_source_access(request(visible=["private-a"]), USER, "session-a")
+
+
+def document_context(run_id="run-a", document_id="doc-a"):
+    return {"run_id": run_id, "chunks": [{
+        "dataset_id": "private-a", "document_id": document_id,
+        "content": "Private source text",
+    }]}
+
+
+@pytest.mark.asyncio
+async def test_same_dataset_document_revocation_blocks_history_and_derived_reads(monkeypatch):
+    req = request(
+        visible=["private-a"], visible_docs=[], contexts=[document_context()],
+    )
+    sources = await conversation_sources(req, USER, "session-a")
+    assert sources.documents_by_run == {
+        "run-a": frozenset({("private-a", "doc-a")}),
+        "run-b": frozenset({("private-a", "doc-a")}),
+    }
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
+    owned = SimpleNamespace(
+        session_id="session-a", runtime_thread_id=THREAD.runtime_thread_id,
+        import_status="ready", last_sequence=9, source_kind="native",
+        kernel_owner="agent_runtime",
+    )
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=owned))
+    thread = await agent.get_thread(THREAD.runtime_thread_id, req, USER)
+    assert thread["thread"]["restricted_source_run_ids"] == ["run-a", "run-b"]
+    from src.services.assistant_entry.source_access import require_artifact_source_access
+    with pytest.raises(HTTPException) as artifact_denied:
+        await require_artifact_source_access(
+            req, USER, SimpleNamespace(source="ai", session_id="session-a", created_at=None),
+        )
+    assert artifact_denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_orphan_context_event_still_restricts_its_runtime_run(monkeypatch):
+    req = request(
+        visible=["private-a"], visible_docs=[], snapshots=[],
+        contexts=[document_context()],
+    )
+    sources = await conversation_sources(req, USER, "session-a")
+    assert sources.documents_by_run == {"run-a": frozenset({("private-a", "doc-a")})}
+    owned = SimpleNamespace(
+        session_id="session-a", runtime_thread_id=THREAD.runtime_thread_id,
+        import_status="ready", last_sequence=9, source_kind="native",
+        kernel_owner="agent_runtime",
+    )
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=owned))
+    thread = await agent.get_thread(THREAD.runtime_thread_id, req, USER)
+    assert thread["thread"]["restricted_source_run_ids"] == ["run-a"]
+
+
+@pytest.mark.asyncio
+async def test_later_orphan_run_inherits_earlier_source_without_retroactive_mask(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from src.services.assistant_entry.source_access import source_documents_at_creation
+
+    start = datetime.now(timezone.utc)
+    first = snapshot("run-a", ["private-a"])
+    first["created_at"] = start
+    context_a = document_context("run-a", "doc-a")
+    context_a["created_at"] = start + timedelta(minutes=1)
+    context_b = document_context("run-b", "doc-b")
+    context_b["created_at"] = start + timedelta(minutes=3)
+    req = request(
+        visible=["private-a"], visible_docs=["doc-a"],
+        snapshots=[first], contexts=[context_a, context_b],
+    )
+    sources = await conversation_sources(req, USER, "session-a")
+    assert sources.documents_by_run == {
+        "run-a": frozenset({("private-a", "doc-a")}),
+        "run-b": frozenset({("private-a", "doc-a"), ("private-a", "doc-b")}),
+    }
+    assert source_documents_at_creation(
+        sources, start + timedelta(minutes=2),
+    ) == frozenset({("private-a", "doc-a")})
+    owned = SimpleNamespace(
+        session_id="session-a", runtime_thread_id=THREAD.runtime_thread_id,
+        import_status="ready", last_sequence=9, source_kind="native",
+        kernel_owner="agent_runtime",
+    )
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=owned))
+    thread = await agent.get_thread(THREAD.runtime_thread_id, req, USER)
+    assert thread["thread"]["restricted_source_run_ids"] == ["run-b"]
+    req.app.state.kb_proxy.authorize_documents = AsyncMock(return_value={"doc-b"})
+    thread = await agent.get_thread(THREAD.runtime_thread_id, req, USER)
+    assert thread["thread"]["restricted_source_run_ids"] == ["run-a", "run-b"]
+
+
+@pytest.mark.asyncio
+async def test_document_rights_recheck_allows_other_active_document():
+    req = request(
+        visible=["private-a"], visible_docs=["doc-a"], contexts=[document_context()],
+    )
+    await require_conversation_source_access(req, USER, "session-a")
+    req.app.state.kb_proxy.authorize_documents = AsyncMock(return_value=set())
+    with pytest.raises(HTTPException):
+        await require_conversation_source_access(req, USER, "session-a")
+
+
+@pytest.mark.asyncio
+async def test_malformed_persisted_context_fails_closed() -> None:
+    req = request(
+        visible=["private-a"], visible_docs=["doc-a"],
+        contexts=[{"run_id": "run-a", "chunks": None}],
+    )
+    with pytest.raises(HTTPException) as denied:
+        await require_conversation_source_access(req, USER, "session-a")
+    assert denied.value.status_code == 403
+    assert denied.value.detail["code"] == "ASSISTANT_SOURCE_ACCESS_REVOKED"
+
+
+@pytest.mark.asyncio
+async def test_new_context_event_rechecks_document_before_text_delta(monkeypatch):
+    req = request(visible=["private-a"], contexts=[], visible_docs=[])
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
+    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: 0.0)
+    event = {"sequence": 1, "event_type": "context_retrieved", "data": {
+        "run_id": "run-a", "chunks": document_context()["chunks"],
+    }}
+    projected = await guard.project(event)
+    assert projected["data"]["source_access_revoked"] is True
+    delta = await guard.project({
+        "sequence": 2, "event_type": "text_delta",
+        "data": {"run_id": "run-a", "content": "Private source text"},
+    })
+    assert "Private source text" not in json.dumps(delta)
+
+
+@pytest.mark.asyncio
+async def test_open_stream_revocation_blocks_next_delta_inside_one_second(monkeypatch):
+    req = request(
+        visible=["private-a"], visible_docs=["doc-a"],
+        contexts=[document_context()],
+    )
+    guard = ConversationEventGuard(req, USER, await conversation_sources(req, USER, "session-a"), session_id="session-a")
+    ticks = iter([0.0, 0.1])
+    monkeypatch.setattr("src.services.assistant_entry.source_access.monotonic", lambda: next(ticks))
+    raw = {"sequence": 1, "event_type": "text_delta", "data": {
+        "run_id": "run-a", "content": "Private source text",
+    }}
+    assert (await guard.project(raw))["data"]["content"] == "Private source text"
+    req.app.state.kb_proxy.authorize_documents = AsyncMock(return_value=set())
+    revoked = await guard.project({**raw, "sequence": 2})
+    assert revoked["data"]["source_access_revoked"] is True
+    assert "Private source text" not in json.dumps(revoked)
 
 
 @pytest.mark.asyncio
@@ -253,6 +410,25 @@ async def test_quiz_checks_current_reader_rights_for_creator_direct_sources():
 
 
 @pytest.mark.asyncio
+async def test_quiz_origin_document_revocation_denies_when_dataset_still_visible():
+    req = request(
+        visible=["private-a"], visible_docs=[], contexts=[document_context()],
+    )
+    original_fetchrow = req.app.state.database.fetchrow
+
+    async def fetchrow(query, *args):
+        if "FROM assistant.quizzes q" in query:
+            return {"dataset_ids": '["private-a"]', "created_by": "user-a",
+                    "session_id": "session-a", "run_id": "run-a"}
+        return await original_fetchrow(query, *args)
+
+    req.app.state.database.fetchrow = fetchrow
+    with pytest.raises(HTTPException) as denied:
+        await quiz_routes._require_quiz_source_access(UUID(int=1), req, USER)
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_background_model_source_check_uses_current_identity_not_recovered_roles():
     from src.services.assistant_entry.source_access import runtime_source_access_checker
     req = request()
@@ -264,6 +440,22 @@ async def test_background_model_source_check_uses_current_identity_not_recovered
     assert actor.roles == ["user"] and actor.tier == "normal"
     req.app.state.kb_proxy.list_datasets.return_value = []
     assert await check(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b") is False
+
+
+@pytest.mark.asyncio
+async def test_background_model_recovery_refuses_revoked_document_inside_visible_dataset():
+    from src.services.assistant_entry.source_access import runtime_source_access_checker
+
+    req = request(
+        visible=["private-a"], visible_docs=[], contexts=[document_context()],
+    )
+    req.app.state.database.get_user = AsyncMock(return_value={
+        "status": "active", "tenant_id": "tenant-a", "roles": ["user"], "tier": "normal",
+    })
+    check = runtime_source_access_checker(req.app)
+    assert not await check(
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b",
+    )
     req.app.state.database.get_user.return_value["status"] = "disabled"
     assert await check(tenant_id="tenant-a", user_id="user-a", session_id="session-a", run_id="run-b") is False
 
@@ -285,6 +477,31 @@ async def test_artifact_before_later_knowledge_and_uploaded_original_stay_availa
     assert caught.value.status_code == 403
     artifact.source = 'user'
     await require_artifact_source_access(req, USER, artifact)
+
+
+@pytest.mark.asyncio
+async def test_same_run_artifact_before_retrieval_does_not_inherit_later_document():
+    from datetime import datetime, timedelta, timezone
+
+    from src.services.assistant_entry.source_access import require_artifact_source_access
+
+    start = datetime.now(timezone.utc)
+    admitted = snapshot("run-a", ["private-a"])
+    admitted["created_at"] = start
+    context = document_context()
+    context["created_at"] = start + timedelta(minutes=2)
+    req = request(
+        visible=["private-a"], visible_docs=[],
+        snapshots=[admitted], contexts=[context],
+    )
+    artifact = SimpleNamespace(
+        session_id="session-a", source="ai", created_at=start + timedelta(minutes=1),
+    )
+    await require_artifact_source_access(req, USER, artifact)
+    artifact.created_at = start + timedelta(minutes=3)
+    with pytest.raises(HTTPException) as denied:
+        await require_artifact_source_access(req, USER, artifact)
+    assert denied.value.status_code == 403
 
 
 @pytest.mark.asyncio

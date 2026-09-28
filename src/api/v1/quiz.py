@@ -38,9 +38,9 @@ from pydantic import BaseModel, Field
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
 from ...services.assistant_entry.source_access import (
-    quiz_source_ids,
+    quiz_source_scope,
     require_public_quiz_source_access,
-    visible_dataset_names,
+    source_scope_allowed,
 )
 from ..deps import enforce_rate_limit, get_user_context
 
@@ -155,8 +155,8 @@ def _get_quiz_service(request: Request) -> QuizAccessService:
 
 async def _require_quiz_source_access(quiz_id: uuid.UUID, request: Request, user: UserContext) -> None:
     """Check both direct bindings and knowledge inherited by the creating run."""
-    sources = await quiz_source_ids(request, quiz_id, user.tenant_id)
-    if sources and not sources <= (await visible_dataset_names(request, user)).keys():
+    sources, documents = await quiz_source_scope(request, quiz_id, user.tenant_id)
+    if not await source_scope_allowed(request, user, sources, documents):
         raise HTTPException(403, detail={"code": "ASSISTANT_SOURCE_ACCESS_REVOKED"})
 
 

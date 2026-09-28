@@ -3275,6 +3275,62 @@ class VectorStore:
             )
         self._sparse_readiness.pop(collection_name, None)
 
+    async def document_has_points(
+        self, *, tenant_id: str, dataset_id: str, document_id: str,
+    ) -> bool:
+        """Find orphan or serving points across all collections before replay.
+
+        A crashed hierarchical or vision write can reach Qdrant before its
+        matching PostgreSQL segment. Checking only segment rows is unsafe.
+        """
+        if not all(str(value or "").strip() for value in (tenant_id, dataset_id, document_id)):
+            raise VectorStoreError("tenant_id, dataset_id, and document_id are required")
+        document_filter = self._payload_scope_filter(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            allow_missing_tenant=True,
+        )
+        response = await self._call(lambda: self._client.get_collections())
+        for item in getattr(response, "collections", None) or []:
+            collection_name = str(getattr(item, "name", "") or "").strip()
+            if collection_name and await self._count_collection_points(
+                collection_name, count_filter=document_filter,
+            ) > 0:
+                return True
+        return False
+
+    async def document_has_specialized_points(
+        self, *, tenant_id: str, dataset_id: str, document_id: str,
+    ) -> bool:
+        """Detect old image/hierarchy points independent of today's config."""
+        if not all(str(value or "").strip() for value in (tenant_id, dataset_id, document_id)):
+            raise VectorStoreError("tenant_id, dataset_id, and document_id are required")
+        scope = self._payload_scope_filter(
+            tenant_id=tenant_id, dataset_id=dataset_id,
+            document_id=document_id, allow_missing_tenant=True,
+        )
+        specialized = qmodels.Filter(should=[
+            qmodels.FieldCondition(key="content_type", match=qmodels.MatchValue(value=value))
+            for value in ("image", "section", "document_summary")
+        ] + [
+            qmodels.FieldCondition(key="level", match=qmodels.MatchValue(value=level))
+            for level in (1, 2, 3)
+        ])
+        response = await self._call(lambda: self._client.get_collections())
+        for item in getattr(response, "collections", None) or []:
+            collection_name = str(getattr(item, "name", "") or "").strip()
+            if not collection_name:
+                continue
+            point_filter = scope if collection_name.endswith(("_sections", "_summary")) else qmodels.Filter(
+                must=[scope, specialized],
+            )
+            if await self._count_collection_points(
+                collection_name, count_filter=point_filter,
+            ) > 0:
+                return True
+        return False
+
     async def delete_document_points(
         self,
         *,

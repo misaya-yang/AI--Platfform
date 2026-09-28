@@ -997,12 +997,16 @@ class KnowledgeService:
         *,
         chunking_config_override: dict[str, Any] | None = None,
         index_config_override: dict[str, Any] | None = None,
+        source_text_override: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
     ) -> list[str] | None:
         return await self.ingestion_service.ingest_document(
             dataset_id,
             document_id,
             chunking_config_override=chunking_config_override,
             index_config_override=index_config_override,
+            source_text_override=source_text_override,
+            candidate_metadata_patch=candidate_metadata_patch,
         )
 
     async def reembed_document(
@@ -2118,8 +2122,18 @@ class KnowledgeService:
             # claimable again after the same TTL.
             claim_stuck = getattr(self.db, "claim_stuck_documents", None)
             claimed_atomically = callable(claim_stuck)
+            allow_active_bm25_v2 = bool(
+                getattr(
+                    getattr(self, "vector_store", None),
+                    "bm25_v2_enabled",
+                    False,
+                )
+            )
             stuck_documents = (
-                await claim_stuck(stuck_threshold_minutes)
+                await claim_stuck(
+                    stuck_threshold_minutes,
+                    **({"allow_active_bm25_v2": True} if allow_active_bm25_v2 else {}),
+                )
                 if claimed_atomically
                 else await self.db.find_stuck_documents(stuck_threshold_minutes)
             )

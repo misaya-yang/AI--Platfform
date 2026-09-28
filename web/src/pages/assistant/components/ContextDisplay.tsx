@@ -19,7 +19,7 @@ interface ContextDisplayProps {
 
 export function ContextDisplay({ contexts }: ContextDisplayProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedSource, setSelectedSource] = useState<{ datasetId: string; documentId: string } | null>(null);
+  const [selectedSource, setSelectedSource] = useState<{ datasetId: string; documentId: string; excerpt: string } | null>(null);
   const { t } = useTranslation();
 
   if (!contexts || !Array.isArray(contexts) || contexts.length === 0) return null;
@@ -106,7 +106,7 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                             )}
                           </div>
                           {typeof chunk.metadata?.document_id === "string" ? (
-                            <button type="button" onClick={() => setSelectedSource({ datasetId: ctx.dataset_id, documentId: String(chunk.metadata?.document_id) })}
+                            <button type="button" onClick={() => setSelectedSource({ datasetId: ctx.dataset_id, documentId: String(chunk.metadata?.document_id), excerpt: chunk.content })}
                               className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
                               <ExternalLink className="h-3 w-3" />
                               <span>{t("assistant.openSource", "Open source")}</span>

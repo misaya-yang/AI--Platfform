@@ -33,9 +33,11 @@ class EnumerationDatabase:
         self.document_ids = document_ids
         self.list_calls = 0
 
-    async def list_document_ids_by_dataset(self, dataset_id, *, connection=None):
+    async def list_document_ids_by_dataset(self, dataset_id, *, connection=None, active_only=False, tenant_id=None):
         assert dataset_id == "dataset-a"
         assert connection is None
+        assert active_only is False
+        assert tenant_id == "tenant-a"
         self.list_calls += 1
         return list(self.document_ids)
 
@@ -50,6 +52,9 @@ class EnumerationKnowledge:
         self.access_calls.append(required)
         revision = 8 if (self.bump_revision_on_reread and len(self.access_calls) > 1) else 7
         return _dataset_row(content_revision=revision)
+
+    async def _effective_dataset_permission(self, _dataset, _user):
+        return "editor"
 
 
 def _make_service(document_ids: list[str], *, bump: bool = False):

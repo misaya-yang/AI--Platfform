@@ -391,6 +391,14 @@ export async function getDocument(datasetId: string, documentId: string): Promis
   return data;
 }
 
+/** Citation reads require the document to remain active even for editors. */
+export async function getActiveDocumentSource(datasetId: string, documentId: string): Promise<Document> {
+  const { data } = await api.get<Document>(
+    `/api/v1/knowledge/${encodeURIComponent(datasetId)}/documents/${encodeURIComponent(documentId)}/source`,
+  );
+  return data;
+}
+
 
 export async function createDocumentFromText(datasetId: string, payload: DocumentCreateTextRequest) {
   const { data } = await api.post<Document>(`/api/v1/knowledge/${datasetId}/documents/text`, payload);

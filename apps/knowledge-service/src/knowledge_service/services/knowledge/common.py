@@ -17,6 +17,8 @@ import logging
 import re
 from typing import Any
 
+SPECIALIZED_REBUILD_UNAVAILABLE = "specialized_rebuild_unavailable"
+
 
 async def maybe_await(value: Any) -> Any:
     """Await production coroutines while preserving synchronous test adapters."""

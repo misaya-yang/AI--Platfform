@@ -142,16 +142,23 @@ export function DocumentVersionHistory({
     try {
       await restoreDocumentVersion(datasetId, documentId, restoreVersion);
       toast({
-        title: t("knowledge.versionHistory.restoreSuccess"),
-        description: t("knowledge.versionHistory.restoredTo", { version: restoreVersion }),
+        title: t("knowledge.versionHistory.restoreQueued"),
+        description: t("knowledge.versionHistory.restorePending", { version: restoreVersion }),
       });
       setRestoreVersion(null);
       onOpenChange(false);
       onRestored?.();
     } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: unknown } } } | null)?.response?.data?.detail;
+      const specialized = typeof detail === "object" && detail !== null
+        && "code" in detail && detail.code === "specialized_rebuild_unavailable";
       toast({
-        title: t("knowledge.versionHistory.restoreFailed"),
-        description: String(err),
+        title: t(specialized
+          ? "knowledge.detail.specializedRebuildUnavailableTitle"
+          : "knowledge.versionHistory.restoreFailed"),
+        description: t(specialized
+          ? "knowledge.detail.specializedRebuildUnavailableDetail"
+          : "knowledge.versionHistory.restoreFailureNext", { documentId }),
         variant: "destructive",
       });
     } finally {

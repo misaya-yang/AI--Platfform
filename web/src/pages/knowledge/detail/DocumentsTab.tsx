@@ -208,6 +208,7 @@ export function DocumentsTab({
     [docs, linkedDocument, selectedDocId]
   );
   const selectedDocFailed = selectedDoc ? resolveDisplayStatus(selectedDoc) === "error" : false;
+  const specializedRebuildUnavailable = selectedDoc?.failure_code === "specialized_rebuild_unavailable";
   const selectedDocFailureStage = lastStartedDocumentStage(selectedDoc);
 
   useEffect(() => {
@@ -391,10 +392,18 @@ export function DocumentsTab({
       );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
     } catch (e) {
-      // Every pipeline verb uses the same durable single-owner queue. A 409
-      // means this document already has a generation owner, not that the
-      // user's earlier submission was lost.
-      const status = (e as { response?: { status?: number } } | null)?.response?.status;
+      const response = (e as { response?: { status?: number; data?: { detail?: unknown } } } | null)?.response;
+      const status = response?.status;
+      const detail = response?.data?.detail;
+      if (status === 409 && typeof detail === "object" && detail !== null
+        && "code" in detail && detail.code === "specialized_rebuild_unavailable") {
+        toast.warning(
+          t("knowledge.detail.specializedRebuildUnavailableTitle"),
+          t("knowledge.detail.specializedRebuildUnavailableDetail", { documentId: doc.document_id })
+        );
+        return;
+      }
+      // Other 409s belong to the durable single-owner queue.
       if (status === 409) {
         toast.warning(
           t("knowledge.detail.reindexQueuedTitle"),
@@ -1331,14 +1340,20 @@ export function DocumentsTab({
 
           {selectedDocFailed && (
             <div role="alert" className="border-b border-rose-500/25 bg-rose-500/10 px-5 py-3 text-sm text-rose-800 dark:text-rose-300">
-              <p className="font-medium">{t("knowledge.detail.processingFailedTitle")}</p>
+              <p className="font-medium">
+                {t(specializedRebuildUnavailable
+                  ? "knowledge.detail.specializedRebuildUnavailableTitle"
+                  : "knowledge.detail.processingFailedTitle")}
+              </p>
               <p className="mt-1">
-                {t("knowledge.detail.processingFailedDetail", {
-                  stage: selectedDocFailureStage
-                    ? t(`knowledge.documentRow.stage${selectedDocFailureStage[0].toUpperCase()}${selectedDocFailureStage.slice(1)}`)
-                    : t("knowledge.detail.processingStageUnknown"),
-                  documentId: selectedDoc.document_id,
-                })}
+                {specializedRebuildUnavailable
+                  ? t("knowledge.detail.specializedRebuildUnavailableDetail", { documentId: selectedDoc.document_id })
+                  : t("knowledge.detail.processingFailedDetail", {
+                    stage: selectedDocFailureStage
+                      ? t(`knowledge.documentRow.stage${selectedDocFailureStage[0].toUpperCase()}${selectedDocFailureStage.slice(1)}`)
+                      : t("knowledge.detail.processingStageUnknown"),
+                    documentId: selectedDoc.document_id,
+                  })}
               </p>
             </div>
           )}

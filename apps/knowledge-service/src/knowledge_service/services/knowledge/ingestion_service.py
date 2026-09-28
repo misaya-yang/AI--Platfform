@@ -19,6 +19,9 @@ from ...config.settings import Settings
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import (
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PENDING_RESTORE_VERSION_KEY,
+    DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
     INDEX_PUBLICATION_REVISION_RESERVE,
     DatabaseStorage,
     IndexLeaseUnavailableError,
@@ -612,6 +615,8 @@ class IngestionService:
         *,
         chunking_config_override: dict[str, Any] | None = None,
         index_config_override: dict[str, Any] | None = None,
+        source_text_override: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
     ) -> list[str] | None:
         """Run the full pipeline for one document.
 
@@ -653,9 +658,59 @@ class IngestionService:
             if not doc or str(doc.get("dataset_id")) != dataset_id:
                 raise ValidationFailedError("document not found")
 
-            raw_text = _require_extracted_text_budget(doc.get("content"))
-            candidate_content: str | None = None
             doc_meta = _ensure_dict(doc.get("metadata"))
+            restored_source_version = doc_meta.get(DOCUMENT_RESTORED_SOURCE_VERSION_KEY)
+            if restored_source_version is not None:
+                if (
+                    type(restored_source_version) is not int
+                    or restored_source_version <= 0
+                    or int(doc.get("current_version") or 0) != restored_source_version
+                ):
+                    raise ValidationFailedError("restored source identity is invalid")
+                restored = await self.db.get_document_version(
+                    document_id, restored_source_version,
+                )
+                if (
+                    not isinstance(restored, dict)
+                    or restored.get("change_type") != "restored"
+                    or str(restored.get("content") or "") != str(doc.get("content") or "")
+                ):
+                    raise ValidationFailedError("restored source no longer matches its version")
+            pending_restore = doc_meta.get(DOCUMENT_PENDING_RESTORE_VERSION_KEY)
+            pending_restore_version: int | None = None
+            pending_previous_version: int | None = None
+            if pending_restore is not None:
+                if source_text_override is not None:
+                    raise ValidationFailedError("restore candidate cannot override another source")
+                if not isinstance(pending_restore, dict):
+                    raise ValidationFailedError("restore candidate identity is invalid")
+                pending_restore_version = pending_restore.get("candidate_version")
+                pending_previous_version = pending_restore.get("previous_version")
+                if (
+                    type(pending_restore_version) is not int
+                    or type(pending_previous_version) is not int
+                    or pending_previous_version <= 0
+                    or pending_restore_version <= pending_previous_version
+                ):
+                    raise ValidationFailedError("restore candidate identity is invalid")
+                version = await self.db.get_document_version(
+                    document_id,
+                    pending_restore_version,
+                    include_pending=True,
+                )
+                if (
+                    not isinstance(version, dict)
+                    or version.get("change_type") != "pending_restore"
+                    or str(version.get("document_id") or "") != document_id
+                ):
+                    raise ValidationFailedError("restore candidate is unavailable")
+                source_text_override = str(version.get("content") or "")
+            raw_text = _require_extracted_text_budget(
+                source_text_override if source_text_override is not None else doc.get("content")
+            )
+            candidate_content: str | None = (
+                raw_text if source_text_override is not None else None
+            )
             if "structured_parsing" in doc_meta:
                 raise ValidationFailedError(
                     "structured parsing is disabled until a trusted source receipt exists"
@@ -674,7 +729,13 @@ class IngestionService:
             image_processing_mode = processing_mode in {"multimodal", "scanned"}
             original_key = doc_meta.get("original_file_key")
             doc_already_processed = doc_meta.get("ocr_processed", False)
-            if original_key and self._ks.image_storage_service and len(raw_text.strip()) < min_chars:
+            if (
+                source_text_override is None
+                and restored_source_version is None
+                and original_key
+                and self._ks.image_storage_service
+                and len(raw_text.strip()) < min_chars
+            ):
                 if doc_already_processed:
                     logger.info(
                         "Document content below OCR threshold despite ocr_processed=true; re-extracting from original file"
@@ -1421,6 +1482,14 @@ class IngestionService:
                     if str(row.get("segment_id") or "").strip()
                 ] + staged_resumable
                 keep_segment_ids = unchanged_segments + staged_manifest
+                existing_image_segments = await self.db.get_image_segments_by_document(document_id)
+                finalize_pure_text = (
+                    not lexical_config.reads_bm25_v2
+                    and not requires_image_generation
+                    and not image_metadata_list
+                    and not existing_image_segments
+                    and DOCUMENT_LIFECYCLE_REINDEX_KEY not in doc_metadata
+                )
                 if points or staged_manifest or excess_segments or candidate_content is not None:
                     promoted, deleted_count = await self._publish_text_generation(
                         collection=collection,
@@ -1437,20 +1506,41 @@ class IngestionService:
                         expected_ingestion_identity=ingestion_identity,
                         candidate_content=candidate_content,
                         expected_content=str(doc.get("content") or ""),
+                        candidate_metadata_patch=candidate_metadata_patch,
+                        candidate_word_count=(
+                            len(raw_text.split()) if source_text_override is not None else None
+                        ),
+                        candidate_version_number=pending_restore_version,
+                        previous_version_number=pending_previous_version,
+                        finalize_document=finalize_pure_text,
                     )
                     logger.info(
                         f"Activated {promoted}/{len(staged_manifest)} staged segments "
                         f"and removed {deleted_count} excess rows for document {document_id}"
                     )
+                    if finalize_pure_text:
+                        try:
+                            await self.db.clear_dataset_needs_reindex(dataset_id)
+                        except Exception:
+                            logger.warning("Published text revision kept needs_reindex flag", exc_info=True)
+                        try:
+                            await self.db.update_document_fields(
+                                document_id,
+                                {
+                                    "embedding_model": str(dataset.get("embedding_model") or getattr(embedder, "model", "") or ""),
+                                    "embedding_model_version": str(dataset.get("embedding_model_version") or getattr(embedder, "model_version", "") or ""),
+                                    "embedding_dimension": int(dim or 0) or None,
+                                },
+                            )
+                        except Exception:
+                            logger.warning("Published text revision kept prior embedding provenance", exc_info=True)
+                        return staged_manifest
 
                 # Build associations only after the new text rows exist.  The
                 # old attachment receipt remains untouched until both the
                 # association pass and its tenant-scoped replacement succeed.
                 await self.db.update_document_status(
                     document_id, status="indexing", progress=95
-                )
-                existing_image_segments = await self.db.get_image_segments_by_document(
-                    document_id
                 )
                 if existing_image_segments:
                     try:
@@ -1569,7 +1659,10 @@ class IngestionService:
                 )
             finally:
                 if embedder:
-                    await embedder.close()
+                    try:
+                        await embedder.close()
+                    except Exception:
+                        logger.warning("Embedder cleanup failed after ingestion", exc_info=True)
         except IndexLeaseUnavailableError:
             raise
         except Exception as exc:
@@ -2393,6 +2486,11 @@ class IngestionService:
         expected_ingestion_identity: str,
         candidate_content: str | None = None,
         expected_content: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
+        candidate_word_count: int | None = None,
+        candidate_version_number: int | None = None,
+        previous_version_number: int | None = None,
+        finalize_document: bool = False,
     ) -> tuple[int, int]:
         commit_publication = getattr(self.db, "commit_text_segment_publication", None)
         if not callable(commit_publication):
@@ -2409,6 +2507,15 @@ class IngestionService:
             if candidate_content is not None:
                 kwargs["candidate_content"] = candidate_content
                 kwargs["expected_content"] = expected_content
+                if candidate_metadata_patch is not None:
+                    kwargs["candidate_metadata_patch"] = candidate_metadata_patch
+                if candidate_word_count is not None:
+                    kwargs["candidate_word_count"] = candidate_word_count
+                if candidate_version_number is not None:
+                    kwargs["candidate_version_number"] = candidate_version_number
+                    kwargs["previous_version_number"] = previous_version_number
+            if finalize_document:
+                kwargs["finalize_document"] = True
             return await commit_publication(
                 dataset_id=dataset_id,
                 document_id=document_id,

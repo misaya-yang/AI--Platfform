@@ -37,6 +37,10 @@ CONFLUENCE_SYNC_GENERATION_KEY = "_confluence_sync_generation"
 DOCUMENT_INGEST_ACTION_KEY = "_document_ingest_action"
 DOCUMENT_RECOVER_STAGE_KEY = "_document_recover_stage"
 DOCUMENT_PIPELINE_EXECUTION_KEY = "_document_pipeline_execution_id"
+# The candidate text for a restore lives in document_versions until its
+# segment generation publishes; the document marker stores only its number.
+DOCUMENT_PENDING_RESTORE_VERSION_KEY = "_document_pending_restore_version"
+DOCUMENT_RESTORED_SOURCE_VERSION_KEY = "_document_restored_source_version"
 INGEST_ACTION_VOCABULARY = frozenset(
     {"ingest", "reprocess", "reembed", "recover", "retry"}
 )

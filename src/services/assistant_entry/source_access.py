@@ -28,10 +28,33 @@ class ConversationSources:
     legacy_dataset_ids: frozenset[str]
     dated_runs: tuple[tuple[datetime, frozenset[str]], ...] = ()
     dates_complete: bool = False
+    document_ids: frozenset[tuple[str, str]] = frozenset()
+    documents_by_run: dict[str, frozenset[tuple[str, str]]] | None = None
+    legacy_document_ids: frozenset[tuple[str, str]] = frozenset()
+    dated_documents: tuple[tuple[datetime, frozenset[tuple[str, str]]], ...] = ()
 
 
 def _object(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
+
+
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _context_documents(chunks: Any, default_dataset_id: str = "") -> set[tuple[str, str]]:
+    references: set[tuple[str, str]] = set()
+    if not isinstance(chunks, list):
+        return {("", "")}
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            references.add(("", ""))
+            continue
+        metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+        dataset_id = str(chunk.get("dataset_id") or metadata.get("dataset_id") or default_dataset_id or "").strip()
+        document_id = str(chunk.get("document_id") or metadata.get("document_id") or "").strip()
+        references.add((dataset_id, document_id))
+    return references
 
 
 async def conversation_sources(
@@ -47,6 +70,28 @@ async def conversation_sources(
             ORDER BY created_at, snapshot_id""",
         session_id, user.tenant_id, user.user_id,
     )
+    context_rows = await database.fetch(
+        """SELECT turn_id::text AS run_id, payload #> '{data,chunks}' AS chunks,
+                  created_at
+             FROM assistant_runtime_items
+            WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3
+              AND event_type = 'compat/v1/context_retrieved'
+            ORDER BY sequence""",
+        session_id, user.tenant_id, user.user_id,
+    )
+    event_documents: dict[str, set[tuple[str, str]]] = {}
+    dated_contexts: list[tuple[datetime, frozenset[tuple[str, str]]]] = []
+    timed_contexts: list[tuple[datetime, str, frozenset[tuple[str, str]]]] = []
+    unknown_time_documents: set[tuple[str, str]] = set()
+    for row in context_rows:
+        references = _context_documents(_object(row["chunks"]))
+        run_id = str(row["run_id"] or "")
+        event_documents.setdefault(run_id, set()).update(references)
+        if isinstance(row.get("created_at"), datetime):
+            dated_contexts.append((row["created_at"], frozenset(references)))
+            timed_contexts.append((_utc(row["created_at"]), run_id, frozenset(references)))
+        else:
+            unknown_time_documents.update(references)
     legacy_row = await database.fetchrow(
         "SELECT history FROM assistant.sessions "
         "WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
@@ -56,6 +101,7 @@ async def conversation_sources(
     if isinstance(history, dict):
         history = history.get("messages", [])
     legacy_ids: set[str] = set()
+    legacy_documents: set[tuple[str, str]] = set()
     for message in history or []:
         if not isinstance(message, dict):
             continue
@@ -63,8 +109,14 @@ async def conversation_sources(
         for context in metadata.get("contexts", []) if isinstance(metadata, dict) else []:
             if isinstance(context, dict) and context.get("dataset_id"):
                 legacy_ids.add(str(context["dataset_id"]))
-    inherited = set(legacy_ids)
+                legacy_documents.update(_context_documents(
+                    context.get("chunks"), str(context["dataset_id"]),
+                ))
+    legacy_ids.update(dataset_id for dataset_id, _ in legacy_documents if dataset_id)
+    baseline_documents = set(legacy_documents) | unknown_time_documents
+    inherited_dataset_ids = set(legacy_ids)
     by_run: dict[str, frozenset[str]] = {}
+    documents_by_run: dict[str, frozenset[tuple[str, str]]] = {}
     dated_runs: list[tuple[datetime, frozenset[str]]] = []
     for row in rows:
         snapshot = _object(row["snapshot"])
@@ -78,12 +130,69 @@ async def conversation_sources(
                 dataset_id = payload.get("dataset_id") if isinstance(payload, dict) else None
                 if not dataset_id:
                     raise HTTPException(503, detail={"code": "ASSISTANT_SOURCE_CHECK_UNAVAILABLE"})
-                inherited.add(str(dataset_id))
+                inherited_dataset_ids.add(str(dataset_id))
+        run_id = str(row.get("run_id") or "")
+        admitted_at = row.get("created_at")
+        run_documents = set(baseline_documents)
+        if isinstance(admitted_at, datetime):
+            run_documents.update(
+                reference
+                for event_at, _, references in timed_contexts
+                if event_at <= _utc(admitted_at)
+                for reference in references
+            )
+        else:
+            run_documents.update(
+                reference for references in event_documents.values() for reference in references
+            )
+        run_documents.update(event_documents.get(run_id, set()))
+        run_dataset_ids = inherited_dataset_ids | {
+            dataset_id for dataset_id, _ in run_documents if dataset_id
+        }
         if row.get("run_id"):
-            by_run[str(row["run_id"])] = frozenset(inherited)
-        if isinstance(row.get("created_at"), datetime):
-            dated_runs.append((row["created_at"], frozenset(inherited)))
-    return ConversationSources(frozenset(inherited), by_run, frozenset(legacy_ids), tuple(dated_runs), len(dated_runs) == len(rows))
+            by_run[run_id] = frozenset(run_dataset_ids)
+            documents_by_run[run_id] = frozenset(run_documents)
+        if isinstance(admitted_at, datetime):
+            dated_runs.append((admitted_at, frozenset(run_dataset_ids)))
+    # Context events can outlive a missing/imported snapshot. Keep their turn
+    # identity in the redaction map instead of trusting a visible dataset alone.
+    for run_id, references in event_documents.items():
+        if run_id and run_id not in by_run:
+            run_times = [event_at for event_at, event_run, _ in timed_contexts if event_run == run_id]
+            run_documents = set(baseline_documents)
+            if run_times:
+                cut_off = max(run_times)
+                run_documents.update(
+                    reference for event_at, _, items in timed_contexts
+                    if event_at <= cut_off for reference in items
+                )
+                prior_snapshots = [
+                    (admitted_at, ids) for admitted_at, ids in dated_runs
+                    if _utc(admitted_at) <= cut_off
+                ]
+                prior_ids = prior_snapshots[-1][1] if prior_snapshots else frozenset(legacy_ids)
+            else:
+                run_documents.update(
+                    reference for items in event_documents.values() for reference in items
+                )
+                prior_ids = frozenset(inherited_dataset_ids)
+            run_documents.update(references)
+            documents_by_run[run_id] = frozenset(run_documents)
+            by_run[run_id] = frozenset(
+                set(prior_ids) | {dataset_id for dataset_id, _ in run_documents if dataset_id}
+            )
+    all_documents = baseline_documents | {
+        reference for references in event_documents.values() for reference in references
+    }
+    all_dataset_ids = inherited_dataset_ids | {
+        dataset_id for dataset_id, _ in all_documents if dataset_id
+    }
+    return ConversationSources(
+        frozenset(all_dataset_ids), by_run, frozenset(legacy_ids),
+        tuple(dated_runs), len(dated_runs) == len(rows) and len(dated_contexts) == len(context_rows),
+        frozenset(all_documents), documents_by_run,
+        frozenset(baseline_documents), tuple(dated_contexts),
+    )
 
 
 async def visible_dataset_names(request: Request, user: UserContext) -> dict[str, str]:
@@ -100,9 +209,50 @@ async def visible_dataset_names(request: Request, user: UserContext) -> dict[str
         return {}
 
 
-async def quiz_source_ids(
+async def visible_document_keys(
+    request: Request, user: UserContext, references: frozenset[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    if not references:
+        return set()
+    proxy = getattr(request.app.state, "kb_proxy", None)
+    authorize = getattr(proxy, "authorize_documents", None)
+    if not callable(authorize):
+        return set()
+    grouped: dict[str, list[str]] = {}
+    for dataset_id, document_id in references:
+        if dataset_id and document_id:
+            grouped.setdefault(dataset_id, []).append(document_id)
+    allowed: set[tuple[str, str]] = set()
+    try:
+        for dataset_id, document_ids in grouped.items():
+            current = await authorize(user, dataset_id, document_ids)
+            if not isinstance(current, set) or not current <= set(document_ids):
+                return set()
+            allowed.update((dataset_id, document_id) for document_id in current)
+    except Exception:
+        return set()
+    return allowed
+
+
+async def source_scope_allowed(
+    request: Request,
+    user: UserContext,
+    dataset_ids: frozenset[str],
+    document_ids: frozenset[tuple[str, str]],
+    *,
+    visible_datasets: dict[str, str] | None = None,
+) -> bool:
+    visible = visible_datasets if visible_datasets is not None else await visible_dataset_names(request, user)
+    if not dataset_ids <= visible.keys():
+        return False
+    if not document_ids:
+        return True
+    return document_ids <= await visible_document_keys(request, user, document_ids)
+
+
+async def quiz_source_scope(
     request: Request, quiz_id: UUID, tenant_id: str, *, require_origin: bool = False,
-) -> frozenset[str]:
+) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
     """Resolve the creating run, including sources from earlier turns."""
     db = getattr(request.app.state, "database", None)
     if db is None:
@@ -126,6 +276,7 @@ async def quiz_source_ids(
     if not isinstance(ids, list):
         raise HTTPException(503, detail={"code": "ASSISTANT_SOURCE_CHECK_UNAVAILABLE"})
     sources = set(ids)
+    documents: set[tuple[str, str]] = set()
     verified_origin = False
     if row.get("session_id"):
         owner = UserContext(user_id=str(row["created_by"]), tenant_id=tenant_id, is_authenticated=True)
@@ -133,11 +284,21 @@ async def quiz_source_ids(
         run_id = str(row["run_id"])
         verified_origin = run_id in inherited.inherited_by_run
         sources.update(inherited.inherited_by_run.get(run_id, inherited.dataset_ids))
+        documents.update((inherited.documents_by_run or {}).get(run_id, inherited.document_ids))
     if sources:
-        return frozenset(sources)
+        return frozenset(sources), frozenset(documents)
     if require_origin and not verified_origin:
         raise HTTPException(409, detail={"code": "ASSISTANT_SOURCE_ORIGIN_UNVERIFIED"})
-    return frozenset()
+    return frozenset(), frozenset(documents)
+
+
+async def quiz_source_ids(
+    request: Request, quiz_id: UUID, tenant_id: str, *, require_origin: bool = False,
+) -> frozenset[str]:
+    dataset_ids, _ = await quiz_source_scope(
+        request, quiz_id, tenant_id, require_origin=require_origin,
+    )
+    return dataset_ids
 
 
 async def require_public_quiz_source_access(request: Request, share_code: str) -> None:
@@ -158,12 +319,12 @@ async def require_public_quiz_source_access(request: Request, share_code: str) -
     except (ValueError, AttributeError):
         raise unavailable from None
     try:
-        sources = await quiz_source_ids(request, quiz_id, row["tenant_id"], require_origin=True)
+        sources, documents = await quiz_source_scope(request, quiz_id, row["tenant_id"], require_origin=True)
     except HTTPException as exc:
         if exc.status_code in {404, 409}:
             raise unavailable from None
         raise
-    if sources:
+    if sources or documents:
         raise unavailable
 
 
@@ -171,10 +332,11 @@ async def require_conversation_source_access(
     request: Request, user: UserContext, session_id: str, *, for_execution: bool = False,
 ) -> None:
     sources = await conversation_sources(request, user, session_id)
-    if not sources.dataset_ids:
+    if not sources.dataset_ids and not sources.document_ids:
         return
-    visible = await visible_dataset_names(request, user)
-    if not sources.dataset_ids <= visible.keys():
+    if not await source_scope_allowed(
+        request, user, sources.dataset_ids, sources.document_ids,
+    ):
         raise HTTPException(
             409 if for_execution else 403,
             detail={
@@ -198,12 +360,28 @@ def source_ids_at_creation(sources: ConversationSources, created_at: Any) -> fro
     return ids
 
 
+def source_documents_at_creation(
+    sources: ConversationSources, created_at: Any,
+) -> frozenset[tuple[str, str]]:
+    references = sources.document_ids
+    if isinstance(created_at, datetime) and sources.dates_complete:
+        accumulated = set(sources.legacy_document_ids)
+        for admitted_at, new_references in sources.dated_documents:
+            admitted_utc = admitted_at if admitted_at.tzinfo else admitted_at.replace(tzinfo=timezone.utc)
+            created_utc = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+            if admitted_utc <= created_utc:
+                accumulated.update(new_references)
+        references = frozenset(accumulated)
+    return references
+
+
 async def require_artifact_source_access(request: Request, user: UserContext, artifact: Any) -> None:
     if getattr(artifact, "source", None) == "user":
         return  # Uploaded originals do not inherit generated-answer provenance.
     sources = await conversation_sources(request, user, artifact.session_id)
     ids = source_ids_at_creation(sources, getattr(artifact, "created_at", None))
-    if ids and not ids <= (await visible_dataset_names(request, user)).keys():
+    documents = source_documents_at_creation(sources, getattr(artifact, "created_at", None))
+    if not await source_scope_allowed(request, user, ids, documents):
         raise HTTPException(403, detail={"code": "ASSISTANT_SOURCE_ACCESS_REVOKED"})
 
 
@@ -217,6 +395,8 @@ class ConversationEventGuard:
         self.seen_run_ids = set(sources.inherited_by_run)
         self.sources_session_id = session_id
         self.dataset_ids = sources.dataset_ids
+        self.document_ids = sources.document_ids
+        self.observed_documents_by_run: dict[str, set[tuple[str, str]]] = {}
         self.next_check = 0.0
         self.revoked = False
 
@@ -227,15 +407,31 @@ class ConversationEventGuard:
             self.sources = await conversation_sources(self.request, self.user, self.sources_session_id)
             self.seen_run_ids.add(run_id)
         ids = self.sources.inherited_by_run.get(run_id, self.sources.dataset_ids)
-        if ids != self.dataset_ids:
+        documents = (self.sources.documents_by_run or {}).get(run_id, self.sources.document_ids)
+        if raw.get("event_type") == "context_retrieved":
+            self.sources = await conversation_sources(self.request, self.user, self.sources_session_id)
+            ids = self.sources.inherited_by_run.get(run_id, self.sources.dataset_ids)
+            documents = (self.sources.documents_by_run or {}).get(run_id, self.sources.document_ids)
+            self.observed_documents_by_run.setdefault(run_id, set()).update(
+                _context_documents(data.get("chunks"))
+            )
+        documents = frozenset(set(documents) | self.observed_documents_by_run.get(run_id, set()))
+        ids = frozenset(set(ids) | {dataset_id for dataset_id, _ in documents if dataset_id})
+        if ids != self.dataset_ids or documents != self.document_ids:
             self.dataset_ids = ids
+            self.document_ids = documents
             self.next_check = 0.0
-        if not self.dataset_ids:
+        if not self.dataset_ids and not self.document_ids:
             return raw
         now = monotonic()
+        if self.document_ids and not self.document_ids <= await visible_document_keys(
+            self.request, self.user, self.document_ids,
+        ):
+            self.revoked = True
         if now >= self.next_check:
-            visible = await visible_dataset_names(self.request, self.user)
-            self.revoked = not self.dataset_ids <= visible.keys()
+            self.revoked = self.revoked or not await source_scope_allowed(
+                self.request, self.user, self.dataset_ids, self.document_ids,
+            )
             self.next_check = now + 1.0
         if not self.revoked:
             return raw
@@ -287,7 +483,8 @@ def runtime_source_access_checker(app: Any):
         owner = UserContext(user_id=user_id, tenant_id=tenant_id, is_authenticated=True)
         sources = await conversation_sources(request, owner, session_id)
         ids = sources.inherited_by_run.get(run_id, sources.dataset_ids)
-        if not ids:
+        documents = (sources.documents_by_run or {}).get(run_id, sources.document_ids)
+        if not ids and not documents:
             return True
         # Current database identity supplies roles; recovered metadata cannot
         # resurrect an earlier administrator role or a disabled account.
@@ -301,5 +498,5 @@ def runtime_source_access_checker(app: Any):
             user_id=user_id, tenant_id=tenant_id, is_authenticated=True,
             roles=roles, tier=str(profile.get("tier") or "normal"),
         )
-        return ids <= (await visible_dataset_names(request, actor)).keys()
+        return await source_scope_allowed(request, actor, ids, documents)
     return check

@@ -83,6 +83,34 @@ async def test_kb_proxy_client_does_not_disguise_dataset_outage_as_empty() -> No
 
 
 @pytest.mark.asyncio
+async def test_document_authorization_uses_signed_identity_and_rejects_unrequested_ids() -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/internal/knowledge/documents/authorize"
+        assert request.headers["x-user-id"] == "u1"
+        assert request.headers["x-tenant-id"] == "t1"
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, json={"allowed_document_ids": ["document-a"]})
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(handler),
+    )
+    actor = SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal", roles=["user"])
+    try:
+        assert await client.authorize_documents(
+            actor, "dataset-a", ["document-b", "document-a", "document-a"],
+        ) == {"document-a"}
+        assert requests == [{"dataset_id": "dataset-a", "document_ids": ["document-a", "document-b"]}]
+        with pytest.raises(ValueError, match="unknown IDs"):
+            await client.authorize_documents(actor, "dataset-a", ["document-b"])
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_kb_proxy_client_forwards_supported_retrieval_options() -> None:
     seen_payload: dict[str, object] = {}
 

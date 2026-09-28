@@ -137,6 +137,7 @@ class EngineDatabase:
     def __init__(self, dataset: dict, document: dict) -> None:
         self.dataset = dataset
         self.document = document
+        self.versions: dict[int, dict[str, Any]] = {}
         # (content_type, position) -> row
         self.segments: dict[tuple[str, int], dict[str, Any]] = {}
         self.status_updates: list[str] = []
@@ -169,6 +170,14 @@ class EngineDatabase:
 
     async def get_document(self, _document_id: str, **_kwargs: Any) -> dict:
         return deepcopy(self.document)
+
+    async def get_document_version(
+        self, _document_id: str, version_number: int, *, include_pending: bool = False,
+    ) -> dict[str, Any] | None:
+        row = self.versions.get(version_number)
+        if row and (include_pending or row.get("change_type") != "pending_restore"):
+            return deepcopy(row)
+        return None
 
     async def update_document_status(
         self, _document_id: str, *, status: str, **_kwargs: Any
@@ -265,10 +274,16 @@ class EngineDatabase:
         delete_excess: bool,
         candidate_content: str | None = None,
         expected_content: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
+        candidate_word_count: int | None = None,
+        candidate_version_number: int | None = None,
+        previous_version_number: int | None = None,
+        finalize_document: bool = False,
         **_kwargs: Any,
     ) -> tuple[int, int]:
         before = deepcopy(self.segments)
-        before_content = self.document["content"]
+        before_document = deepcopy(self.document)
+        before_versions = deepcopy(self.versions)
         try:
             await self.insert_segments(segment_rows)
             deleted = 0
@@ -286,9 +301,43 @@ class EngineDatabase:
                 if self.document["content"] != expected_content:
                     raise RuntimeError("document source changed during index publication")
                 self.document["content"] = candidate_content
+                self.document["metadata"] = {
+                    **self.document.get("metadata", {}),
+                    **(candidate_metadata_patch or {}),
+                }
+                if candidate_word_count is not None:
+                    self.document["word_count"] = candidate_word_count
+                if candidate_version_number is not None:
+                    if self.document["metadata"].get("_document_pending_restore_version") != {
+                        "previous_version": previous_version_number,
+                        "candidate_version": candidate_version_number,
+                    }:
+                        raise RuntimeError("restore candidate changed")
+                    before_version = self.versions[previous_version_number]
+                    if before_version["change_type"] != "pending_before_restore" or before_version["content"] != expected_content:
+                        raise RuntimeError("pre-restore source snapshot changed")
+                    version = self.versions[candidate_version_number]
+                    if version["change_type"] != "pending_restore" or version["content"] != candidate_content:
+                        raise RuntimeError("restore candidate content changed")
+                    before_version["change_type"] = "updated"
+                    version["change_type"] = "restored"
+                    self.document["metadata"].pop("_document_pending_restore_version")
+                    self.document["metadata"]["_document_restored_source_version"] = candidate_version_number
+                    self.document["current_version"] = candidate_version_number
+                    self.document["version_count"] = self.document.get("version_count", 0) + 2
+            if finalize_document:
+                self.document["status"] = "completed"
+                self.status_updates.append("completed")
+                self.events.append("status:completed")
+                for marker in (
+                    "_document_ingest_action", "_document_recover_stage",
+                    "_document_pipeline_execution_id",
+                ):
+                    self.document["metadata"].pop(marker, None)
         except Exception:
             self.segments = before
-            self.document["content"] = before_content
+            self.document = before_document
+            self.versions = before_versions
             raise
         self.events.append("publication:commit")
         return promoted, deleted
@@ -402,6 +451,25 @@ async def test_first_ingest_stages_rows_then_flips_them_on_completion() -> None:
         # Vector point published under the row's vector id.
         assert row["vector_id"] in store.points
         assert "activate:2" in database.events
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_restore_uses_terminal_that_reenables_document() -> None:
+    dataset, database, store = make_world(LONG_CONTENT)
+    database.document["metadata"]["_document_lifecycle_reindex"] = {
+        "status": "pending", "desired_enabled": True, "desired_archived": False,
+    }
+    database.document["enabled"] = False
+    database.document["archived"] = True
+    service = build_service(
+        dataset=dataset, database=database, store=store, embedder=CountingEmbedder(),
+    )
+    terminal = AsyncMock(wraps=service._complete_document_generation)
+    service._complete_document_generation = terminal  # type: ignore[method-assign]
+
+    await service.ingest_document("dataset-a", "document-a")
+
+    terminal.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -585,6 +653,113 @@ async def test_reextract_publishes_content_with_segments_after_preparation() -> 
     assert database.status_updates[-1] == "completed"
     assert database.document["content"] == replacement
     assert any("published replacement facts" in row["text"] for row in text_rows(database).values())
+
+
+@pytest.mark.asyncio
+async def test_specialized_extraction_candidate_keeps_old_version_on_failed_index() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    old_rows = deepcopy(text_rows(database))
+    database.document["metadata"]["original_file_key"] = "durable-original"
+    replacement = "OCR replacement fact KITE-42 " * 12
+    service = build_service(
+        dataset=dataset, database=database, store=store,
+        embedder=CountingEmbedder(),
+    )
+    service._ks.image_storage_service = SimpleNamespace(
+        download_original_file=AsyncMock(side_effect=AssertionError("duplicate extraction"))
+    )
+    store.replacement_upsert_calls = 0
+    store.fail_replacement_upsert_at = 1
+
+    await service.ingest_document(
+        "dataset-a", "document-a",
+        source_text_override=replacement,
+        candidate_metadata_patch={"vlm_ocr_pages": 2},
+    )
+
+    assert database.status_updates[-1] == "error"
+    assert database.document["content"] == SHORT_CONTENT
+    assert "vlm_ocr_pages" not in database.document["metadata"]
+    assert text_rows(database) == old_rows
+
+    store.fail_replacement_upsert_at = None
+    await service.ingest_document(
+        "dataset-a", "document-a",
+        source_text_override=replacement,
+        candidate_metadata_patch={"vlm_ocr_pages": 2},
+    )
+    assert database.status_updates[-1] == "completed"
+    assert database.document["content"] == replacement
+    assert database.document["metadata"]["vlm_ocr_pages"] == 2
+    assert database.document["word_count"] == len(replacement.split())
+    assert any("KITE-42" in row["text"] for row in text_rows(database).values())
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_version_is_hidden_until_text_generation_publishes() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    old_rows = deepcopy(text_rows(database))
+    database.document["current_version"] = 1
+    database.document["version_count"] = 1
+    database.document["metadata"]["_document_pending_restore_version"] = {
+        "previous_version": 2,
+        "candidate_version": 3,
+    }
+    replacement = "KITE-42 restored answer"
+    database.versions[2] = {
+        "document_id": "document-a",
+        "version_number": 2,
+        "change_type": "pending_before_restore",
+        "content": SHORT_CONTENT,
+    }
+    database.versions[3] = {
+        "document_id": "document-a",
+        "version_number": 3,
+        "change_type": "pending_restore",
+        "content": replacement,
+    }
+    service = build_service(
+        dataset=dataset, database=database, store=store,
+        embedder=CountingEmbedder(),
+    )
+    store.replacement_upsert_calls = 0
+    store.fail_replacement_upsert_at = 1
+    await service.ingest_document("dataset-a", "document-a")
+    assert database.document["content"] == SHORT_CONTENT
+    assert database.document["current_version"] == 1
+    assert database.document["version_count"] == 1
+    assert database.versions[2]["change_type"] == "pending_before_restore"
+    assert database.versions[3]["change_type"] == "pending_restore"
+    assert text_rows(database) == old_rows
+
+    store.fail_replacement_upsert_at = None
+    original_complete = service._complete_document_generation
+    post_publication_complete = AsyncMock(side_effect=AssertionError("post-commit terminal write"))
+    service._complete_document_generation = post_publication_complete  # type: ignore[method-assign]
+    await service.ingest_document("dataset-a", "document-a")
+    post_publication_complete.assert_not_awaited()
+    service._complete_document_generation = original_complete  # type: ignore[method-assign]
+    assert database.document["content"] == replacement
+    assert database.document["current_version"] == 3
+    assert database.document["version_count"] == 3
+    assert database.versions[2]["change_type"] == "updated"
+    assert database.versions[3]["change_type"] == "restored"
+    assert "_document_pending_restore_version" not in database.document["metadata"]
+    assert database.document["metadata"]["_document_restored_source_version"] == 3
+    assert any("KITE-42" in row["text"] for row in text_rows(database).values())
+
+    # Crash after the content/segment transaction but before terminal status:
+    # replay must not re-extract a longer original upload over this short,
+    # explicitly restored version.
+    database.document["metadata"]["original_file_key"] = "old-upload"
+    service._ks.image_storage_service = SimpleNamespace(
+        download_original_file=AsyncMock(side_effect=AssertionError("old upload replayed"))
+    )
+    await service.ingest_document("dataset-a", "document-a")
+    assert database.document["content"] == replacement
+    service._ks.image_storage_service.download_original_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio

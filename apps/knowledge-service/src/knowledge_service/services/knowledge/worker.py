@@ -16,6 +16,7 @@ from ...persistence.database import (
     CONFLUENCE_SYNC_GENERATION_KEY,
     DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PENDING_RESTORE_VERSION_KEY,
     DOCUMENT_PIPELINE_EXECUTION_KEY,
     DOCUMENT_RECOVER_STAGE_KEY,
     DOCUMENT_UPLOAD_GENERATION_KEY,
@@ -30,6 +31,7 @@ from ...persistence.document_batches import (
 )
 from .bm25_v2_lifecycle import Bm25V2LifecycleError
 from .chunking import validate_persisted_chunking_config
+from .common import SPECIALIZED_REBUILD_UNAVAILABLE
 from .ingestion_service import (
     _require_extracted_text_budget,
     _require_extracted_text_counts_budget,
@@ -171,7 +173,151 @@ class ReplayConfigSnapshot:
         return copy.deepcopy(value)
 
 
-class DurableEnqueueProxy:
+class _KnowledgeReplayAdmission:
+    """Shared read-only replay admission for API producer and worker roles."""
+
+    service: KnowledgeService
+
+    @staticmethod
+    def _document_metadata(document: dict[str, Any]) -> dict[str, Any]:
+        metadata = document.get("metadata")
+        if metadata is None:
+            return {}
+        if not isinstance(metadata, dict):
+            raise RuntimeError("document metadata is malformed")
+        return dict(metadata)
+
+    @staticmethod
+    def _has_image_generation_receipt(metadata: dict[str, Any]) -> bool:
+        return any(
+            bool(metadata.get(key))
+            for key in (
+                "extracted_images", "image_count", "images_embedded",
+                "embedded_image_count",
+            )
+        )
+
+    @staticmethod
+    def _hierarchical_opted_in(index_config: Any) -> bool:
+        """PRD T9-1 grayscale gate: hierarchical indexing is explicit opt-in.
+
+        With the indexer finally wired into the default worker, dispatch must
+        not flip every ordinary text document onto the hierarchical path —
+        only datasets whose stored chunking mode is "hierarchical" take it.
+        AUTOMATIC and every malformed shape stay on the standard path.
+        """
+
+        if not isinstance(index_config, dict):
+            return False
+        chunking = index_config.get("chunking")
+        if not isinstance(chunking, dict):
+            return False
+        return str(chunking.get("mode") or "").strip().lower() == "hierarchical"
+
+    async def _require_special_rebuild_without_serving_version(
+        self,
+        task: KnowledgeIngestTask,
+        document: dict[str, Any],
+        *,
+        pathway: str,
+    ) -> None:
+        """Keep existing multi-collection versions safe until publication is atomic."""
+
+        metadata = self._document_metadata(document)
+        action = str(metadata.get(DOCUMENT_INGEST_ACTION_KEY) or "ingest").strip().lower()
+        if action not in REPLAY_SNAPSHOT_ACTIONS:
+            return
+        dataset = await self.service.db.get_dataset(task.dataset_id)
+        tenant_id = str((dataset or {}).get("tenant_id") or "").strip()
+        has_segments = getattr(self.service.db, "document_has_completed_segments", None)
+        has_points = getattr(self.service.vector_store, "document_has_points", None)
+        if not tenant_id or not callable(has_segments) or not callable(has_points):
+            raise RuntimeError("specialized document serving authority is unavailable")
+        if await has_segments(task.dataset_id, tenant_id, task.document_id) or await has_points(
+            tenant_id=tenant_id,
+            dataset_id=task.dataset_id,
+            document_id=task.document_id,
+        ):
+            logger.warning(
+                "Refused %s replay with existing or partial points before multi-collection publication",
+                pathway,
+                extra={"dataset_id": task.dataset_id, "document_id": task.document_id},
+            )
+            raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+
+    async def require_safe_special_replay_admission(
+        self,
+        task: KnowledgeIngestTask,
+        document: dict[str, Any],
+        dataset: dict[str, Any],
+        *,
+        action: str,
+    ) -> None:
+        """Reject unsafe specialized replay before recording a new execution."""
+        metadata = self._document_metadata(document)
+        if DOCUMENT_PENDING_RESTORE_VERSION_KEY in metadata:
+            return  # Version restore uses the standard text publication path.
+        mode = str(metadata.get("processing_mode") or "text_only").strip().lower()
+        index_config = dataset.get("index_config") or {}
+        # A missing processor or original upload must not turn old image/L2/L3
+        # points into a standard-text replay. Use persisted mode/configuration.
+        specialized = mode == "scanned" or self._has_image_generation_receipt(metadata) or (
+            mode not in {"multimodal", "scanned"}
+            and self._hierarchical_opted_in(index_config)
+        ) or (mode == "auto" and bool(metadata.get("original_file_key")))
+        if not specialized:
+            tenant_id = str(dataset.get("tenant_id") or "").strip()
+            has_segments = getattr(self.service.db, "document_has_specialized_segments", None)
+            has_points = getattr(self.service.vector_store, "document_has_specialized_points", None)
+            if not tenant_id or not callable(has_segments) or not callable(has_points):
+                raise RuntimeError("specialized replay authority is unavailable")
+            specialized = await has_segments(task.dataset_id, tenant_id, task.document_id)
+            if not specialized:
+                specialized = await has_points(
+                    tenant_id=tenant_id,
+                    dataset_id=task.dataset_id,
+                    document_id=task.document_id,
+                )
+        if not specialized:
+            return
+        replay_document = dict(document)
+        replay_document["metadata"] = {**metadata, DOCUMENT_INGEST_ACTION_KEY: action}
+        await self._require_special_rebuild_without_serving_version(
+            task, replay_document, pathway="specialized admission",
+        )
+
+    async def require_safe_restore_admission(
+        self,
+        task: KnowledgeIngestTask,
+        dataset: dict[str, Any],
+        *,
+        connection: Any | None = None,
+    ) -> None:
+        """Keep a standard-text restore from stranding older special points."""
+        document = await self.service.db.get_document(
+            task.document_id, connection=connection,
+        )
+        if document and self._has_image_generation_receipt(
+            self._document_metadata(document)
+        ):
+            raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        has_segments = getattr(self.service.db, "document_has_specialized_segments", None)
+        has_points = getattr(self.service.vector_store, "document_has_specialized_points", None)
+        if not tenant_id or not callable(has_segments) or not callable(has_points):
+            raise RuntimeError("specialized restore authority is unavailable")
+        if await has_segments(
+            task.dataset_id, tenant_id, task.document_id, connection=connection,
+        ) or await has_points(
+            tenant_id=tenant_id,
+            dataset_id=task.dataset_id,
+            document_id=task.document_id,
+        ):
+            raise ValidationFailedError(SPECIALIZED_REBUILD_UNAVAILABLE)
+
+
+
+class DurableEnqueueProxy(_KnowledgeReplayAdmission):
     """API-role producer that publishes only the durable PostgreSQL generation."""
 
     def __init__(self, service: KnowledgeService) -> None:
@@ -220,7 +366,7 @@ class DurableEnqueueProxy:
         # discovers it through its bounded durable dispatcher.
 
 
-class KnowledgeWorker:
+class KnowledgeWorker(_KnowledgeReplayAdmission):
     """
     Knowledge base document ingestion worker.
 
@@ -840,15 +986,6 @@ class KnowledgeWorker:
                 self.queue.task_done()
 
     @staticmethod
-    def _document_metadata(document: dict[str, Any]) -> dict[str, Any]:
-        metadata = document.get("metadata")
-        if metadata is None:
-            return {}
-        if not isinstance(metadata, dict):
-            raise RuntimeError("document metadata is malformed")
-        return dict(metadata)
-
-    @staticmethod
     def _validate_rebuildable_image_source(
         document: dict[str, Any],
         image_segments: list[dict[str, Any]],
@@ -1151,23 +1288,6 @@ class KnowledgeWorker:
                 exc_info=True,
             )
 
-    @staticmethod
-    def _hierarchical_opted_in(index_config: Any) -> bool:
-        """PRD T9-1 grayscale gate: hierarchical indexing is explicit opt-in.
-
-        With the indexer finally wired into the default worker, dispatch must
-        not flip every ordinary text document onto the hierarchical path —
-        only datasets whose stored chunking mode is "hierarchical" take it.
-        AUTOMATIC and every malformed shape stay on the standard path.
-        """
-
-        if not isinstance(index_config, dict):
-            return False
-        chunking = index_config.get("chunking")
-        if not isinstance(chunking, dict):
-            return False
-        return str(chunking.get("mode") or "").strip().lower() == "hierarchical"
-
     async def _dataset_hierarchical_opted_in(self, dataset_id: str) -> bool:
         """Opt-in check for call sites that have no index_config in scope.
 
@@ -1207,19 +1327,32 @@ class KnowledgeWorker:
         *,
         chunking_config_override: dict[str, Any] | None = None,
         index_config_override: dict[str, Any] | None = None,
+        source_text_override: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
     ) -> list[str] | None:
         """Call the standard engine with the complete pinned replay config."""
 
-        if chunking_config_override is None and index_config_override is None:
+        if (
+            chunking_config_override is None
+            and index_config_override is None
+            and source_text_override is None
+            and candidate_metadata_patch is None
+        ):
             return await self.service.ingest_document(
                 task.dataset_id,
                 task.document_id,
             )
+        candidate_kwargs: dict[str, Any] = {}
+        if source_text_override is not None:
+            candidate_kwargs["source_text_override"] = source_text_override
+        if candidate_metadata_patch is not None:
+            candidate_kwargs["candidate_metadata_patch"] = candidate_metadata_patch
         return await self.service.ingest_document(
             task.dataset_id,
             task.document_id,
             chunking_config_override=chunking_config_override,
             index_config_override=index_config_override,
+            **candidate_kwargs,
         )
 
     async def _apply_parsing_ir(
@@ -1645,16 +1778,16 @@ class KnowledgeWorker:
             return await self.service.reembed_document(
                 task.dataset_id, task.document_id
             )
+        # A crash in indexing does not prove that this generation published
+        # its candidate rows or source text. Re-embedding the previous serving
+        # rows can silently turn an unfinished reprocess into a false success.
+        # The full incremental pipeline reuses matching staged rows and keeps
+        # the original document identity and pinned replay snapshot.
         if verb == "recover" and recover_stage == "indexing":
-            # PRD T1 item 4: a generation that died in indexing already
-            # persisted its chunks; rebuild vectors from them instead of
-            # re-parsing. (staged rows are resumed by the same path.)
             logger.info(
-                f"[Worker] Recover document {task.document_id} from indexing stage "
-                "(vector rebuild from persisted chunks)"
-            )
-            return await self.service.reembed_document(
-                task.dataset_id, task.document_id
+                "[Worker] Recover document %s from indexing through pinned "
+                "incremental ingestion",
+                task.document_id,
             )
 
         if verb != "reembed":
@@ -1662,6 +1795,24 @@ class KnowledgeWorker:
                 replay_chunking
                 if replay_chunking is not None
                 else effective_index_config.get("chunking", {})
+            )
+
+        if DOCUMENT_PENDING_RESTORE_VERSION_KEY in metadata:
+            # A restored version is a durable text candidate. Scanned and
+            # large-file dispatch would reread the original upload instead
+            # of the selected historical version.
+            if verb == "reembed":
+                raise RuntimeError("restore candidate cannot use vector-only repair")
+            await self.require_safe_restore_admission(task, dataset)
+            return await self._ingest_document(
+                task,
+                chunking_config_override=replay_chunking,
+                index_config_override=effective_index_config,
+            )
+
+        if verb in REPLAY_SNAPSHOT_ACTIONS:
+            await self.require_safe_special_replay_admission(
+                task, doc, {**dataset, "index_config": effective_index_config}, action=verb,
             )
 
         if verb == "retry":
@@ -1996,11 +2147,6 @@ class KnowledgeWorker:
 
             full_text = await asyncio.to_thread(self._read_text_full, text_temp_path)
             full_text = _require_extracted_text_budget(full_text)
-            full_text = await self._apply_parsing_ir(
-                task,
-                full_text,
-                index_config=index_config_override,
-            )
             if not full_text.strip():
                 await self.service.db.update_document_status(
                     task.document_id,
@@ -2010,25 +2156,6 @@ class KnowledgeWorker:
                 )
                 return
 
-            # Update document content and metadata
-            try:
-                await self.service.db.execute(
-                    """UPDATE documents
-                       SET content = $1,
-                           metadata = metadata || $2::jsonb
-                       WHERE document_id = $3""",
-                    full_text,
-                    json.dumps(
-                        {
-                            "total_pages": total_pages,
-                            "streaming_processed": True,
-                        }
-                    ),
-                    task.document_id,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update document content: {e}")
-
             # Use hierarchical indexer if the dataset explicitly opted in
             # (PRD T9-1 grayscale gate: the default worker now carries one).
             hierarchical_opted_in = (
@@ -2037,6 +2164,9 @@ class KnowledgeWorker:
                 else await self._dataset_hierarchical_opted_in(task.dataset_id)
             )
             if self.hierarchical_indexer and hierarchical_opted_in:
+                await self._require_special_rebuild_without_serving_version(
+                    task, doc, pathway="hierarchical large-file",
+                )
                 # Load chunking config from the replay snapshot when present.
                 chunking_config = None
                 try:
@@ -2078,10 +2208,15 @@ class KnowledgeWorker:
                         ) from e
                     logger.warning(f"[Worker] Failed to load chunking config: {e}")
 
+                parsed_text = await self._apply_parsing_ir(
+                    task,
+                    full_text,
+                    index_config=index_config_override,
+                )
                 result = await self.hierarchical_indexer.index_document(
                     document_id=task.document_id,
                     dataset_id=task.dataset_id,
-                    text=full_text,
+                    text=parsed_text,
                     metadata=metadata,
                     chunking_config=chunking_config,
                 )
@@ -2094,6 +2229,24 @@ class KnowledgeWorker:
                         stage="hierarchical_indexing_large_file",
                         error="; ".join(str(item) for item in result.errors)
                         or "hierarchical indexing reported no vectors",
+                    )
+                else:
+                    # This legacy multi-collection indexer still needs a
+                    # generation-wide publication fence. Keep the old source
+                    # on a reported index failure; a successful generation
+                    # must at least make its indexed text the visible source.
+                    await self.service.db.execute(
+                        """
+                        UPDATE documents
+                        SET content = $1, metadata = metadata || $2::jsonb
+                        WHERE document_id = $3
+                        """,
+                        parsed_text,
+                        json.dumps({
+                            "total_pages": total_pages,
+                            "streaming_processed": True,
+                        }),
+                        task.document_id,
                     )
 
                 await self.service.db.update_document_status(
@@ -2125,6 +2278,11 @@ class KnowledgeWorker:
                     task,
                     chunking_config_override=chunking_override,
                     index_config_override=index_config_override,
+                    source_text_override=full_text,
+                    candidate_metadata_patch={
+                        "total_pages": total_pages,
+                        "streaming_processed": True,
+                    },
                 )
         finally:
             await self._cleanup_temp_file(text_temp_path)
@@ -2297,33 +2455,22 @@ class KnowledgeWorker:
             return
 
         full_text = _require_extracted_text_budget("\n\n".join(all_text_parts))
-        full_text = await self._apply_parsing_ir(
-            task,
-            full_text,
-            index_config=index_config_override,
-        )
         logger.info(f"[Worker] VLM OCR extracted {len(full_text)} chars from {total_pages} pages")
 
-        # Update document content and re-ingest as text
-        await self.service.db.update_document_content(task.document_id, full_text)
-        await self.service.db.update_document_fields(
-            task.document_id,
-            {
-                "word_count": len(full_text.split()),
-                "metadata": {
-                    **metadata,
-                    "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
-                    "ocr_model": getattr(self.vlm_ocr_service, "model", None),
-                    "ocr_task": getattr(self.vlm_ocr_service, "task", None),
-                    "vlm_ocr_pages": sum(1 for part in all_text_parts if part.strip()),
-                },
-            },
-        )
-        await self.service.db.update_document_status(task.document_id, status="indexing", progress=70)
+        # The OCR text is a candidate. The standard ingestion engine parses
+        # it once and publishes it with its text segments; a failed embedding
+        # leaves the previous source and serving rows untouched.
         await self._ingest_document(
             task,
             chunking_config_override=chunking_config_override,
             index_config_override=index_config_override,
+            source_text_override=full_text,
+            candidate_metadata_patch={
+                "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
+                "ocr_model": getattr(self.vlm_ocr_service, "model", None),
+                "ocr_task": getattr(self.vlm_ocr_service, "task", None),
+                "vlm_ocr_pages": sum(1 for part in all_text_parts if part.strip()),
+            },
         )
 
     async def _process_with_hierarchical_indexer(
@@ -2352,6 +2499,10 @@ class KnowledgeWorker:
                 index_config_override=index_config_override,
             )
             return
+
+        await self._require_special_rebuild_without_serving_version(
+            task, doc, pathway="hierarchical",
+        )
 
         logger.info(f"[Worker] Processing with hierarchical indexer: {task.document_id}")
 
@@ -2603,7 +2754,7 @@ class KnowledgeWorker:
         3. For each part:
            - VisionPDFProcessor generates vision embeddings
            - Simultaneously, VLM OCR extracts text (reusing rendered images)
-        4. Merge all part texts → update document.content
+        4. Merge all part texts as a candidate for publication
         5. Run hierarchical indexer or standard ingestion for text vectors
         6. Cleanup temp files
         """
@@ -2633,6 +2784,10 @@ class KnowledgeWorker:
                 index_config_override=index_config_override,
             )
             return
+
+        await self._require_special_rebuild_without_serving_version(
+            task, doc, pathway="scanned image",
+        )
 
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
@@ -2824,60 +2979,50 @@ class KnowledgeWorker:
                     "generation remains retained"
                 )
 
-            # Merge extracted texts into document content
+            ocr_candidate_text: str | None = None
+            candidate_metadata_patch: dict[str, Any] | None = None
+            # Keep the serving original until the replacement text generation
+            # is ready. A later OCR/index failure must not expose new text
+            # beside old searchable segments.
             if all_extracted_texts:
                 ordered_pages = sorted(all_extracted_texts.keys())
                 full_text = "\n\n".join(
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
                 full_text = _require_extracted_text_budget(full_text)
-                full_text = await self._apply_parsing_ir(
-                    task,
-                    full_text,
-                    index_config=index_config_override,
-                )
-                try:
-                    await self.service.db.execute(
-                        """UPDATE documents
-                           SET content = $1,
-                               metadata = metadata || $2::jsonb
-                           WHERE document_id = $3""",
-                        full_text,
-                        json.dumps({
-                            "pages_processed": total_processed,
-                            "total_pages": total_pages_all,
-                            "segments_created": total_segments,
-                            "ocr_strategy": self._ocr_strategy,
-                            "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
-                            "ocr_model": getattr(self.vlm_ocr_service, "model", None),
-                            "ocr_task": getattr(self.vlm_ocr_service, "task", None),
-                            "vlm_ocr_pages": len(all_extracted_texts),
-                            "pdf_parts": len(parts),
-                        }),
-                        task.document_id,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to update document content from VLM OCR: {e}")
+                ocr_candidate_text = full_text
+                candidate_metadata_patch = {
+                    "pages_processed": total_processed,
+                    "total_pages": total_pages_all,
+                    "segments_created": total_segments,
+                    "ocr_strategy": self._ocr_strategy,
+                    "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
+                    "ocr_model": getattr(self.vlm_ocr_service, "model", None),
+                    "ocr_task": getattr(self.vlm_ocr_service, "task", None),
+                    "vlm_ocr_pages": len(all_extracted_texts),
+                    "pdf_parts": len(parts),
+                }
 
                 logger.info(
                     f"[Worker] VLM OCR extracted text from {len(all_extracted_texts)} pages"
                 )
 
             # Update vision stats
-            try:
-                await self.service.db.update_document_fields(
-                    task.document_id,
-                    {
-                        "metadata": {
-                            **(metadata or {}),
-                            "pages_processed": total_processed,
-                            "total_pages": total_pages_all,
-                            "segments_created": total_segments,
-                        }
-                    },
-                )
-            except Exception as e:
-                logger.debug(f"Failed to update vision metadata: {e}")
+            if ocr_candidate_text is None:
+                try:
+                    await self.service.db.update_document_fields(
+                        task.document_id,
+                        {
+                            "metadata": {
+                                **(metadata or {}),
+                                "pages_processed": total_processed,
+                                "total_pages": total_pages_all,
+                                "segments_created": total_segments,
+                            }
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to update vision metadata: {e}")
 
             logger.info(
                 f"[Worker] Scanned document {task.document_id} vision processing completed: "
@@ -2905,6 +3050,11 @@ class KnowledgeWorker:
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
                 full_text = _require_extracted_text_budget(full_text)
+                full_text = await self._apply_parsing_ir(
+                    task,
+                    full_text,
+                    index_config=index_config_override,
+                )
                 try:
                     from .chunking import ChunkingConfig
 
@@ -2930,6 +3080,17 @@ class KnowledgeWorker:
                             or "hierarchical OCR indexing reported no vectors",
                         )
                     text_generation_succeeded = bool(idx_result.success)
+                    if text_generation_succeeded and ocr_candidate_text is not None:
+                        await self.service.db.execute(
+                            """
+                            UPDATE documents
+                            SET content = $1, metadata = metadata || $2::jsonb
+                            WHERE document_id = $3
+                            """,
+                            ocr_candidate_text,
+                            json.dumps(candidate_metadata_patch or {}),
+                            task.document_id,
+                        )
                     logger.info(
                         f"[Worker] Hierarchical text indexing done: "
                         f"L1={idx_result.l1_count}, L2={idx_result.l2_count}, L3={idx_result.l3_count}"
@@ -2946,6 +3107,8 @@ class KnowledgeWorker:
                         task,
                         chunking_config_override=chunking_override,
                         index_config_override=index_config_override,
+                        source_text_override=ocr_candidate_text,
+                        candidate_metadata_patch=candidate_metadata_patch,
                     )
                     text_generation_succeeded = fallback_manifest is not None
             else:
@@ -2954,6 +3117,8 @@ class KnowledgeWorker:
                     task,
                     chunking_config_override=chunking_override,
                     index_config_override=index_config_override,
+                    source_text_override=ocr_candidate_text,
+                    candidate_metadata_patch=candidate_metadata_patch,
                 )
                 text_generation_succeeded = fallback_manifest is not None
 

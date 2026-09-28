@@ -50,6 +50,8 @@ CONFLUENCE_SYNC_GENERATION_KEY = _datasets.CONFLUENCE_SYNC_GENERATION_KEY
 DOCUMENT_INGEST_ACTION_KEY = _datasets.DOCUMENT_INGEST_ACTION_KEY
 DOCUMENT_RECOVER_STAGE_KEY = _datasets.DOCUMENT_RECOVER_STAGE_KEY
 DOCUMENT_PIPELINE_EXECUTION_KEY = _datasets.DOCUMENT_PIPELINE_EXECUTION_KEY
+DOCUMENT_PENDING_RESTORE_VERSION_KEY = _datasets.DOCUMENT_PENDING_RESTORE_VERSION_KEY
+DOCUMENT_RESTORED_SOURCE_VERSION_KEY = _datasets.DOCUMENT_RESTORED_SOURCE_VERSION_KEY
 INGEST_ACTION_VOCABULARY = _datasets.INGEST_ACTION_VOCABULARY
 PRIORITY_INGEST_ACTIONS = _datasets.PRIORITY_INGEST_ACTIONS
 RECOVER_STAGE_VOCABULARY = _datasets.RECOVER_STAGE_VOCABULARY
@@ -89,6 +91,8 @@ SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
         DOCUMENT_INGEST_ACTION_KEY,
         DOCUMENT_RECOVER_STAGE_KEY,
         DOCUMENT_PIPELINE_EXECUTION_KEY,
+        DOCUMENT_PENDING_RESTORE_VERSION_KEY,
+        DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
         "_confluence_image_source_generation",
         "_confluence_attachment_manifest",
         "skipped_confluence_attachments",
@@ -2000,6 +2004,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             DOCUMENT_UPLOAD_FAILED_KEY,
             DOCUMENT_UPLOAD_GENERATION_KEY,
             CONFLUENCE_SYNC_GENERATION_KEY,
+            DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
         }.intersection(metadata_patch)
         if reserved:
             raise ValueError("Confluence source metadata contains a reserved key")
@@ -2012,6 +2017,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 metadata = (
                     COALESCE(metadata, '{{}}'::jsonb)
                     - '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                    - '{DOCUMENT_RESTORED_SOURCE_VERSION_KEY}'
                     - 'images_embedded'
                     - 'embedded_image_count'
                 ) || $6::jsonb,
@@ -2098,6 +2104,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        *, active_only: bool = False, tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出文档"""
         if not self._pool:
@@ -2126,6 +2133,17 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         params: list[Any] = [dataset_id]
         param_idx = 2
 
+        if active_only:
+            if not str(tenant_id or "").strip():
+                raise ValueError("tenant_id is required for active document listing")
+            query += f""" AND COALESCE(d.enabled, TRUE) = TRUE
+                AND COALESCE(d.archived, FALSE) = FALSE
+                AND NOT (COALESCE(d.metadata, '{{}}'::jsonb) ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}')
+                AND EXISTS (SELECT 1 FROM datasets ds WHERE ds.dataset_id = d.dataset_id
+                            AND ds.tenant_id = ${param_idx} AND ds.is_deleted = FALSE)"""
+            params.append(tenant_id)
+            param_idx += 1
+
         if status:
             query += f" AND d.status = ${param_idx}"
             params.append(status)
@@ -2142,15 +2160,27 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         self,
         dataset_id: str,
         status: str | None = None,
+        *, active_only: bool = False, tenant_id: str | None = None,
     ) -> int:
         """Total document rows for a dataset page (pagination companion)."""
         if not self._pool:
             return 0
 
-        query = "SELECT COUNT(*) FROM documents WHERE dataset_id = $1"
+        query = "SELECT COUNT(*) FROM documents AS d WHERE d.dataset_id = $1"
         params: list[Any] = [dataset_id]
+        param_idx = 2
+        if active_only:
+            if not str(tenant_id or "").strip():
+                raise ValueError("tenant_id is required for active document count")
+            query += f""" AND COALESCE(d.enabled, TRUE) = TRUE
+                AND COALESCE(d.archived, FALSE) = FALSE
+                AND NOT (COALESCE(d.metadata, '{{}}'::jsonb) ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}')
+                AND EXISTS (SELECT 1 FROM datasets ds WHERE ds.dataset_id = d.dataset_id
+                            AND ds.tenant_id = ${param_idx} AND ds.is_deleted = FALSE)"""
+            params.append(tenant_id)
+            param_idx += 1
         if status:
-            query += " AND status = $2"
+            query += f" AND d.status = ${param_idx}"
             params.append(status)
 
         async with self._pool.acquire() as conn:
@@ -2182,6 +2212,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         dataset_id: str,
         *,
         connection: Any | None = None,
+        active_only: bool = False,
+        tenant_id: str | None = None,
     ) -> list[str]:
         """List exact document IDs, optionally on an existing lifecycle lease."""
 
@@ -2189,9 +2221,22 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             return []
 
         async def _list(conn: Any) -> list[str]:
+            if active_only and not str(tenant_id or "").strip():
+                raise ValueError("tenant_id is required for active document IDs")
             rows = await conn.fetch(
-                "SELECT document_id FROM documents WHERE dataset_id = $1",
+                """SELECT d.document_id FROM documents AS d
+                   WHERE d.dataset_id = $1
+                     AND ($2::boolean = FALSE OR (
+                       COALESCE(d.enabled, TRUE) = TRUE
+                       AND COALESCE(d.archived, FALSE) = FALSE
+                       AND NOT (COALESCE(d.metadata, '{}'::jsonb) ? $3)
+                       AND EXISTS (SELECT 1 FROM datasets ds WHERE ds.dataset_id = d.dataset_id
+                                   AND ds.tenant_id = $4 AND ds.is_deleted = FALSE)
+                     ))""",
                 dataset_id,
+                active_only,
+                DOCUMENT_LIFECYCLE_REINDEX_KEY,
+                tenant_id,
             )
             return [str(row["document_id"]) for row in rows]
 
@@ -2404,6 +2449,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         stuck_threshold_minutes: int = 15,
         *,
         limit: int = 100,
+        allow_active_bm25_v2: bool = False,
     ) -> list[dict[str, Any]]:
         """Atomically claim stale ingestion/lifecycle rows for durable replay.
 
@@ -2412,8 +2458,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         claimant crashes before enqueue, the durable lifecycle marker makes the
         row eligible again after the same TTL. A processing-stage claim closes
         the interrupted execution and atomically links a new execution carrying
-        the identical rule and input snapshot; indexing resumes through vector
-        repair and therefore never re-enters parsing.
+        the identical rule and input snapshot. Indexing recovery re-enters the
+        incremental pipeline because the candidate may not yet be published.
         """
 
         if not self._pool:
@@ -2497,11 +2543,18 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                             -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
                         FALSE
                   )
-                  AND COALESCE(
-                        ds.index_config -> 'retrieval' -> 'lexical'
-                            ->> 'active_version',
-                        'lexical_v1'
-                  ) = 'lexical_v1'
+                  AND (
+                        COALESCE(
+                            ds.index_config -> 'retrieval' -> 'lexical'
+                                ->> 'active_version',
+                            'lexical_v1'
+                        ) = 'lexical_v1'
+                        OR (
+                            $3::boolean
+                            AND ds.index_config -> 'retrieval' -> 'lexical'
+                                ->> 'active_version' = 'bm25_v2'
+                        )
+                  )
                   AND COALESCE(d.updated_at, d.started_at, d.created_at)
                       < NOW() - make_interval(mins => $1)
                 ORDER BY d.updated_at ASC
@@ -2614,9 +2667,9 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                     updated_at = NOW(),
                     -- A process death ends one immutable execution. Publish a
                     -- new generation whose complete input snapshot and rule id
-                    -- are copied from the interrupted row. indexing always
-                    -- resumes as recover(indexing), so the worker can rebuild
-                    -- vectors from persisted segments without invoking a parser.
+                    -- are copied from the interrupted row. The recorded stage
+                    -- remains indexing, while the worker replays the pinned
+                    -- pipeline rather than assuming old rows are candidates.
                     -- reembed stays reembed because it deliberately has no
                     -- process-rule snapshot. Waiting rows already belong to a
                     -- durable generation and remain byte-for-byte pinned.
@@ -2663,7 +2716,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             WHERE status = 'waiting'
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            rows = await conn.fetch(query, threshold, bounded_limit)
+            rows = await conn.fetch(query, threshold, bounded_limit, allow_active_bm25_v2)
         return [self._row_to_dict(row) for row in rows]
 
     async def update_document_status(
@@ -3139,6 +3192,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             or DOCUMENT_INGEST_ACTION_KEY in incoming_metadata
             or DOCUMENT_RECOVER_STAGE_KEY in incoming_metadata
             or DOCUMENT_PIPELINE_EXECUTION_KEY in incoming_metadata
+            or DOCUMENT_PENDING_RESTORE_VERSION_KEY in incoming_metadata
+            or DOCUMENT_RESTORED_SOURCE_VERSION_KEY in incoming_metadata
         ):
             raise ValueError("document internal metadata keys are reserved")
         if (
@@ -3432,6 +3487,11 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         finish_publication: bool = True,
         candidate_content: str | None = None,
         expected_content: str | None = None,
+        candidate_metadata_patch: dict[str, Any] | None = None,
+        candidate_word_count: int | None = None,
+        candidate_version_number: int | None = None,
+        previous_version_number: int | None = None,
+        finalize_document: bool = False,
     ) -> tuple[int, int]:
         """Atomically replace/activate PostgreSQL rows and release the fence."""
 
@@ -3458,7 +3518,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             if candidate_content is not None:
                 current = await connection.fetchrow(
                     """
-                    SELECT content FROM documents
+                    SELECT content, metadata, current_version FROM documents
                     WHERE document_id = $1 AND dataset_id = $2 AND status = 'indexing'
                     FOR UPDATE
                     """,
@@ -3467,12 +3527,83 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 )
                 if current is None or str(current["content"] or "") != expected_content:
                     raise RuntimeError("document source changed during index publication")
-                await connection.execute(
-                    "UPDATE documents SET content = $3 WHERE document_id = $1 AND dataset_id = $2",
-                    document_id,
-                    dataset_id,
-                    candidate_content,
-                )
+                if candidate_version_number is not None:
+                    metadata = _json_object(current["metadata"])
+                    if (
+                        metadata.get(DOCUMENT_PENDING_RESTORE_VERSION_KEY)
+                        != {
+                            "previous_version": previous_version_number,
+                            "candidate_version": candidate_version_number,
+                        }
+                        or previous_version_number is None
+                        or previous_version_number <= int(current["current_version"] or 0)
+                        or candidate_version_number <= int(current["current_version"] or 0)
+                    ):
+                        raise RuntimeError("restore candidate changed during index publication")
+                    previous = await connection.fetchrow(
+                        """
+                        UPDATE document_versions
+                        SET change_type = 'updated'
+                        WHERE document_id = $1 AND version_number = $2
+                          AND change_type = 'pending_before_restore' AND content = $3
+                        RETURNING version_id
+                        """,
+                        document_id,
+                        previous_version_number,
+                        expected_content,
+                    )
+                    if previous is None:
+                        raise RuntimeError("pre-restore source snapshot changed")
+                    version = await connection.fetchrow(
+                        """
+                        UPDATE document_versions
+                        SET change_type = 'restored'
+                        WHERE document_id = $1 AND version_number = $2
+                          AND change_type = 'pending_restore' AND content = $3
+                        RETURNING version_id
+                        """,
+                        document_id,
+                        candidate_version_number,
+                        candidate_content,
+                    )
+                    if version is None:
+                        raise RuntimeError("restore candidate content changed")
+                    await connection.execute(
+                        """
+                        UPDATE documents
+                        SET content = $3,
+                            metadata = (COALESCE(metadata, '{}'::jsonb) - $4::text)
+                                || jsonb_build_object($5::text, $8::integer)
+                                || $6::jsonb,
+                            word_count = COALESCE($7, word_count),
+                            current_version = $8,
+                            version_count = COALESCE(version_count, 0) + 2
+                        WHERE document_id = $1 AND dataset_id = $2
+                        """,
+                        document_id,
+                        dataset_id,
+                        candidate_content,
+                        DOCUMENT_PENDING_RESTORE_VERSION_KEY,
+                        DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
+                        json.dumps(candidate_metadata_patch or {}),
+                        candidate_word_count,
+                        candidate_version_number,
+                    )
+                else:
+                    await connection.execute(
+                        """
+                        UPDATE documents
+                        SET content = $3,
+                            metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+                            word_count = COALESCE($5, word_count)
+                        WHERE document_id = $1 AND dataset_id = $2
+                        """,
+                        document_id,
+                        dataset_id,
+                        candidate_content,
+                        json.dumps(candidate_metadata_patch or {}),
+                        candidate_word_count,
+                    )
             await connection.execute(
                 """
                 UPDATE documents
@@ -3485,6 +3616,20 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 document_id,
                 dataset_id,
             )
+            if finalize_document:
+                if not finish_publication:
+                    raise RuntimeError("text terminal requires one completed publication")
+                await connection.execute(
+                    f"""UPDATE documents
+                       SET status = 'completed', progress = 100, error = NULL,
+                           metadata = COALESCE(metadata, '{{}}'::jsonb)
+                               - '{DOCUMENT_INGEST_ACTION_KEY}'
+                               - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                               - '{DOCUMENT_PIPELINE_EXECUTION_KEY}',
+                           completed_at = NOW(), updated_at = NOW()
+                       WHERE document_id = $1 AND dataset_id = $2""",
+                    document_id, dataset_id,
+                )
             if finish_publication:
                 await self._finish_index_publication(connection, dataset_id)
         return promoted, deleted
@@ -3815,22 +3960,41 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         query_text: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        *, active_only: bool = False, tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出 Segment"""
         if not self._pool:
             return []
 
-        query = "SELECT * FROM segments WHERE dataset_id = $1"
+        query = "SELECT s.* FROM segments AS s WHERE s.dataset_id = $1"
         params: list[Any] = [dataset_id]
         param_idx = 2
 
+        if active_only:
+            if not str(tenant_id or "").strip():
+                raise ValueError("tenant_id is required for active segment listing")
+            query += f""" AND COALESCE(s.enabled, TRUE) = TRUE
+                AND s.status = 'completed'
+                AND EXISTS (SELECT 1 FROM documents d JOIN datasets ds
+                            ON ds.dataset_id = d.dataset_id
+                            WHERE d.document_id = s.document_id
+                              AND d.dataset_id = s.dataset_id
+                              AND ds.tenant_id = ${param_idx}
+                              AND ds.is_deleted = FALSE
+                              AND COALESCE(d.enabled, TRUE) = TRUE
+                              AND COALESCE(d.archived, FALSE) = FALSE
+                              AND NOT (COALESCE(d.metadata, '{{}}'::jsonb)
+                                       ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'))"""
+            params.append(tenant_id)
+            param_idx += 1
+
         if document_id:
-            query += f" AND document_id = ${param_idx}"
+            query += f" AND s.document_id = ${param_idx}"
             params.append(document_id)
             param_idx += 1
 
         if query_text:
-            query += f" AND text ILIKE ${param_idx}"
+            query += f" AND s.text ILIKE ${param_idx}"
             params.append(f"%{_escape_like_pattern(query_text)}%")
             param_idx += 1
 
@@ -3839,7 +4003,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         # full-generation walk) can skip or duplicate rows at a page boundary
         # that splits a tied group.
         query += (
-            f" ORDER BY document_id ASC, position ASC, content_type ASC, segment_id ASC"
+            f" ORDER BY s.document_id ASC, s.position ASC, s.content_type ASC, s.segment_id ASC"
             f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         )
         params.extend([limit, offset])
@@ -3853,6 +4017,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         dataset_id: str,
         document_id: str | None = None,
         query_text: str | None = None,
+        *, active_only: bool = False, tenant_id: str | None = None,
     ) -> int:
         """Total segment rows for a list page (pagination companion).
 
@@ -3862,17 +4027,34 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         if not self._pool:
             return 0
 
-        query = "SELECT COUNT(*) FROM segments WHERE dataset_id = $1"
+        query = "SELECT COUNT(*) FROM segments AS s WHERE s.dataset_id = $1"
         params: list[Any] = [dataset_id]
         param_idx = 2
+        if active_only:
+            if not str(tenant_id or "").strip():
+                raise ValueError("tenant_id is required for active segment count")
+            query += f""" AND COALESCE(s.enabled, TRUE) = TRUE
+                AND s.status = 'completed'
+                AND EXISTS (SELECT 1 FROM documents d JOIN datasets ds
+                            ON ds.dataset_id = d.dataset_id
+                            WHERE d.document_id = s.document_id
+                              AND d.dataset_id = s.dataset_id
+                              AND ds.tenant_id = ${param_idx}
+                              AND ds.is_deleted = FALSE
+                              AND COALESCE(d.enabled, TRUE) = TRUE
+                              AND COALESCE(d.archived, FALSE) = FALSE
+                              AND NOT (COALESCE(d.metadata, '{{}}'::jsonb)
+                                       ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'))"""
+            params.append(tenant_id)
+            param_idx += 1
 
         if document_id:
-            query += f" AND document_id = ${param_idx}"
+            query += f" AND s.document_id = ${param_idx}"
             params.append(document_id)
             param_idx += 1
 
         if query_text:
-            query += f" AND text ILIKE ${param_idx}"
+            query += f" AND s.text ILIKE ${param_idx}"
             params.append(f"%{_escape_like_pattern(query_text)}%")
             param_idx += 1
 
@@ -4068,6 +4250,53 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         return {
             str(row["document_id"]).strip() for row in rows if str(row["document_id"] or "").strip()
         }
+
+    async def document_has_completed_segments(
+        self, dataset_id: str, tenant_id: str, document_id: str,
+    ) -> bool:
+        """Detect any published or partially published rows before a special replay.
+
+        This deliberately ignores the document's current enabled/status flags:
+        an interrupted reprocess can change those while its old rows remain.
+        """
+        if not all(str(value or "").strip() for value in (dataset_id, tenant_id, document_id)):
+            raise ValueError("dataset, tenant, and document are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM segments AS s
+                       JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+                       WHERE s.dataset_id = $1 AND ds.tenant_id = $2
+                         AND ds.is_deleted = FALSE AND s.document_id = $3
+                         AND s.status = 'completed'
+                   )""",
+                dataset_id, tenant_id, document_id,
+            ))
+
+    async def document_has_specialized_segments(
+        self, dataset_id: str, tenant_id: str, document_id: str,
+        *, connection: Any | None = None,
+    ) -> bool:
+        """Detect image or hierarchy rows even if current config has changed."""
+        if not all(str(value or "").strip() for value in (dataset_id, tenant_id, document_id)):
+            raise ValueError("dataset, tenant, and document are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        query = """SELECT EXISTS (
+                       SELECT 1 FROM segments AS s
+                       JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+                       WHERE s.dataset_id = $1 AND ds.tenant_id = $2
+                         AND ds.is_deleted = FALSE AND s.document_id = $3
+                         AND (s.level IN (1, 2) OR s.parent_segment_id IS NOT NULL
+                              OR s.content_type IN
+                              ('image', 'section', 'document_summary'))
+                   )"""
+        if connection is not None:
+            return bool(await connection.fetchval(query, dataset_id, tenant_id, document_id))
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(query, dataset_id, tenant_id, document_id))
 
     async def dataset_has_embeddings(self, dataset_id: str) -> bool:
         """Check if dataset has any embedded segments with vectors."""
@@ -8580,6 +8809,53 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
     # Document Version Control Methods
     # =========================================================================
 
+    async def set_pending_restore_version(
+        self,
+        document_id: str,
+        dataset_id: str,
+        previous_version_number: int,
+        candidate_version_number: int,
+        execution_id: str,
+        *,
+        connection: Any,
+    ) -> bool:
+        """Bind a hidden version to the already-queued document generation."""
+
+        if (
+            previous_version_number <= 0
+            or candidate_version_number <= previous_version_number
+            or not str(execution_id or "").strip()
+        ):
+            raise ValueError("restore candidate identity is invalid")
+
+        row = await connection.fetchrow(
+            """
+            UPDATE documents
+            SET metadata = COALESCE(metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        $3::text, jsonb_build_object(
+                            'previous_version', $4::integer,
+                            'candidate_version', $5::integer
+                        ),
+                        $6::text, 'reprocess',
+                        $7::text, $8::text
+                    ),
+                updated_at = NOW()
+            WHERE document_id = $1 AND dataset_id = $2 AND status = 'waiting'
+              AND NOT (COALESCE(metadata, '{}'::jsonb) ? $3::text)
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+            DOCUMENT_PENDING_RESTORE_VERSION_KEY,
+            previous_version_number,
+            candidate_version_number,
+            DOCUMENT_INGEST_ACTION_KEY,
+            DOCUMENT_PIPELINE_EXECUTION_KEY,
+            execution_id,
+        )
+        return row is not None
+
     async def create_document_version(
         self,
         document_id: str,
@@ -8594,6 +8870,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         confluence_updated_at: datetime | None = None,
         *,
         connection: Any | None = None,
+        activate: bool = True,
     ) -> dict[str, Any] | None:
         """
         Create a new document version snapshot.
@@ -8652,16 +8929,16 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 changed_by,
             )
 
-            # Update document version counters
-            await conn.execute(
-                """
-                UPDATE documents
-                SET current_version = $1, version_count = COALESCE(version_count, 0) + 1
-                WHERE document_id = $2
-                """,
-                next_version,
-                document_id,
-            )
+            if activate:
+                await conn.execute(
+                    """
+                    UPDATE documents
+                    SET current_version = $1, version_count = COALESCE(version_count, 0) + 1
+                    WHERE document_id = $2
+                    """,
+                    next_version,
+                    document_id,
+                )
 
             return {
                 "version_id": version_id,
@@ -8705,6 +8982,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                     change_type, change_reason, changed_by, created_at
                 FROM document_versions
                 WHERE document_id = $1
+                  AND change_type NOT IN ('pending_restore', 'pending_before_restore')
                 ORDER BY version_number DESC
                 LIMIT $2 OFFSET $3
                 """,
@@ -8718,6 +8996,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         self,
         document_id: str,
         version_number: int,
+        *,
+        include_pending: bool = False,
     ) -> dict[str, Any] | None:
         """
         Get a specific document version with full content.
@@ -8737,9 +9017,11 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 """
                 SELECT * FROM document_versions
                 WHERE document_id = $1 AND version_number = $2
+                  AND ($3::boolean OR change_type NOT IN ('pending_restore', 'pending_before_restore'))
                 """,
                 document_id,
                 version_number,
+                include_pending,
             )
             return self._row_to_dict(row) if row else None
 
@@ -8750,7 +9032,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
 
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT COUNT(*) as count FROM document_versions WHERE document_id = $1",
+                "SELECT COUNT(*) as count FROM document_versions WHERE document_id = $1 AND change_type NOT IN ('pending_restore', 'pending_before_restore')",
                 document_id,
             )
             return row["count"] if row else 0
@@ -8768,6 +9050,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 """
                 SELECT * FROM document_versions
                 WHERE document_id = $1
+                  AND change_type NOT IN ('pending_restore', 'pending_before_restore')
                 ORDER BY version_number DESC
                 LIMIT 1
                 """,

@@ -8,9 +8,15 @@ in-flight internal states fail closed into 'indexing'.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
+from knowledge_service.core.auth.user_resolver import UserContext
+from knowledge_service.core.exceptions import ValidationFailedError
 from knowledge_service.services.knowledge.document_service import (
     DOCUMENT_DISPLAY_STATUS_VOCABULARY,
+    DocumentService,
     _with_display_status,
     derive_document_display_status,
 )
@@ -144,3 +150,73 @@ def test_failed_document_projection_hides_internal_error(archived: bool) -> None
     assert "private-secret" not in stamped["error"]
     assert "/internal/storage/path" not in stamped["error"]
     assert "retry manually" in stamped["error"]
+
+
+def test_specialized_rebuild_refusal_has_safe_actionable_code() -> None:
+    stamped = _with_display_status({
+        "document_id": "doc-a",
+        "status": "error",
+        "error": "specialized_rebuild_unavailable",
+    })
+    assert stamped["failure_code"] == "specialized_rebuild_unavailable"
+    assert "may have partial results" in stamped["error"]
+
+
+@pytest.mark.asyncio
+async def test_document_body_viewer_requires_active_row_editor_can_manage_disabled() -> None:
+    document = {
+        "document_id": "doc-a", "dataset_id": "dataset-a",
+        "content": "private document body", "status": "completed",
+        "enabled": False, "archived": False,
+    }
+    database = SimpleNamespace(
+        get_document=AsyncMock(return_value=document),
+        filter_active_document_ids=AsyncMock(return_value=set()),
+    )
+    dataset = {"dataset_id": "dataset-a", "tenant_id": "tenant-a", "content_revision": 1}
+    knowledge = SimpleNamespace(
+        require_dataset_access=AsyncMock(return_value=dataset),
+        _effective_dataset_permission=AsyncMock(return_value="viewer"),
+    )
+    service = DocumentService(settings=None, database=database)  # type: ignore[arg-type]
+    service._ks = knowledge  # type: ignore[assignment]
+    user = UserContext(user_id="user-a", tenant_id="tenant-a")
+
+    with pytest.raises(ValidationFailedError, match="document not found"):
+        await service.get_document(user, "dataset-a", "doc-a")
+    database.filter_active_document_ids.return_value = {"doc-a"}
+    assert (await service.get_document(user, "dataset-a", "doc-a"))["content"] == "private document body"
+    knowledge._effective_dataset_permission.return_value = "editor"
+    database.filter_active_document_ids.return_value = set()
+    assert (await service.get_document(user, "dataset-a", "doc-a"))["content"] == "private document body"
+
+
+@pytest.mark.asyncio
+async def test_viewer_pages_request_active_rows_with_matching_totals() -> None:
+    database = SimpleNamespace(
+        list_documents=AsyncMock(return_value=[]),
+        count_documents=AsyncMock(return_value=0),
+        list_segments=AsyncMock(return_value=[]),
+        count_segments=AsyncMock(return_value=0),
+    )
+    dataset = {"dataset_id": "dataset-a", "tenant_id": "tenant-a", "content_revision": 1}
+    knowledge = SimpleNamespace(
+        require_dataset_access=AsyncMock(return_value=dataset),
+        _effective_dataset_permission=AsyncMock(return_value="viewer"),
+    )
+    service = DocumentService(settings=None, database=database)  # type: ignore[arg-type]
+    service._ks = knowledge  # type: ignore[assignment]
+    user = UserContext(user_id="user-a", tenant_id="tenant-a")
+    await service.list_documents_page(user, "dataset-a")
+    await service.list_segments_page(user, "dataset-a")
+    for method in (database.list_documents, database.count_documents,
+                   database.list_segments, database.count_segments):
+        assert method.await_args.kwargs["active_only"] is True
+        assert method.await_args.kwargs["tenant_id"] == "tenant-a"
+
+    knowledge._effective_dataset_permission.return_value = "editor"
+    await service.list_documents_page(user, "dataset-a")
+    await service.list_segments_page(user, "dataset-a")
+    for method in (database.list_documents, database.count_documents,
+                   database.list_segments, database.count_segments):
+        assert method.await_args.kwargs["active_only"] is False

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Response
 from knowledge_service.api.routes import knowledge as knowledge_routes
 from knowledge_service.api.routes.knowledge import (
+    DocumentAuthorizeRequest,
     VersionRestoreRequest,
+    authorize_gateway_documents,
     batch_create_documents,
     batch_reindex_documents,
     compare_document_versions,
     debug_dataset,
     force_complete_document,
+    get_active_document_source,
     get_document_pipeline_execution,
     get_document_version,
     get_image_segment,
@@ -37,8 +42,9 @@ from knowledge_service.api.schemas.knowledge import (
     RetrieveRequestSchema,
 )
 from knowledge_service.core.auth.user_resolver import UserContext
-from knowledge_service.core.exceptions import ValidationFailedError
+from knowledge_service.core.exceptions import PermissionDeniedError, ValidationFailedError
 from knowledge_service.persistence.database import IndexLeaseUnavailableError
+from starlette.requests import Request
 
 USER = UserContext(user_id="user-a", tenant_id="tenant-a")
 ADMIN = UserContext(user_id="admin-a", tenant_id="tenant-a", user_tier="admin")
@@ -49,6 +55,96 @@ DATASET = {
     "index_config": {},
     "content_revision": 7,
 }
+
+
+@pytest.mark.asyncio
+async def test_internal_document_authority_filters_live_rows_and_scope() -> None:
+    calls: list[tuple[str, str, list[str]]] = []
+
+    class Service:
+        async def require_dataset_access(self, user, dataset_id, *, required):
+            assert (user.user_id, user.tenant_id, dataset_id, required) == (
+                "user-a", "tenant-a", "dataset-a", "viewer",
+            )
+            return DATASET
+
+        db = SimpleNamespace()
+
+    async def filter_active(dataset_id, tenant_id, document_ids):
+        calls.append((dataset_id, tenant_id, document_ids))
+        return {"document-a"}
+
+    Service.db.filter_active_document_ids = filter_active
+    request = Request({
+        "type": "http",
+        "headers": [(b"x-user-id", b"user-a"), (b"x-tenant-id", b"tenant-a")],
+    })
+    result = await authorize_gateway_documents(
+        request,
+        DocumentAuthorizeRequest(dataset_id="dataset-a", document_ids=["document-b", "document-a", "document-a"]),
+        svc=Service(),  # type: ignore[arg-type]
+    )
+    assert result.allowed_document_ids == ["document-a"]
+    assert calls == [("dataset-a", "tenant-a", ["document-a", "document-b"])]
+
+
+def test_version_compare_path_is_not_captured_by_numeric_version_route() -> None:
+    path = "/knowledge/dataset-a/documents/document-a/versions/compare"
+    matches = [
+        route.name for route in knowledge_routes.router.routes
+        if getattr(route, "path_regex", None) and route.path_regex.match(path)
+        and "GET" in (getattr(route, "methods", None) or set())
+    ]
+    assert matches == ["compare_document_versions"]
+
+
+@pytest.mark.asyncio
+async def test_internal_document_authority_requires_signed_identity_and_dataset_viewer() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args, **_kwargs):
+            raise PermissionDeniedError("private dataset")
+
+        db = SimpleNamespace(filter_active_document_ids=AsyncMock())
+
+    service = Service()
+    body = DocumentAuthorizeRequest(dataset_id="dataset-a", document_ids=["document-a"])
+    with pytest.raises(HTTPException) as missing:
+        await authorize_gateway_documents(
+            Request({"type": "http", "headers": []}), body,
+            svc=service,  # type: ignore[arg-type]
+        )
+    assert missing.value.status_code == 401
+    allowed = await authorize_gateway_documents(
+        Request({"type": "http", "headers": [(b"x-user-id", b"user-a"), (b"x-tenant-id", b"tenant-a")]}),
+        body, svc=service,  # type: ignore[arg-type]
+    )
+    assert allowed.allowed_document_ids == []
+    service.db.filter_active_document_ids.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_citation_source_read_rechecks_document_active_even_for_editor() -> None:
+    body = {"document_id": "document-a", "dataset_id": "dataset-a",
+            "content": "private old body", "status": "completed"}
+    database = SimpleNamespace(
+        get_document=AsyncMock(return_value=body),
+        filter_active_document_ids=AsyncMock(return_value=set()),
+    )
+
+    class Service(_BaseService):
+        async def get_document(self, *_args):
+            return body  # Editor management read is allowed.
+
+    service = Service(database)
+    with pytest.raises(HTTPException) as denied:
+        await get_active_document_source(
+            "dataset-a", "document-a", svc=service, user=USER,  # type: ignore[arg-type]
+        )
+    assert denied.value.status_code == 404
+    database.filter_active_document_ids.return_value = {"document-a"}
+    assert (await get_active_document_source(
+        "dataset-a", "document-a", svc=service, user=USER,  # type: ignore[arg-type]
+    ))["content"] == "private old body"
 
 
 @pytest.mark.asyncio
@@ -774,9 +870,18 @@ class _VerbDatabase:
 
 
 class _VerbWorker:
-    def __init__(self, *, queued: bool = True) -> None:
+    def __init__(self, *, queued: bool = True, reject_special: bool = False) -> None:
         self.queued = queued
+        self.reject_special = reject_special
         self.calls: list[dict[str, Any]] = []
+
+    async def require_safe_special_replay_admission(
+        self, _task: Any, _document: dict[str, Any], _dataset: dict[str, Any],
+        *, action: str,
+    ) -> None:
+        del action
+        if self.reject_special:
+            raise ValidationFailedError("specialized_rebuild_unavailable")
 
     async def enqueue(self, dataset_id: str, document_id: str, **kwargs: Any) -> bool:
         self.calls.append(
@@ -794,6 +899,51 @@ def _verb_document(**overrides: Any) -> dict[str, Any]:
     }
     document.update(overrides)
     return document
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", [reprocess_document, recover_document, retry_document])
+async def test_specialized_replay_rejected_before_execution_receipt(route: Any) -> None:
+    database = _VerbDatabase(_verb_document())
+    service = _BaseService(database)
+    worker = _VerbWorker(reject_special=True)
+
+    for _ in range(2):
+        with pytest.raises(HTTPException) as exc_info:
+            await route(
+                "dataset-a", "document-a", svc=service, worker=worker, user=USER,
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "specialized_rebuild_unavailable"
+    assert database.records == []
+    assert database.rules == []
+    assert worker.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", [reprocess_document, recover_document, retry_document])
+async def test_replay_rechecks_editor_after_specialized_admission(route: Any) -> None:
+    database = _VerbDatabase(_verb_document())
+
+    class RevokedService(_BaseService):
+        checks = 0
+
+        async def require_dataset_access(self, user, dataset_id, *, required):
+            self.checks += 1
+            if self.checks == 2:
+                raise PermissionDeniedError("editor grant revoked")
+            return await super().require_dataset_access(user, dataset_id, required=required)
+
+    service = RevokedService(database)
+    worker = _VerbWorker()
+    with pytest.raises(HTTPException) as exc_info:
+        await route(
+            "dataset-a", "document-a", svc=service, worker=worker, user=USER,
+        )
+    assert exc_info.value.status_code == 403
+    assert database.records == []
+    assert database.rules == []
+    assert worker.calls == []
 
 
 @pytest.mark.asyncio
@@ -1241,6 +1391,7 @@ class _RestoreDatabase:
             "status": "completed",
             "progress": 100,
             "content": "current content",
+            "current_version": 1,
             "title": "Document A",
             "metadata": metadata,
         }
@@ -1266,7 +1417,7 @@ class _RestoreDatabase:
         assert dataset_id == "dataset-a"
         assert connection is not None
         self.events.append("dataset-read")
-        return dict(DATASET)
+        return {**DATASET, "index_config": {"chunking": {"mode": "automatic"}}}
 
     async def get_document(
         self,
@@ -1299,7 +1450,50 @@ class _RestoreDatabase:
         assert kwargs.pop("connection") is not None
         self.created_versions.append(dict(kwargs))
         self.events.append(f"version-create:{kwargs['change_type']}")
-        return {"version_number": len(self.created_versions) + 1}
+        version_number = len(self.created_versions) + 1
+        if kwargs.get("activate", True):
+            self.document["current_version"] = version_number
+        return {"version_number": version_number}
+
+    async def set_pending_restore_version(
+        self,
+        document_id: str,
+        dataset_id: str,
+        previous_version_number: int,
+        candidate_version_number: int,
+        execution_id: str,
+        *,
+        connection: Any,
+    ) -> bool:
+        assert (document_id, dataset_id) == ("document-a", "dataset-a")
+        assert connection is not None and self.document["status"] == "waiting"
+        self.document["metadata"]["_document_pending_restore_version"] = {
+            "previous_version": previous_version_number,
+            "candidate_version": candidate_version_number,
+        }
+        self.document["metadata"]["_document_ingest_action"] = "reprocess"
+        self.document["metadata"]["_document_pipeline_execution_id"] = execution_id
+        self.events.append("candidate-bound")
+        return True
+
+    async def record_process_rule(self, *_args: Any, **kwargs: Any) -> str:
+        assert kwargs["connection"] is not None
+        assert kwargs["rules"]["processing_mode"] == "text_only"
+        self.events.append("rule-recorded")
+        return "rule-restore"
+
+    async def pin_document_process_rule(self, _document_id: str, rule_id: str, **kwargs: Any) -> bool:
+        assert kwargs["connection"] is not None
+        self.document["process_rule_id"] = rule_id
+        self.events.append("rule-pinned")
+        return True
+
+    async def record_pipeline_execution(self, *_args: Any, **kwargs: Any) -> str:
+        assert kwargs["connection"] is not None
+        assert kwargs["action"] == "reprocess"
+        assert kwargs["process_rule_id"] == "rule-restore"
+        self.events.append("execution-recorded")
+        return "exec-restore"
 
     async def update_document_status(
         self,
@@ -1329,20 +1523,34 @@ class _RestoreDatabase:
 
 
 class _RestoreWorker:
-    def __init__(self, database: _RestoreDatabase) -> None:
+    def __init__(self, database: _RestoreDatabase, *, reject_special: bool = False) -> None:
         self.database = database
+        self.reject_special = reject_special
         self.calls: list[tuple[str, str]] = []
+
+    async def require_safe_restore_admission(
+        self, _task: Any, _dataset: dict[str, Any], *, connection: Any,
+    ) -> None:
+        assert connection is not None
+        self.database.events.append("specialized-check")
+        if self.reject_special:
+            raise ValidationFailedError("specialized_rebuild_unavailable")
 
     async def enqueue_claimed(self, dataset_id: str, document_id: str) -> None:
         assert self.database.document["status"] == "waiting"
-        assert self.database.document["content"] == "restored content"
+        assert self.database.document["content"] == "current content"
+        assert self.database.document["metadata"]["_document_pending_restore_version"] == {
+            "previous_version": 2,
+            "candidate_version": 3,
+        }
+        assert self.database.document["metadata"]["_document_pipeline_execution_id"] == "exec-restore"
         assert self.database.events[-1] == "lease-exit"
         self.calls.append((dataset_id, document_id))
         self.database.events.append("enqueue-claimed")
 
 
 @pytest.mark.asyncio
-async def test_version_restore_atomically_changes_content_before_durable_enqueue() -> None:
+async def test_version_restore_queues_hidden_candidate_without_changing_serving_content() -> None:
     database = _RestoreDatabase()
     service = _BaseService(database)
     worker = _RestoreWorker(database)
@@ -1357,27 +1565,55 @@ async def test_version_restore_atomically_changes_content_before_durable_enqueue
         user=USER,
     )
 
-    assert result["status"] == "success"
-    assert database.document["content"] == "restored content"
+    assert result["status"] == "pending"
+    assert database.document["content"] == "current content"
     assert database.document["status"] == "waiting"
+    assert database.document["current_version"] == 1
+    assert database.document["metadata"]["_document_pending_restore_version"] == {
+        "previous_version": 2,
+        "candidate_version": 3,
+    }
     assert [version["change_type"] for version in database.created_versions] == [
-        "updated",
-        "restored",
+        "pending_before_restore",
+        "pending_restore",
     ]
     assert database.events == [
         "lease-enter",
         "dataset-read",
         "transaction-enter",
         "document-read",
+        "specialized-check",
         "version-read",
-        "version-create:updated",
+        "version-create:pending_before_restore",
         "status:waiting",
-        "content-update",
-        "version-create:restored",
+        "version-create:pending_restore",
+        "rule-recorded",
+        "rule-pinned",
+        "execution-recorded",
+        "candidate-bound",
         "transaction-exit",
         "lease-exit",
         "enqueue-claimed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_version_restore_refuses_specialized_points_before_candidate_or_execution() -> None:
+    database = _RestoreDatabase()
+    service = _BaseService(database)
+    worker = _RestoreWorker(database, reject_special=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_document_version(
+            "dataset-a", "document-a", 1, payload=VersionRestoreRequest(),
+            svc=service, worker=worker, user=USER,  # type: ignore[arg-type]
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "specialized_rebuild_unavailable"
+    assert database.version_reads == 0
+    assert database.created_versions == []
+    assert database.document["content"] == "current content"
+    assert worker.calls == []
 
 
 @pytest.mark.asyncio
@@ -1401,4 +1637,36 @@ async def test_version_restore_rejects_lifecycle_pending_document_before_content
     assert database.version_reads == 0
     assert database.document["content"] == "current content"
     assert database.created_versions == []
+    assert worker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_version_restore_rechecks_editor_after_waiting_for_document_lease() -> None:
+    database = _RestoreDatabase()
+
+    class RevokedService(_BaseService):
+        access_checks = 0
+
+        async def require_dataset_access(self, user, dataset_id, *, required):
+            self.access_checks += 1
+            if self.access_checks == 2:
+                raise PermissionDeniedError("editor grant was revoked")
+            return await super().require_dataset_access(user, dataset_id, required=required)
+
+    service = RevokedService(database)
+    worker = _RestoreWorker(database)
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_document_version(
+            "dataset-a",
+            "document-a",
+            1,
+            payload=VersionRestoreRequest(),
+            svc=service,  # type: ignore[arg-type]
+            worker=worker,  # type: ignore[arg-type]
+            user=USER,
+        )
+    assert exc_info.value.status_code == 403
+    assert database.version_reads == 0
+    assert database.created_versions == []
+    assert database.document["content"] == "current content"
     assert worker.calls == []

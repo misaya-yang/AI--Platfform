@@ -30,8 +30,8 @@ from ...persistence.database import (
     make_dataset_index_deletion_fence,
 )
 from .chunking import validate_persisted_chunking_config
+from .common import SPECIALIZED_REBUILD_UNAVAILABLE, maybe_await
 from .common import ensure_dict as _ensure_dict
-from .common import maybe_await
 from .embedding import BaseEmbedding, create_embedding
 from .lexical_config import LexicalConfig
 
@@ -287,12 +287,17 @@ def _with_display_status(document: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(document, dict):
         return document
     document["display_status"] = derive_document_display_status(document)
+    if document.get("error") == SPECIALIZED_REBUILD_UNAVAILABLE:
+        document["failure_code"] = SPECIALIZED_REBUILD_UNAVAILABLE
     # Worker failures may contain provider responses, storage paths or credentials.
     # The raw value stays in the internal record/logs; public document reads
     # expose a stable instruction and the existing document_id for diagnosis.
     if document.get("error"):
         document["error"] = (
-            "Document processing failed. Check the source file and retry manually."
+            "This processing path may have partial results and cannot be replayed "
+            "safely. Ask an administrator to inspect it before retrying."
+            if document.get("failure_code") == SPECIALIZED_REBUILD_UNAVAILABLE
+            else "Document processing failed. Check the source file and retry manually."
         )
     return document
 
@@ -653,10 +658,13 @@ class DocumentService:
     ) -> list[dict[str, Any]]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
         documents = await self.db.list_documents(
             dataset_id=dataset_id,
             limit=_clamp_page_limit(limit, DOCUMENT_LIST_PAGE_CAP),
             offset=max(0, offset),
+            active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         await _require_unchanged_dataset_content(
             self._ks,
@@ -678,13 +686,19 @@ class DocumentService:
 
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
         page_limit = _clamp_page_limit(limit, DOCUMENT_LIST_PAGE_CAP)
         page_offset = max(0, offset)
-        total = int(await self.db.count_documents(dataset_id=dataset_id) or 0)
+        total = int(await self.db.count_documents(
+            dataset_id=dataset_id, active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+        ) or 0)
         documents = await self.db.list_documents(
             dataset_id=dataset_id,
             limit=page_limit,
             offset=page_offset,
+            active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         await _require_unchanged_dataset_content(
             self._ks,
@@ -701,8 +715,12 @@ class DocumentService:
 
     async def count_documents(self, user: UserContext, dataset_id: str) -> int:
         """Total document rows the caller may see (pagination total)."""
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
-        return await self.db.count_documents(dataset_id=dataset_id)
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
+        return await self.db.count_documents(
+            dataset_id=dataset_id, active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+        )
 
     async def list_all_document_ids(
         self, user: UserContext, dataset_id: str
@@ -715,7 +733,11 @@ class DocumentService:
         """
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
-        document_ids = await self.db.list_document_ids_by_dataset(dataset_id)
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
+        document_ids = await self.db.list_document_ids_by_dataset(
+            dataset_id, active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+        )
         await _require_unchanged_dataset_content(
             self._ks,
             user,
@@ -738,6 +760,18 @@ class DocumentService:
             dataset_id,
             generation,
         )
+        # Editors need the management view to repair disabled/archived rows.
+        # Ordinary viewers may only read serving source bytes.
+        effective_permission = await self._ks._effective_dataset_permission(dataset, user)
+        if effective_permission not in {"owner", "editor"}:
+            filter_active = getattr(self.db, "filter_active_document_ids", None)
+            if not callable(filter_active):
+                raise ValidationFailedError("Document active-state authority is unavailable")
+            active = await filter_active(
+                dataset_id, str(dataset.get("tenant_id") or ""), [document_id],
+            )
+            if document_id not in set(active or ()):
+                raise ValidationFailedError("document not found")
         return _with_display_status(doc)
 
     async def enqueue_ingest(self, dataset_id: str, document_id: str) -> None:
@@ -877,12 +911,15 @@ class DocumentService:
     ) -> list[dict[str, Any]]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
         segments = await self.db.list_segments(
             dataset_id=dataset_id,
             document_id=document_id,
             query_text=q,
             limit=_clamp_page_limit(limit, SEGMENT_LIST_PAGE_CAP),
             offset=max(0, offset),
+            active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         await _require_unchanged_dataset_content(
             self._ks,
@@ -906,6 +943,7 @@ class DocumentService:
 
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
         page_limit = _clamp_page_limit(limit, SEGMENT_LIST_PAGE_CAP)
         page_offset = max(0, offset)
         total = int(
@@ -913,6 +951,8 @@ class DocumentService:
                 dataset_id=dataset_id,
                 document_id=document_id,
                 query_text=q,
+                active_only=active_only,
+                tenant_id=str(dataset.get("tenant_id") or ""),
             )
             or 0
         )
@@ -922,6 +962,8 @@ class DocumentService:
             query_text=q,
             limit=page_limit,
             offset=page_offset,
+            active_only=active_only,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         await _require_unchanged_dataset_content(
             self._ks,
@@ -944,9 +986,11 @@ class DocumentService:
         q: str | None = None,
     ) -> int:
         """Total segment rows for the filtered list (pagination total)."""
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        active_only = await self._ks._effective_dataset_permission(dataset, user) not in {"owner", "editor"}
         return await self.db.count_segments(
-            dataset_id=dataset_id, document_id=document_id, query_text=q
+            dataset_id=dataset_id, document_id=document_id, query_text=q,
+            active_only=active_only, tenant_id=str(dataset.get("tenant_id") or ""),
         )
 
     async def update_segment(

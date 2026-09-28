@@ -575,6 +575,9 @@ class DocumentKnowledgeService:
         assert dataset is not None
         return dataset
 
+    async def _effective_dataset_permission(self, _dataset, _user):
+        return "viewer"
+
 
 class StubEmbedder:
     dimension = 3
@@ -1927,6 +1930,16 @@ async def test_v1_scope_and_document_sweep_cover_hierarchy_image_and_legacy(
         ],
     )
 
+    assert await store.document_has_points(
+        tenant_id="tenant-a", dataset_id="dataset-a", document_id="document-a",
+    )
+    assert await store.document_has_specialized_points(
+        tenant_id="tenant-a", dataset_id="dataset-a", document_id="document-a",
+    )
+    assert not await store.document_has_points(
+        tenant_id="tenant-a", dataset_id="dataset-a", document_id="missing-document",
+    )
+
     swept = await store.delete_document_points(
         tenant_id="tenant-a",
         dataset_id="dataset-a",
@@ -1941,6 +1954,12 @@ async def test_v1_scope_and_document_sweep_cover_hierarchy_image_and_legacy(
         "legacy-foreign-tenant",
     }
     assert set(client.collections["foreign"]["points"]) == {"foreign-point"}
+    assert not await store.document_has_points(
+        tenant_id="tenant-a", dataset_id="dataset-a", document_id="document-a",
+    )
+    assert not await store.document_has_specialized_points(
+        tenant_id="tenant-a", dataset_id="dataset-a", document_id="document-a",
+    )
 
 
 @pytest.mark.asyncio

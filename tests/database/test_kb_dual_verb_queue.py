@@ -15,6 +15,7 @@ DatabaseStorage methods over a live developer PostgreSQL.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
@@ -23,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -31,9 +33,12 @@ from dotenv import dotenv_values
 from knowledge_service.persistence.database import (
     DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PENDING_RESTORE_VERSION_KEY,
     DOCUMENT_PIPELINE_EXECUTION_KEY,
     DOCUMENT_RECOVER_STAGE_KEY,
+    DOCUMENT_RESTORED_SOURCE_VERSION_KEY,
     DatabaseStorage,
+    dataset_ingestion_identity,
 )
 from knowledge_service.services.knowledge.worker import (
     KnowledgeIngestTask,
@@ -111,8 +116,14 @@ async def verb_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     archived BOOLEAN NOT NULL DEFAULT FALSE,
                     metadata JSONB,
                     content TEXT,
+                    current_version INTEGER NOT NULL DEFAULT 1,
+                    version_count INTEGER NOT NULL DEFAULT 1,
+                    word_count INTEGER NOT NULL DEFAULT 0,
+                    segment_count INTEGER NOT NULL DEFAULT 0,
                     size_bytes BIGINT NOT NULL DEFAULT 0,
                     source_type VARCHAR(50) NOT NULL DEFAULT 'upload',
+                    source_uri TEXT,
+                    confluence_version INTEGER,
                     mime_type VARCHAR(100) NOT NULL DEFAULT 'text/plain',
                     process_rule_id VARCHAR(255),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -166,6 +177,7 @@ async def verb_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     language VARCHAR(10) DEFAULT 'en',
                     contextual_prefix TEXT DEFAULT '',
                     content_hash VARCHAR(64),
+                    hit_count INTEGER NOT NULL DEFAULT 0,
                     level INTEGER DEFAULT 3,
                     parent_segment_id VARCHAR(255),
                     summary TEXT,
@@ -189,6 +201,23 @@ async def verb_world() -> AsyncIterator[tuple[DatabaseStorage, asyncpg.Pool]]:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE (document_id, content_type, position)
+                );
+                CREATE TABLE document_versions (
+                    version_id VARCHAR(255) PRIMARY KEY,
+                    document_id VARCHAR(255) NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+                    version_number INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash VARCHAR(64) NOT NULL,
+                    confluence_version INTEGER,
+                    confluence_updated_at TIMESTAMPTZ,
+                    title VARCHAR(512),
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    word_count INTEGER NOT NULL DEFAULT 0,
+                    change_type VARCHAR(50) NOT NULL,
+                    change_reason TEXT,
+                    changed_by VARCHAR(255),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(document_id, version_number)
                 );
                 INSERT INTO datasets (dataset_id, tenant_id)
                 VALUES ('dataset-a', 'tenant-a');
@@ -861,7 +890,7 @@ async def test_claim_stuck_publishes_snapshot_identical_recovery_generation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["ingest", "reprocess", "retry"])
-async def test_repeated_indexing_recovery_dispatches_segments_without_parser(
+async def test_repeated_indexing_recovery_replays_pinned_pipeline(
     verb_world: tuple[DatabaseStorage, asyncpg.Pool], action: str
 ) -> None:
     database, pool = verb_world
@@ -905,7 +934,6 @@ async def test_repeated_indexing_recovery_dispatches_segments_without_parser(
     class RecoveryService:
         def __init__(self) -> None:
             self.db = database
-            self.vector_store = SimpleNamespace(bm25_v2_enabled=True)
             self.settings = SimpleNamespace(
                 knowledge=SimpleNamespace(
                     large_file_threshold=1024 * 1024,
@@ -920,38 +948,28 @@ async def test_repeated_indexing_recovery_dispatches_segments_without_parser(
             )
             self.parser_calls = 0
             self.reembed_segment_ids: list[str] = []
+            self.vector_store = SimpleNamespace(
+                bm25_v2_enabled=True,
+                document_has_points=AsyncMock(return_value=False),
+                document_has_specialized_points=AsyncMock(return_value=False),
+            )
 
         async def ingest_document(self, *_args: Any, **_kwargs: Any) -> list[str]:
             self.parser_calls += 1
-            raise AssertionError("indexing recovery must not invoke parsing")
-
-        async def reembed_document(
-            self,
-            dataset_id: str,
-            document_id: str,
-        ) -> list[str]:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT segment_id, text
-                    FROM segments
-                    WHERE dataset_id = $1 AND document_id = $2
-                    ORDER BY position
-                    """,
-                    dataset_id,
-                    document_id,
-                )
-            self.reembed_segment_ids = [str(row["segment_id"]) for row in rows]
-            assert [str(row["text"]) for row in rows] == [
-                "persisted alpha",
-                "persisted beta",
-            ]
+            assert _kwargs["index_config_override"] == snapshot["index_config"]
             await database.update_document_status(
-                document_id,
+                "doc-interrupted",
                 status="completed",
                 progress=100,
             )
-            return list(self.reembed_segment_ids)
+            return ["seg-new-candidate"]
+
+        async def reembed_document(
+            self,
+            _dataset_id: str,
+            _document_id: str,
+        ) -> list[str]:
+            raise AssertionError("indexing recovery cannot assume old segments are this candidate")
 
     service = RecoveryService()
     worker = KnowledgeWorker(service)  # type: ignore[arg-type]
@@ -975,9 +993,9 @@ async def test_repeated_indexing_recovery_dispatches_segments_without_parser(
         await worker._prepare_document_generation(task, connection=connection)
         manifest = await worker._process_task(task, connection=connection)
 
-    assert manifest == ["seg-persisted-0", "seg-persisted-1"]
-    assert service.reembed_segment_ids == manifest
-    assert service.parser_calls == 0
+    assert manifest == ["seg-new-candidate"]
+    assert service.reembed_segment_ids == []
+    assert service.parser_calls == 1
     await worker._finish_pipeline_execution(
         second_recovery_id,
         status="completed",
@@ -986,6 +1004,29 @@ async def test_repeated_indexing_recovery_dispatches_segments_without_parser(
     completed = await _get_execution_row(pool, second_recovery_id)
     assert completed["status"] == "completed"
     assert completed["manifest"]["segment_ids"] == manifest
+
+
+@pytest.mark.asyncio
+async def test_active_bm25_v2_stuck_recovery_requires_enabled_runtime(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _seed_interrupted_generation(pool, action="reprocess")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE datasets SET index_config = $1::jsonb WHERE dataset_id = 'dataset-a'
+            """,
+            json.dumps({"retrieval": {"lexical": {"active_version": "bm25_v2"}}}),
+        )
+
+    assert await database.claim_stuck_documents(stuck_threshold_minutes=1) == []
+    claimed = await database.claim_stuck_documents(
+        stuck_threshold_minutes=1,
+        allow_active_bm25_v2=True,
+    )
+    assert [row["document_id"] for row in claimed] == ["doc-interrupted"]
+    assert (await _get_document_row(pool, "doc-interrupted"))["status"] == "waiting"
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1052,167 @@ async def test_stuck_reembed_renews_consistent_reembed_ledger(
     assert renewed["action"] == "reembed"
     assert renewed["process_rule_id"] is None
     assert renewed["input_snapshot"] == snapshot
+
+
+@pytest.mark.asyncio
+async def test_restore_candidate_and_serving_source_publish_together(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-restore-version", content="old serving fact")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO document_versions (
+                version_id, document_id, version_number, content, content_hash, change_type
+            ) VALUES ('version-1', 'doc-restore-version', 1, 'old serving fact', $1, 'created')
+            """,
+            hashlib.sha256(b"old serving fact").hexdigest(),
+        )
+
+    candidate_text = "restored historical KITE-42"
+    async with pool.acquire() as conn, conn.transaction():
+        before_snapshot = await database.create_document_version(
+            document_id="doc-restore-version",
+            content="old serving fact",
+            content_hash=hashlib.sha256(b"old serving fact").hexdigest(),
+            change_type="pending_before_restore",
+            connection=conn,
+            activate=False,
+        )
+        assert before_snapshot is not None and before_snapshot["version_number"] == 2
+        candidate = await database.create_document_version(
+            document_id="doc-restore-version",
+            content=candidate_text,
+            content_hash=hashlib.sha256(candidate_text.encode()).hexdigest(),
+            change_type="pending_restore",
+            connection=conn,
+            activate=False,
+        )
+        assert candidate is not None and candidate["version_number"] == 3
+        await database.update_document_status(
+            "doc-restore-version", status="waiting", progress=0, error="", connection=conn,
+        )
+        assert await database.set_pending_restore_version(
+            "doc-restore-version", "dataset-a", 2, 3, "exec-restore", connection=conn,
+        )
+        await database.update_document_status(
+            "doc-restore-version", status="indexing", progress=70, connection=conn,
+        )
+
+    assert await database.get_document_version("doc-restore-version", 3) is None
+    assert await database.get_document_version("doc-restore-version", 2) is None
+    assert (await database.get_document_version("doc-restore-version", 3, include_pending=True))["content"] == candidate_text
+    assert await database.get_document_version_count("doc-restore-version") == 1
+    assert len(await database.list_document_versions("doc-restore-version")) == 1
+    before = await _get_document_row(pool, "doc-restore-version")
+    assert before["content"] == "old serving fact"
+    assert before["current_version"] == 1
+    assert before["version_count"] == 1
+    assert before["metadata"][DOCUMENT_PENDING_RESTORE_VERSION_KEY] == {
+        "previous_version": 2,
+        "candidate_version": 3,
+    }
+
+    dataset = await database.get_dataset("dataset-a")
+    expected_identity = dataset_ingestion_identity(dataset)
+    async with pool.acquire() as conn:
+        with pytest.raises(RuntimeError, match="source changed"):
+            await database.commit_text_segment_publication(
+                dataset_id="dataset-a", document_id="doc-restore-version",
+                segment_rows=[], keep_segment_ids=[], staged_segment_ids=[],
+                delete_excess=False, expected_ingestion_identity=expected_identity,
+                connection=conn, finish_publication=False,
+                candidate_content=candidate_text, expected_content="wrong source",
+                candidate_version_number=3, previous_version_number=2,
+            )
+    assert (await _get_document_row(pool, "doc-restore-version"))["content"] == "old serving fact"
+    assert await database.get_document_version("doc-restore-version", 3) is None
+
+    async with pool.acquire() as conn:
+        await database.commit_text_segment_publication(
+            dataset_id="dataset-a", document_id="doc-restore-version",
+            segment_rows=[], keep_segment_ids=[], staged_segment_ids=[],
+            delete_excess=False, expected_ingestion_identity=expected_identity,
+            connection=conn, finish_publication=False,
+            candidate_content=candidate_text, expected_content="old serving fact",
+            candidate_version_number=3, previous_version_number=2,
+            candidate_word_count=3,
+        )
+    after = await _get_document_row(pool, "doc-restore-version")
+    assert after["content"] == candidate_text
+    assert after["current_version"] == 3
+    assert after["version_count"] == 3
+    assert after["word_count"] == 3
+    assert DOCUMENT_PENDING_RESTORE_VERSION_KEY not in after["metadata"]
+    assert after["metadata"]["_document_restored_source_version"] == 3
+    assert (await database.get_document_version("doc-restore-version", 2))["change_type"] == "updated"
+    assert (await database.get_document_version("doc-restore-version", 3))["change_type"] == "restored"
+    assert await database.get_document_version_count("doc-restore-version") == 3
+    async with pool.acquire() as conn:
+        with pytest.raises(RuntimeError, match="restore candidate changed"):
+            await database.commit_text_segment_publication(
+                dataset_id="dataset-a", document_id="doc-restore-version",
+                segment_rows=[], keep_segment_ids=[], staged_segment_ids=[],
+                delete_excess=False, expected_ingestion_identity=expected_identity,
+                connection=conn, finish_publication=False,
+                candidate_content=candidate_text, expected_content=candidate_text,
+                candidate_version_number=3, previous_version_number=2,
+            )
+    assert (await _get_document_row(pool, "doc-restore-version"))["version_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_text_restore_publishes_version_body_and_terminal_in_one_transaction(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-finalize", status="waiting", content="old body")
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """INSERT INTO document_versions
+               (version_id, document_id, version_number, content, content_hash, change_type)
+               VALUES ('v1', 'doc-finalize', 1, 'old body', $1, 'created')""",
+            hashlib.sha256(b"old body").hexdigest(),
+        )
+        before = await database.create_document_version(
+            document_id="doc-finalize", content="old body",
+            content_hash=hashlib.sha256(b"old body").hexdigest(),
+            change_type="pending_before_restore", connection=conn, activate=False,
+        )
+        candidate = await database.create_document_version(
+            document_id="doc-finalize", content="new body",
+            content_hash=hashlib.sha256(b"new body").hexdigest(),
+            change_type="pending_restore", connection=conn, activate=False,
+        )
+        assert before["version_number"] == 2 and candidate["version_number"] == 3
+        assert await database.set_pending_restore_version(
+            "doc-finalize", "dataset-a", 2, 3, "exec-finalize", connection=conn,
+        )
+        await database.update_document_status(
+            "doc-finalize", status="indexing", progress=70, connection=conn,
+        )
+        await conn.execute("UPDATE datasets SET content_revision = -1 WHERE dataset_id = 'dataset-a'")
+    dataset = await database.get_dataset("dataset-a")
+    async with pool.acquire() as conn:
+        await database.commit_text_segment_publication(
+            dataset_id="dataset-a", document_id="doc-finalize",
+            segment_rows=[], keep_segment_ids=[], staged_segment_ids=[],
+            delete_excess=False, expected_ingestion_identity=dataset_ingestion_identity(dataset),
+            connection=conn, finish_publication=True, finalize_document=True,
+            candidate_content="new body", expected_content="old body",
+            candidate_version_number=3, previous_version_number=2,
+        )
+    published = await _get_document_row(pool, "doc-finalize")
+    assert (published["content"], published["current_version"], published["status"]) == (
+        "new body", 3, "completed",
+    )
+    assert DOCUMENT_PENDING_RESTORE_VERSION_KEY not in published["metadata"]
+    for marker in (DOCUMENT_INGEST_ACTION_KEY, DOCUMENT_RECOVER_STAGE_KEY,
+                   DOCUMENT_PIPELINE_EXECUTION_KEY):
+        assert marker not in published["metadata"]
+    assert published["metadata"][DOCUMENT_RESTORED_SOURCE_VERSION_KEY] == 3
+    assert (await database.get_dataset("dataset-a"))["content_revision"] > 0
 
 
 @pytest.mark.asyncio
@@ -1372,6 +1574,107 @@ def _segment_row(
         "index_node_id": f"{document_id}::{content_type}::{position}",
         "index_node_hash": content_hash or f"hash-{segment_id}",
     }
+
+
+@pytest.mark.asyncio
+async def test_special_replay_authority_checks_rows_not_document_enabled(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-a", status="parsing")
+    assert not await database.document_has_completed_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    assert not await database.document_has_specialized_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    await database.insert_segments([
+        _segment_row(segment_id="staged", position=0, text="candidate", status="indexing", enabled=False),
+    ])
+    assert not await database.document_has_completed_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    orphan_l3 = _segment_row(segment_id="orphan-l3", position=1, text="old paragraph")
+    orphan_l3["parent_segment_id"] = "missing-parent"
+    await database.insert_segments([orphan_l3])
+    assert await database.document_has_specialized_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    await database.insert_segments([
+        _segment_row(segment_id="published", position=2, text="published", content_type="image"),
+    ])
+    await _put_document(pool, document_id="doc-a", status="waiting", enabled=False)
+    assert await database.document_has_completed_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    assert await database.document_has_specialized_segments(
+        "dataset-a", "tenant-a", "doc-a"
+    )
+    assert not await database.document_has_completed_segments(
+        "dataset-a", "another-tenant", "doc-a"
+    )
+
+
+@pytest.mark.asyncio
+async def test_viewer_pages_hide_disabled_archived_pending_and_staged_content(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(pool, document_id="doc-a")
+    await _put_document(pool, document_id="doc-b", enabled=False)
+    await _put_document(pool, document_id="doc-c", archived=True)
+    await _put_document(
+        pool, document_id="doc-d",
+        metadata={DOCUMENT_LIFECYCLE_REINDEX_KEY: {"status": "pending"}},
+    )
+    await database.insert_segments([
+        _segment_row(segment_id="visible", position=0, text="public active text"),
+        _segment_row(segment_id="staged", position=1, text="private pending text", status="indexing", enabled=False),
+        _segment_row(segment_id="disabled", document_id="doc-b", position=0, text="private disabled text"),
+        _segment_row(segment_id="archived", document_id="doc-c", position=0, text="private archived text"),
+        _segment_row(segment_id="lifecycle", document_id="doc-d", position=0, text="private lifecycle text"),
+    ])
+    documents = await database.list_documents(
+        "dataset-a", active_only=True, tenant_id="tenant-a",
+    )
+    assert [item["document_id"] for item in documents] == ["doc-a"]
+    assert await database.count_documents(
+        "dataset-a", active_only=True, tenant_id="tenant-a",
+    ) == 1
+    assert await database.list_document_ids_by_dataset(
+        "dataset-a", active_only=True, tenant_id="tenant-a",
+    ) == ["doc-a"]
+    segments = await database.list_segments(
+        "dataset-a", active_only=True, tenant_id="tenant-a",
+    )
+    assert [item["segment_id"] for item in segments] == ["visible"]
+    assert await database.count_segments(
+        "dataset-a", active_only=True, tenant_id="tenant-a",
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_confluence_source_generation_retires_restored_source_marker(
+    verb_world: tuple[DatabaseStorage, asyncpg.Pool],
+) -> None:
+    database, pool = verb_world
+    await _put_document(
+        pool, document_id="doc-a", status="syncing", content="restored old text",
+        metadata={
+            DOCUMENT_RESTORED_SOURCE_VERSION_KEY: 4,
+            "_confluence_sync_generation": {"generation": "generation-new"},
+        },
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        assert await database.prepare_confluence_document_update(
+            "doc-a", "dataset-a", generation="generation-new",
+            title="new source", content="new Confluence body", confluence_version=5,
+            source_metadata={}, connection=conn,
+        )
+    row = await _get_document_row(pool, "doc-a")
+    assert row["content"] == "new Confluence body"
+    assert row["status"] == "waiting"
+    assert DOCUMENT_RESTORED_SOURCE_VERSION_KEY not in row["metadata"]
 
 
 async def _segment_rows(pool: asyncpg.Pool, document_id: str) -> list[dict[str, Any]]:

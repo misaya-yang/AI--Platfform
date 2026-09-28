@@ -3,7 +3,8 @@
 The verb is pinned on the queued row's metadata at claim time; the worker
 must route strictly by it:
 
-* reembed, and recover-from-indexing, go to the in-place vector repair;
+* only explicit reembed goes to in-place vector repair; recover replays the
+  pinned incremental pipeline because an indexing crash can predate publication;
 * retry and reprocess rebuild through atomic incremental publication from the
   submission-time snapshot;
 * attachment bindings are never deleted before a replacement succeeds;
@@ -16,6 +17,7 @@ import copy
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from knowledge_service.services.knowledge.worker import (
@@ -106,6 +108,20 @@ class DualVerbDatabase:
     ) -> list[dict[str, Any]]:
         del document_id, connection
         return []
+
+    async def document_has_completed_segments(
+        self, dataset_id: str, tenant_id: str, document_id: str,
+    ) -> bool:
+        assert (dataset_id, tenant_id, document_id) == ("dataset-a", "tenant-a", "doc-a")
+        return False
+
+    async def document_has_specialized_segments(
+        self, dataset_id: str, tenant_id: str, document_id: str,
+        *, connection: Any | None = None,
+    ) -> bool:
+        del connection
+        assert (dataset_id, tenant_id, document_id) == ("dataset-a", "tenant-a", "doc-a")
+        return False
 
     async def get_pipeline_execution(
         self, execution_id: str, *, connection: Any | None = None
@@ -235,6 +251,11 @@ class DualVerbDatabase:
 class DualVerbService:
     def __init__(self, database: DualVerbDatabase) -> None:
         self.db = database
+        self.vector_store = SimpleNamespace(
+            bm25_v2_enabled=True,
+            document_has_points=AsyncMock(return_value=False),
+            document_has_specialized_points=AsyncMock(return_value=False),
+        )
         self.settings = SimpleNamespace(
             knowledge=SimpleNamespace(
                 large_file_threshold=1024 * 1024 * 1024,
@@ -395,7 +416,7 @@ async def test_restore_generation_with_pending_lifecycle_marker_routes_to_reembe
 
 
 @pytest.mark.asyncio
-async def test_recover_from_indexing_routes_to_vector_repair() -> None:
+async def test_recover_from_indexing_replays_pinned_incremental_pipeline() -> None:
     worker, database, service = make_worker(
         metadata={
             "_document_ingest_action": "recover",
@@ -406,10 +427,14 @@ async def test_recover_from_indexing_routes_to_vector_repair() -> None:
 
     manifest = await worker._process_task(make_task(), connection=object())
 
-    assert manifest == ["seg-repaired"]
-    assert service.reembed_calls == [("dataset-a", "doc-a")]
-    assert service.ingest_calls == []
-    assert all(status != "parsing" for _, status, _ in database.status_writes)
+    assert manifest == ["seg-rebuilt"]
+    assert service.reembed_calls == []
+    assert service.ingest_calls == [{
+        "dataset_id": "dataset-a",
+        "document_id": "doc-a",
+        "chunking_config_override": {"mode": "automatic"},
+    }]
+    assert ("doc-a", "parsing", 5) in database.status_writes
 
 
 @pytest.mark.asyncio
@@ -434,6 +459,28 @@ async def test_recover_from_parsing_redoes_full_pipeline() -> None:
         }
     ]
     assert ("doc-a", "parsing", 5) in database.status_writes
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_uses_pinned_text_candidate_even_for_scanned_source() -> None:
+    worker, database, service = make_worker(
+        metadata={
+            "_document_pending_restore_version": 3,
+            "processing_mode": "scanned",
+        }
+    )
+    _seed_replay_execution(database, action="reprocess", processing_mode="text_only")
+    database.documents["doc-a"]["size_bytes"] = 100 * 1024 * 1024
+
+    manifest = await worker._process_task(make_task(), connection=object())
+
+    assert manifest == ["seg-rebuilt"]
+    assert service.reembed_calls == []
+    assert service.ingest_calls == [{
+        "dataset_id": "dataset-a",
+        "document_id": "doc-a",
+        "chunking_config_override": {"mode": "automatic"},
+    }]
 
 
 @pytest.mark.asyncio
