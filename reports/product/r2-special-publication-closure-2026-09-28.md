@@ -1,6 +1,6 @@
 # R2-A 特殊文档候选发布：本地合入证据（2026-09-28）
 
-**判定：已验证的安全增量可本地合入；R2-A 和完整 R2 尚未通过全部验收。** 本记录区分自动化、真实 PostgreSQL、真实 Qdrant、本地 Docker 浏览器和未验证项。基线为本地 `main@ca564f5e`，候选分支 `codex/r2-special-publication`。13 份未跟踪 RP04 JSON 保留，不纳入本次提交；不推送。
+**判定：已验证的安全增量以 `cfff6306` 快进合入本地 `main`；R2-A 和完整 R2 尚未通过全部验收。** 本记录区分自动化、真实 PostgreSQL、真实 Qdrant、本地 Docker 浏览器和未验证项。基线为本地 `main@ca564f5e`，候选分支 `codex/r2-special-publication`。13 份未跟踪 RP04 JSON 保留，未纳入提交；未推送。
 
 ## 范围和结果
 
