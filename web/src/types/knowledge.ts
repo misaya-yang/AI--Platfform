@@ -714,6 +714,7 @@ export interface ProcessRule {
 // ============================================================
 
 export interface DatasetCreateRequest {
+  dataset_id?: string;
   name: string;
   description?: string;
   visibility?: Visibility;

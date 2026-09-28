@@ -358,6 +358,7 @@ export function AssistantPage() {
     stopStreaming,
     handleToolApproval,
     artifacts,
+    artifactLoadError,
     setArtifacts,
     showArtifacts,
     setShowArtifacts,
@@ -1158,7 +1159,7 @@ export function AssistantPage() {
                   }
                 }}
               />
-              {isMobile && uniqueArtifactCount > 0 && (
+              {isMobile && (uniqueArtifactCount > 0 || artifactLoadError) && (
                 <RightPanelChip
                   icon={<FileText className="h-3.5 w-3.5" />}
                   label={t("assistant.artifacts", "Artifacts")}
@@ -1204,7 +1205,7 @@ export function AssistantPage() {
                       }
                     }}
                   />
-                  {uniqueArtifactCount > 0 && (
+                  {(uniqueArtifactCount > 0 || artifactLoadError) && (
                     <RightPanelChip
                       icon={<FileText className="h-3.5 w-3.5" />}
                       label={t("assistant.artifacts", "Artifacts")}
@@ -1553,6 +1554,7 @@ export function AssistantPage() {
                       isOpen={showArtifacts}
                       onClose={() => setShowArtifacts(false)}
                       artifacts={artifacts}
+                      loadError={artifactLoadError}
                       executionStatus={codeExecution.status}
                       executionOutput={codeExecution.output}
                       currentCode={codeExecution.code || undefined}
@@ -1591,6 +1593,7 @@ export function AssistantPage() {
                       isOpen={showArtifacts}
                       onClose={() => setShowArtifacts(false)}
                       artifacts={artifacts}
+                      loadError={artifactLoadError}
                       executionStatus={codeExecution.status}
                       executionOutput={codeExecution.output}
                       currentCode={codeExecution.code || undefined}

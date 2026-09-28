@@ -655,7 +655,7 @@ async def thread_events(
         ):
             raw = await source_guard.project(raw)
             payload = raw.get("data") if isinstance(raw.get("data"), dict) else {}
-            if raw.get("event_type") == "run_started" and turn_metadata:
+            if raw.get("event_type") == "run_started" and turn_metadata and payload.get("source_access_revoked") is not True:
                 payload = {**payload, **turn_metadata}
                 raw = {**raw, "data": payload}
             sequence = int(raw.get("sequence") or after_sequence + 1)

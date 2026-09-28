@@ -31,6 +31,51 @@ const MOCK_PLAYGROUND_THREAD_ID = "e2e-mock-thread";
 const MOCK_PLAYGROUND_TOOL_ID = "pg-tool-1";
 const LAST_MODEL_STORAGE_KEY = "assistant.lastModelId.v1";
 
+test("R1 controlled stream disconnect reconnects to the same turn without duplicate execution", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-r1-reconnect", email: "r1-reconnect@example.com", display_name: "R1 reconnect",
+  });
+  await installAssistantHarness(page, async route => {
+    await route.fulfill({ status: 500, body: "unexpected harness stream" });
+  });
+  let threadCreates = 0, turnStarts = 0, interrupts = 0, cursorReads = 0;
+  await page.route("**/api/v2/agent/threads", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    threadCreates += 1;
+    const sessionId = (route.request().postDataJSON() as { session_id?: string }).session_id;
+    await route.fulfill(jsonResponse({ thread: { id: "e2e-runtime-thread", thread_id: "e2e-runtime-thread", session_id: sessionId, last_sequence: 0 } }));
+  });
+  await page.route("**/api/v2/agent/threads/*/turns", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    turnStarts += 1;
+    await route.fulfill(jsonResponse({ turn: { id: "e2e-turn", events_url: "/api/v2/agent/threads/e2e-runtime-thread/events?turn_id=e2e-turn" } }));
+  });
+  await page.route("**/api/v2/agent/threads/*/turns/*", async route => {
+    if (route.request().url().includes(":interrupt")) interrupts += 1;
+    await route.fulfill(jsonResponse({ status: "accepted" }));
+  });
+  await page.route("**/api/v2/agent/threads/*/events**", async route => {
+    cursorReads += 1;
+    if (cursorReads === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "controlled disconnect" }) });
+      return;
+    }
+    expect(new URL(route.request().url()).searchParams.get("after_sequence")).toBe("0");
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: wrapAssistantSseAsAgentV2(toSseBody([
+      { event_type: "run_started", data: { run_id: "e2e-turn", thread_id: "e2e-runtime-thread" } },
+      { event_type: "text_delta", data: "R1_RECONNECTED_ONCE" },
+      { event_type: "run_finished", data: { status: "succeeded" } },
+    ])) });
+  });
+  await ensureAuthenticatedPage(page, "/assistant");
+  await page.locator(`#${ASSISTANT_COMPOSER_ID}`).fill("R1 controlled network reconnect");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("log", { name: "Assistant conversation log" })).toContainText("R1_RECONNECTED_ONCE");
+  await expect.poll(() => cursorReads).toBe(2);
+  expect({ threadCreates, turnStarts, interrupts }).toEqual({ threadCreates: 1, turnStarts: 1, interrupts: 0 });
+});
+
 // Controlled activity input, not a real provider/Worker throughput claim.
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`R1 controlled 1000 activity events remain unique, scrollable and stoppable at ${viewport.width}px`, async ({ page }, testInfo) => {

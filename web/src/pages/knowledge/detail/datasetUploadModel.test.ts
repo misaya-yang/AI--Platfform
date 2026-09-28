@@ -5,6 +5,7 @@ import {
   buildDatasetUploadConfigPatch,
   uploadDatasetFiles,
 } from "./datasetUploadModel.ts";
+import { isDefiniteUploadRejection } from "../create/datasetCreateModel.ts";
 
 interface TestFile {
   name: string;
@@ -55,15 +56,36 @@ test("single uploads retain only failed files for retry", async () => {
   const outcome = await uploadDatasetFiles(files, {
     uploadBatch: async () => ({ accepted: 0, errors: [] }),
     uploadOne: async (file) => {
-      if (file.name === "retry.pdf") throw new Error("provider unavailable");
+      if (file.name === "retry.pdf") throw new Error("unsupported format");
     },
     describeError: (error) => (error as Error).message,
+    isRetrySafe: () => true,
   });
 
   assert.equal(outcome.accepted, 1);
   assert.deepEqual(outcome.failures, [
-    { file: files[1], error: "provider unavailable" },
+    { file: files[1], error: "unsupported format" },
   ]);
+});
+
+test("single upload with unknown outcome is not offered for direct retry", async () => {
+  const file: TestFile = { name: "maybe-accepted.txt" };
+  const outcome = await uploadDatasetFiles([file], {
+    uploadBatch: async () => ({ accepted: 0, errors: [] }),
+    uploadOne: async () => { throw new Error("connection lost"); },
+    describeError: () => "upload result unknown",
+    isRetrySafe: isDefiniteUploadRejection,
+  });
+
+  assert.deepEqual(outcome.failures, [{
+    file,
+    error: "upload result unknown",
+    retrySafe: false,
+  }]);
+  assert.equal(isDefiniteUploadRejection({ response: { status: 413 } }), true);
+  assert.equal(isDefiniteUploadRejection({ response: { status: 400 } }), false);
+  assert.equal(isDefiniteUploadRejection({ response: { status: 503 } }), false);
+  assert.equal(isDefiniteUploadRejection(new Error("timeout")), false);
 });
 
 test("batch uploads map server rejections back to retryable files", async () => {
@@ -75,16 +97,105 @@ test("batch uploads map server rejections back to retryable files", async () => 
   const outcome = await uploadDatasetFiles(files, {
     uploadBatch: async () => ({
       accepted: 2,
-      errors: [{ filename: "two.html", error: "parser limit" }],
+      errors: [{ filename: "two.html", error: "parser limit", retry_safe: true }],
     }),
     uploadOne: async () => undefined,
     describeError: () => "unused",
+    unknownOutcomeMessage: "Check the document list",
   });
 
   assert.equal(outcome.accepted, 2);
   assert.deepEqual(outcome.failures, [
     { file: files[1], error: "parser limit" },
   ]);
+});
+
+test("batch failures use file position when names repeat", async () => {
+  const files: TestFile[] = [
+    { name: "same.txt" },
+    { name: "same.txt" },
+    { name: "other.txt" },
+  ];
+  const outcome = await uploadDatasetFiles(files, {
+    uploadBatch: async () => ({
+      accepted: 2,
+      errors: [{ file_index: 1, filename: "same.txt", error: "empty file", retry_safe: true }],
+    }),
+    uploadOne: async () => undefined,
+    describeError: () => "unused",
+  });
+
+  assert.equal(outcome.accepted, 2);
+  assert.deepEqual(outcome.failures, [{ file: files[1], error: "empty file" }]);
+});
+
+test("created document with rejected enqueue is not offered for file reupload", async () => {
+  const files: TestFile[] = [
+    { name: "one.txt" },
+    { name: "two.txt" },
+    { name: "three.txt" },
+  ];
+  const outcome = await uploadDatasetFiles(files, {
+    uploadBatch: async () => ({
+      accepted: 2,
+      errors: [{
+        file_index: 1,
+        filename: "two.txt",
+        error: "queue unavailable",
+        document_id: "created-document",
+        retry_safe: false,
+      }],
+    }),
+    uploadOne: async () => undefined,
+    describeError: () => "unused",
+    unknownOutcomeMessage: "Check the document list",
+  });
+
+  assert.deepEqual(outcome.failures, [{
+    file: files[1],
+    error: "Check the document list",
+    documentId: "created-document",
+    retrySafe: false,
+  }]);
+});
+
+test("batch failure without an explicit safe retry receipt stays uncertain", async () => {
+  const files: TestFile[] = [
+    { name: "one.txt" },
+    { name: "maybe-created.txt" },
+    { name: "three.txt" },
+  ];
+  const outcome = await uploadDatasetFiles(files, {
+    uploadBatch: async () => ({
+      accepted: 2,
+      errors: [{ file_index: 1, filename: "maybe-created.txt", error: "connection lost" }],
+    }),
+    uploadOne: async () => undefined,
+    describeError: () => "unused",
+    unknownOutcomeMessage: "Check the document list",
+  });
+  assert.deepEqual(outcome.failures, [{
+    file: files[1],
+    error: "Check the document list",
+    retrySafe: false,
+  }]);
+});
+
+test("batch rejects a mismatched file position even when a name exists", async () => {
+  await assert.rejects(
+    uploadDatasetFiles(
+      [{ name: "same.txt" }, { name: "same.txt" }, { name: "other.txt" }],
+      {
+        uploadBatch: async () => ({
+          accepted: 2,
+          errors: [{ file_index: 2, filename: "same.txt", error: "invalid" }],
+        }),
+        uploadOne: async () => undefined,
+        describeError: () => "unused",
+      }
+    ),
+    /do not match/
+  );
 });
 
 test("batch receipt mismatch fails closed instead of losing a source", async () => {

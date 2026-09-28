@@ -195,6 +195,7 @@ async def get_artifact(
             title=artifact.title,
             filename=artifact.filename,
             size_bytes=artifact.size_bytes,
+            ready=artifact.size_bytes > 0,
             mime_type=artifact.mime_type,
             source=artifact.source,
             message_id=artifact.message_id,
@@ -297,6 +298,7 @@ async def create_artifact(
             title=artifact.title,
             filename=artifact.filename,
             size_bytes=artifact.size_bytes,
+            ready=artifact.size_bytes > 0,
             mime_type=artifact.mime_type,
             source=artifact.source,
             message_id=artifact.message_id,
@@ -392,6 +394,8 @@ async def download_artifact(
         content = await artifact_storage.download_artifact(artifact_id)
         if content is None:
             raise HTTPException(status_code=404, detail="Artifact content not found")
+        if not content:
+            raise HTTPException(status_code=409, detail="Artifact is empty or unfinished")
 
         return StreamingResponse(
             iter([content]),

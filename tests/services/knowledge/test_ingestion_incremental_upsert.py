@@ -263,9 +263,12 @@ class EngineDatabase:
         keep_segment_ids: list[str],
         staged_segment_ids: list[str],
         delete_excess: bool,
+        candidate_content: str | None = None,
+        expected_content: str | None = None,
         **_kwargs: Any,
     ) -> tuple[int, int]:
         before = deepcopy(self.segments)
+        before_content = self.document["content"]
         try:
             await self.insert_segments(segment_rows)
             deleted = 0
@@ -279,8 +282,13 @@ class EngineDatabase:
                 document_id,
                 staged_segment_ids,
             )
+            if candidate_content is not None:
+                if self.document["content"] != expected_content:
+                    raise RuntimeError("document source changed during index publication")
+                self.document["content"] = candidate_content
         except Exception:
             self.segments = before
+            self.document["content"] = before_content
             raise
         self.events.append("publication:commit")
         return promoted, deleted
@@ -510,6 +518,104 @@ async def test_retry_db_commit_failure_restores_old_row_point_and_payload() -> N
     # not run the old destructive compensation that deleted those IDs.
     assert set(store.deleted_ids).isdisjoint(old_points)
     assert "publication:abort" in database.events
+
+
+@pytest.mark.asyncio
+async def test_reextract_failure_keeps_old_document_content_with_serving_segments() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    old_rows = deepcopy(text_rows(database))
+    old_content = database.document["content"]
+    database.document["metadata"].update(
+        original_file_key="original-key",
+        original_filename="doc.txt",
+        original_mime_type="text/plain",
+    )
+    replacement = ("new source text with different facts and much more detail. " * 6).strip()
+    service = build_service(
+        dataset=dataset,
+        database=database,
+        store=store,
+        embedder=CountingEmbedder(),
+    )
+    service._ks.image_storage_service = SimpleNamespace(
+        download_original_file=AsyncMock(return_value=replacement.encode())
+    )
+    service._ks._extract_text_from_bytes = lambda *_args: (replacement, None)
+    store.replacement_upsert_calls = 0
+    store.fail_replacement_upsert_at = 1
+
+    await service.ingest_document("dataset-a", "document-a")
+
+    assert database.status_updates[-1] == "error"
+    assert database.document["content"] == old_content
+    assert text_rows(database) == old_rows
+
+
+@pytest.mark.asyncio
+async def test_reextract_publishes_content_with_segments_after_preparation() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    await ingest_once(dataset, database, store, SHORT_CONTENT)
+    database.document["metadata"].update(
+        original_file_key="original-key",
+        original_filename="doc.txt",
+        original_mime_type="text/plain",
+    )
+    replacement = ("published replacement facts for the same source. " * 7).strip()
+    service = build_service(
+        dataset=dataset,
+        database=database,
+        store=store,
+        embedder=CountingEmbedder(),
+    )
+    service._ks.image_storage_service = SimpleNamespace(
+        download_original_file=AsyncMock(return_value=replacement.encode())
+    )
+    service._ks._extract_text_from_bytes = lambda *_args: (replacement, None)
+    store.replacement_upsert_calls = 0
+    store.block_replacement_upsert_at = 1
+
+    retry_task = asyncio.create_task(service.ingest_document("dataset-a", "document-a"))
+    await asyncio.wait_for(store.blocked_replacement_upsert.wait(), timeout=2)
+    assert database.document["content"] == SHORT_CONTENT
+    assert text_rows(database)[0]["text"] == SHORT_CONTENT
+
+    store.release_replacement_upsert.set()
+    await asyncio.wait_for(retry_task, timeout=2)
+    assert database.status_updates[-1] == "completed"
+    assert database.document["content"] == replacement
+    assert any("published replacement facts" in row["text"] for row in text_rows(database).values())
+
+
+@pytest.mark.asyncio
+async def test_content_only_publication_uses_existing_revision_fence() -> None:
+    dataset, database, store = make_world(SHORT_CONTENT)
+    service = build_service(
+        dataset=dataset,
+        database=database,
+        store=store,
+        embedder=CountingEmbedder(),
+    )
+
+    await service._publish_text_generation(
+        collection="collection-a",
+        points=[],
+        segment_rows=[],
+        excess_vector_ids=[],
+        overwritten_point_ids=[],
+        keep_segment_ids=[],
+        staged_segment_ids=[],
+        delete_excess=False,
+        tenant_id="tenant-a",
+        dataset_id="dataset-a",
+        document_id="document-a",
+        expected_ingestion_identity=database.dataset.get("ingestion_identity", ""),
+        candidate_content="new serving content",
+        expected_content=SHORT_CONTENT,
+    )
+
+    assert database.document["content"] == "new serving content"
+    assert "publication:commit" in database.events
 
 
 @pytest.mark.asyncio

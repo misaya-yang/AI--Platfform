@@ -128,3 +128,19 @@ def test_with_display_status_stamps_the_payload_in_place() -> None:
 def test_with_display_status_passes_non_dicts_through() -> None:
     assert _with_display_status(None) is None  # type: ignore[arg-type]
     assert _with_display_status("x") == "x"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_failed_document_projection_hides_internal_error(archived: bool) -> None:
+    document = {
+        "document_id": "doc-safe-diagnostic",
+        "status": "error",
+        "archived": archived,
+        "error": "provider credential private-secret and /internal/storage/path",
+    }
+    stamped = _with_display_status(document)
+    assert stamped["display_status"] == ("archived" if archived else "error")
+    assert stamped["document_id"] == "doc-safe-diagnostic"
+    assert "private-secret" not in stamped["error"]
+    assert "/internal/storage/path" not in stamped["error"]
+    assert "retry manually" in stamped["error"]

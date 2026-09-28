@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { buildAuthHeaders, loginThroughApi } from "./support/helpers";
 
@@ -391,3 +392,56 @@ test("an image result cannot overwrite a different conversation after navigation
     }
   }
 });
+
+
+for (const failure of [
+  { status: 409, code: "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED" },
+  { status: 422, code: "ATTACHMENT_UNAVAILABLE" },
+]) {
+  test(`R1 controlled ${failure.status} retains the selected upload and an actionable draft`, async ({ page, request }, info) => {
+    test.setTimeout(55_000);
+    const headers = await buildAuthHeaders(request);
+    await installApiSession(page, request);
+    let starts = 0, uploads = 0;
+    let sessionId: string | undefined;
+    page.on("request", r => { if (r.method() === "POST" && r.url().endsWith("/files/upload")) uploads += 1; });
+    await page.route(/\/api\/v2\/agent\/threads\/[^/]+\/turns$/, async route => {
+      starts += 1;
+      await route.fulfill({ status: failure.status, contentType: "application/json", body: JSON.stringify({ detail: { code: failure.code, internal_error: "INTERNAL_DO_NOT_DISPLAY" } }) });
+    });
+    try {
+      await page.goto("/assistant");
+      const fresh = page.getByRole("heading", { name: /How can I help|今天有什么可以帮您/ });
+      if (!(await fresh.isVisible())) {
+        await page.getByRole("button", { name: /^(Show history|显示历史)$/ }).first().click();
+        await page.getByRole("button", { name: /^(New chat|新对话)$/ }).first().click();
+      }
+      const composer = page.locator("#assistant-chat-composer");
+      const prompt = `R1 boundary ${failure.status} draft ${Date.now()}`;
+      await composer.fill(prompt);
+      await page.locator('input[type="file"]').setInputFiles(fileURLToPath(new URL("./fixtures/r1-attachments/alpha.txt", import.meta.url)));
+      const selected = page.getByRole("button", { name: /^(Included in next message|随下条消息发送)$/ });
+      await expect(selected).toHaveCount(1);
+      const created = page.waitForResponse(r => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/v1/sessions");
+      await page.getByRole("button", { name: /^(Send|发送)$/ }).click();
+      sessionId = (await (await created).json()).session_id;
+      await expect.poll(() => starts).toBe(1);
+      await expect(composer).toHaveValue(prompt);
+      if (failure.status === 422) {
+        await expect(page.getByRole("log")).toContainText(/selected.*attachments?.*unavailable|选中.*附件.*不可用/i);
+        await expect(page.getByRole("log")).toContainText(/remove.*upload|移除.*上传/i);
+      }
+      await expect(selected).toHaveCount(1);
+      await expect(page.getByRole("log")).not.toContainText("INTERNAL_DO_NOT_DISPLAY");
+      if (failure.status === 409) {
+        await page.getByRole("button", { name: /New conversation with draft|保留草稿的新会话|保留草稿.*新/ }).click();
+        await expect(composer).toHaveValue(prompt);
+        await expect(selected).toHaveCount(1);
+      }
+      expect(starts).toBe(1); expect(uploads).toBe(1);
+      await info.attach("controlled-preadmission-facts", { body: JSON.stringify({ status: failure.status, turnPosts: starts, uploads, acceptedRuns: 0, selectedAttachmentRetained: true, automaticRetry: false }), contentType: "application/json" });
+    } finally {
+      if (sessionId) await request.delete(`${process.env.E2E_API_URL}/api/v1/sessions/${sessionId}`, { headers });
+    }
+  });
+}

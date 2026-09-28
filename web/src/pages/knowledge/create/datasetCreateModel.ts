@@ -5,6 +5,7 @@ export interface PendingFile {
   size: number;
   status: "pending" | "uploading" | "done" | "error";
   error?: string;
+  retrySafe?: boolean;
 }
 
 export interface PendingUrl {
@@ -13,6 +14,7 @@ export interface PendingUrl {
   title: string;
   status: "pending" | "uploading" | "done" | "error";
   error?: string;
+  retrySafe?: boolean;
 }
 
 export const EMBEDDING_MODELS = [
@@ -122,6 +124,14 @@ export function getSourceUploadError(
   if (error instanceof Error && error.message.trim()) return error.message.trim();
   if (typeof error === "string" && error.trim()) return error.trim();
   return messages.fallback;
+}
+
+/** A validation response proves no source record was accepted. */
+export function isDefiniteUploadRejection(error: unknown): boolean {
+  const response = error && typeof error === "object"
+    ? (error as UploadErrorEnvelope).response
+    : undefined;
+  return [413, 422].includes(response?.status ?? -1);
 }
 
 export function listFailedSources(

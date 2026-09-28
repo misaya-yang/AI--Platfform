@@ -12,6 +12,8 @@ from src.services.agent_runtime.thread_store import AgentThreadStore, ThreadStor
 async def test_retrieved_context_restores_only_for_currently_visible_dataset() -> None:
     class _ContextDB:
         async def fetch(self, query: str, *_args):
+            if "FROM assistant_runtime_snapshots AS s" in query:
+                return []
             if "assistant_capability_executions" in query:
                 return []
             assert "compat/v1/context_retrieved" in query
@@ -216,6 +218,33 @@ async def test_turn_metadata_reads_kernel_revision_from_immutable_snapshot() -> 
 
 
 @pytest.mark.asyncio
+async def test_history_effective_settings_use_only_owner_snapshot_and_skip_revoked_source() -> None:
+    class _SnapshotDB:
+        async def fetch(self, query: str, *args):
+            assert "r.session_id = s.session_id" in query
+            assert args[1:3] == ("tenant-a", "user-a")
+            assert set(args[3]) == {"run-a"}
+            return [{
+                "run_id": "run-a", "model_id": "qwen3.8-flash", "temperature": 0.7,
+                "reasoning": {"requested_option": "auto", "effective_option": "minimal", "secret": "PRIVATE"},
+            }]
+
+    messages = [
+        {"role": "assistant", "metadata": {"runtime_run_id": "run-a", "runtime_events": [{"event_type": "run_finished"}]}},
+        {"role": "assistant", "metadata": {"runtime_run_id": "run-revoked", "source_access_revoked": True}},
+    ]
+    await AgentThreadStore(_SnapshotDB())._attach_turn_parameters(
+        messages, tenant_id="tenant-a", user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001",
+    )
+    summary = messages[0]["metadata"]["process_summary"]
+    assert (summary["model_id"], summary["temperature"]) == ("qwen3.8-flash", 0.7)
+    assert summary["reasoning"]["effective_option"] == "minimal"
+    assert "PRIVATE" not in json.dumps(messages)
+    assert "process_summary" not in messages[1]["metadata"]
+
+
+@pytest.mark.asyncio
 async def test_history_messages_projects_runtime_rollout_in_chronological_order() -> None:
     now = datetime.now(timezone.utc)
 
@@ -297,6 +326,8 @@ async def test_history_messages_preserves_empty_cancelled_turn() -> None:
 
     class _CancelledHistoryDatabase(_Database):
         async def fetch(self, query: str, *args):
+            if "FROM assistant_runtime_snapshots AS s" in query:
+                return []
             assert "delta.event_type IN" in query
             assert "'compat/v1/cancelled'" in query
             assert "jsonb_array_elements" in query
@@ -352,6 +383,8 @@ async def test_history_messages_preserves_failed_and_uncertain_turns() -> None:
 
     class _FailedHistoryDatabase(_Database):
         async def fetch(self, query: str, *args):
+            if "FROM assistant_runtime_snapshots AS s" in query:
+                return []
             # Both completed messages and fallback deltas must carry terminal facts.
             assert query.count("'compat/v1/run_error'") >= 3
             assert query.count("'compat/v1/side_effect_unknown'") >= 3
@@ -400,6 +433,8 @@ async def test_history_messages_preserves_empty_successful_turn() -> None:
 
     class _EmptySuccessDatabase(_Database):
         async def fetch(self, query: str, *args):
+            if "FROM assistant_runtime_snapshots AS s" in query:
+                return []
             assert query.count("'compat/v1/run_finished'") >= 3
             assert "'side_effect_unknown', 'run_finished', 'run_error', 'cancelled'" in query
             assert args[1:] == ("tenant-a", "user-a", 10)

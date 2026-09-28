@@ -211,3 +211,21 @@ packages:
     review: Independent read-only final diff and evidence check
     evidence: [reports/product/r1-remaining-flows-2026-09-27.md, reports/r1-flows/**]
     stop_conditions: [Unknown actions would replay, shared network mutation, credential exposure, conflicting writer/owner, scope outside R1]
+
+  - id: R1-RP04
+    state: verified_with_external_image_blocker
+    result: Close only the eight remaining RP03 failure and permission acceptance journeys; fix confirmed defects, preserve accepted R1 outcomes.
+    base_sha: 317f1a14
+    depends_on: [R1-RP03:verified]
+    owned_paths: [web/src/pages/assistant/**, web/src/components/artifacts/**, web/src/api/**, web/src/i18n/locales/**, web/e2e/**, src/api/v1/**, src/api/v2/agent.py, src/services/assistant_entry/**, src/services/agent_runtime/**, tests/**, sdk/openapi.json, docs/plans/product-feature-completion-2026-09-23/**, deploy/runbooks/r1-assistant-closure-2026-09-23/**, reports/r1-boundaries/**, reports/product/r1-final-boundaries-2026-09-27.md]
+    forbidden_paths: [rust/**, database/**, apps/**, billing/**, sdk/src/**]
+    integration_paths: []
+    must_preserve: [Rust execution and recovery ownership, source and sharing rights, same run and tool identity, no unknown write replay, no accounts or credential logging, no shared network changes, latest user permits scoped local commit and main merge but no push or branch delete, primary sole writer and read-only children]
+    direct_gates: [affected regression and Ruff/TS/lint/i18n/build, public contract and boundary gates if affected]
+    integration_gates: [closed-list negative/repeat/actor isolation checks using existing accounts and isolated fixtures]
+    live_gates: [owned final Docker source identity and health, built-in browser affected journeys, independent review and relevant repairs/retest]
+    skip_policy: {required: none, missing_prerequisite: Record exact absent existing account/configuration; continue independent items; no full R1 pass}
+    rollback: Compatible source-only change, no schema/dependency/account/network changes
+    review: Reuse independent closure_review after final evidence; fix blocker/high and retest
+    evidence: [reports/product/r1-final-boundaries-2026-09-27.md, reports/r1-boundaries/**]
+    stop_conditions: [Unknown action would replay, missing scope ownership or actual Rust defect requires package re-declaration before writing, conflicting writer/Compose owner, credentials exposure]

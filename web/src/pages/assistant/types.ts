@@ -96,6 +96,8 @@ export interface ProcessSummaryState {
     capability_revision?: number;
     fallback_reason?: string | null;
   };
+  modelId?: string;
+  temperature?: number;
 }
 
 // =============================================================================

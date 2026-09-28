@@ -73,6 +73,7 @@ import {
   type DocumentPipelineAction,
 } from "@/api/knowledge";
 import { partitionIds, summarizeDocumentBatches } from "./batchOperations";
+import { lastStartedDocumentStage } from "./documentStages";
 import {
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
   documentNeedsLifecyclePolling,
@@ -206,6 +207,8 @@ export function DocumentsTab({
       ?? (linkedDocument?.document_id === selectedDocId ? linkedDocument : undefined),
     [docs, linkedDocument, selectedDocId]
   );
+  const selectedDocFailed = selectedDoc ? resolveDisplayStatus(selectedDoc) === "error" : false;
+  const selectedDocFailureStage = lastStartedDocumentStage(selectedDoc);
 
   useEffect(() => {
     if (!datasetId || !sourceDocumentId) return;
@@ -1326,6 +1329,20 @@ export function DocumentsTab({
             </div>
           </div>
 
+          {selectedDocFailed && (
+            <div role="alert" className="border-b border-rose-500/25 bg-rose-500/10 px-5 py-3 text-sm text-rose-800 dark:text-rose-300">
+              <p className="font-medium">{t("knowledge.detail.processingFailedTitle")}</p>
+              <p className="mt-1">
+                {t("knowledge.detail.processingFailedDetail", {
+                  stage: selectedDocFailureStage
+                    ? t(`knowledge.documentRow.stage${selectedDocFailureStage[0].toUpperCase()}${selectedDocFailureStage.slice(1)}`)
+                    : t("knowledge.detail.processingStageUnknown"),
+                  documentId: selectedDoc.document_id,
+                })}
+              </p>
+            </div>
+          )}
+
           {/* 段落批量操作栏 */}
           {segmentBatchMode && segments.length > 0 && (
             <div
@@ -1386,7 +1403,9 @@ export function DocumentsTab({
                   <Hash className="h-8 w-8 text-muted-foreground/70" />
                 </div>
                 <p className="text-muted-foreground font-medium">{t("knowledge.detail.noSegments")}</p>
-                <p className="text-sm text-muted-foreground/70 mt-1">{t("knowledge.detail.noSegmentsHint")}</p>
+                <p className="text-sm text-muted-foreground/70 mt-1">
+                  {t(selectedDocFailed ? "knowledge.detail.noSegmentsFailedHint" : "knowledge.detail.noSegmentsHint")}
+                </p>
               </div>
             ) : (
               <SegmentList

@@ -654,6 +654,7 @@ class IngestionService:
                 raise ValidationFailedError("document not found")
 
             raw_text = _require_extracted_text_budget(doc.get("content"))
+            candidate_content: str | None = None
             doc_meta = _ensure_dict(doc.get("metadata"))
             if "structured_parsing" in doc_meta:
                 raise ValidationFailedError(
@@ -759,7 +760,10 @@ class IngestionService:
                     re_text = _require_extracted_text_budget(re_text)
                     if re_text and len(re_text.strip()) > len(raw_text.strip()):
                         raw_text = re_text
-                        await self.db.update_document_content(document_id, raw_text)
+                        # Keep the old serving original until its replacement
+                        # segments commit. A failed embed must not expose new
+                        # raw text beside the old searchable chunks.
+                        candidate_content = raw_text
                         logger.info(
                             f"Re-extracted {len(raw_text)} chars from original file "
                             f"(was {len(str(doc.get('content') or ''))} chars)"
@@ -1417,7 +1421,7 @@ class IngestionService:
                     if str(row.get("segment_id") or "").strip()
                 ] + staged_resumable
                 keep_segment_ids = unchanged_segments + staged_manifest
-                if points or staged_manifest or excess_segments:
+                if points or staged_manifest or excess_segments or candidate_content is not None:
                     promoted, deleted_count = await self._publish_text_generation(
                         collection=collection,
                         points=points,
@@ -1431,6 +1435,8 @@ class IngestionService:
                         dataset_id=dataset_id,
                         document_id=document_id,
                         expected_ingestion_identity=ingestion_identity,
+                        candidate_content=candidate_content,
+                        expected_content=str(doc.get("content") or ""),
                     )
                     logger.info(
                         f"Activated {promoted}/{len(staged_manifest)} staged segments "
@@ -2385,6 +2391,8 @@ class IngestionService:
         dataset_id: str,
         document_id: str,
         expected_ingestion_identity: str,
+        candidate_content: str | None = None,
+        expected_content: str | None = None,
     ) -> tuple[int, int]:
         commit_publication = getattr(self.db, "commit_text_segment_publication", None)
         if not callable(commit_publication):
@@ -2398,6 +2406,9 @@ class IngestionService:
             kwargs: dict[str, Any] = {}
             if not finish_publication:
                 kwargs["finish_publication"] = False
+            if candidate_content is not None:
+                kwargs["candidate_content"] = candidate_content
+                kwargs["expected_content"] = expected_content
             return await commit_publication(
                 dataset_id=dataset_id,
                 document_id=document_id,

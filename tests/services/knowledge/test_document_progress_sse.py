@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from knowledge_service.api.routes.knowledge import stream_document_progress
+from knowledge_service.api.routes.knowledge import (
+    _format_document_progress_event,
+    stream_document_progress,
+)
 from knowledge_service.auth.user_context import UserContext
 from knowledge_service.core.exceptions import PermissionDeniedError, ValidationFailedError
 
@@ -62,6 +65,26 @@ class _Service:
 async def _next_frame(response: Any) -> str:
     frame = await response.body_iterator.__anext__()
     return frame.decode("utf-8") if isinstance(frame, bytes) else frame
+
+
+def test_progress_replay_hides_internal_worker_error() -> None:
+    frame = _format_document_progress_event(
+        "dataset-a",
+        {
+            "event_sequence": 9,
+            "event_type": "terminal",
+            "payload": {
+                "document_id": "document-a",
+                "terminal": True,
+                "error": "private-secret at /internal/storage/path",
+            },
+        },
+    )
+    payload = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+    assert payload["document_id"] == "document-a"
+    assert "private-secret" not in frame
+    assert "/internal/storage/path" not in frame
+    assert "processing failed" in payload["error"]
 
 
 @pytest.mark.asyncio

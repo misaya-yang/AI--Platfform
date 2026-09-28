@@ -107,6 +107,28 @@ async def test_revoked_event_cursor_keeps_only_safe_terminal_and_cursor(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_revoked_run_start_does_not_reinject_snapshot_settings(monkeypatch):
+    req = request()
+    monkeypatch.setattr(agent, "_get_thread", AsyncMock(return_value=THREAD))
+    monkeypatch.setattr(agent, "_store", lambda _request: SimpleNamespace(
+        turn_metadata=AsyncMock(return_value={
+            "effective_reasoning_option": "PRIVATE_REASONING_SENTINEL",
+            "model_id": "PRIVATE_MODEL_SENTINEL",
+        }),
+    ))
+
+    async def events(**_kwargs):
+        yield {"sequence": 1, "event_type": "run_started", "data": {"run_id": "run-a"}}
+
+    req.app.state.agent_runtime_control.stream_thread_events = events
+    result = await agent.thread_events(THREAD.runtime_thread_id, req, after_sequence=0, limit=100, turn_id="run-a", user=USER)
+    body = b"".join([chunk async for chunk in result.body_iterator])
+    assert b'"sequence":1' in body and b'"source_access_revoked":true' in body
+    assert b"PRIVATE_REASONING_SENTINEL" not in body
+    assert b"PRIVATE_MODEL_SENTINEL" not in body
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["v1", "v2"])
 async def test_turn_with_knowledge_off_cannot_resample_revoked_history(entry, monkeypatch):
     req = request()

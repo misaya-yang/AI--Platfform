@@ -123,7 +123,7 @@ export function DatasetCreateSourcesStep({
                     {pendingFile.error}
                   </span>
                 )}
-                {pendingFile.status === "pending" && (
+                {(pendingFile.status === "pending" || pendingFile.status === "error") && (
                   <button
                     onClick={() => onRemoveFile(pendingFile.id)}
                     className="p-1 hover:bg-secondary/60 rounded"
@@ -194,7 +194,7 @@ export function DatasetCreateSourcesStep({
                     {pendingUrl.error}
                   </span>
                 )}
-                {pendingUrl.status === "pending" && (
+                {(pendingUrl.status === "pending" || pendingUrl.status === "error") && (
                   <button
                     onClick={() => onRemoveUrl(pendingUrl.id)}
                     className="p-1 hover:bg-secondary/60 rounded"

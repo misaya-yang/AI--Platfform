@@ -11,6 +11,7 @@ import { Database, FileText, ChevronDown, ExternalLink, Image as ImageIcon } fro
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { RetrievedContext } from "../types";
+import { SourceDocumentDialog } from "./SourceDocumentDialog";
 
 interface ContextDisplayProps {
   contexts: RetrievedContext[];
@@ -18,6 +19,7 @@ interface ContextDisplayProps {
 
 export function ContextDisplay({ contexts }: ContextDisplayProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [selectedSource, setSelectedSource] = useState<{ datasetId: string; documentId: string } | null>(null);
   const { t } = useTranslation();
 
   if (!contexts || !Array.isArray(contexts) || contexts.length === 0) return null;
@@ -26,6 +28,7 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
 
   return (
     <div className="mb-4">
+      <SourceDocumentDialog source={selectedSource} onClose={() => setSelectedSource(null)} />
       <button
         onClick={() => setIsOpen(!isOpen)}
         aria-expanded={isOpen}
@@ -102,15 +105,15 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                               </Badge>
                             )}
                           </div>
-                          {(typeof chunk.metadata?.document_id === "string" || chunk.source_url) && (
-                            <a
-                              href={typeof chunk.metadata?.document_id === "string"
-                                ? `/knowledge/${encodeURIComponent(ctx.dataset_id)}?tab=documents&document_id=${encodeURIComponent(chunk.metadata.document_id)}`
-                                : chunk.source_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline"
-                            >
+                          {typeof chunk.metadata?.document_id === "string" ? (
+                            <button type="button" onClick={() => setSelectedSource({ datasetId: ctx.dataset_id, documentId: String(chunk.metadata?.document_id) })}
+                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
+                              <ExternalLink className="h-3 w-3" />
+                              <span>{t("assistant.openSource", "Open source")}</span>
+                            </button>
+                          ) : chunk.source_url && (
+                            <a href={chunk.source_url} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline">
                               <ExternalLink className="h-3 w-3" />
                               <span>{t("assistant.openSource", "Open source")}</span>
                             </a>

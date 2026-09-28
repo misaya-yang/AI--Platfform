@@ -1,6 +1,9 @@
 export interface BatchUploadError {
   filename: string;
   error: string;
+  file_index?: number;
+  document_id?: string;
+  retry_safe?: boolean;
 }
 
 interface BatchUploadReceipt {
@@ -12,11 +15,13 @@ interface UploadHandlers<TFile extends { name: string }> {
   uploadBatch: (files: TFile[]) => Promise<BatchUploadReceipt>;
   uploadOne: (file: TFile) => Promise<unknown>;
   describeError: (error: unknown) => string;
+  isRetrySafe?: (error: unknown) => boolean;
+  unknownOutcomeMessage?: string;
 }
 
 export interface DatasetUploadOutcome<TFile> {
   accepted: number;
-  failures: Array<{ file: TFile; error: string }>;
+  failures: Array<{ file: TFile; error: string; documentId?: string; retrySafe?: false }>;
 }
 
 export interface DatasetUploadConfigInput {
@@ -58,19 +63,38 @@ export async function uploadDatasetFiles<TFile extends { name: string }>(
 ): Promise<DatasetUploadOutcome<TFile>> {
   if (files.length >= 3) {
     const receipt = await handlers.uploadBatch(files);
-    const errorsByName = new Map(
-      receipt.errors.map((failure) => [failure.filename, failure.error])
-    );
-    const failures = files
-      .filter((file) => errorsByName.has(file.name))
-      .map((file) => ({ file, error: errorsByName.get(file.name)! }));
-
-    if (
-      failures.length !== receipt.errors.length ||
-      receipt.accepted + receipt.errors.length !== files.length
-    ) {
+    const failuresByIndex = new Map<number, BatchUploadError>();
+    for (const failure of receipt.errors) {
+      const fallbackIndices = files.flatMap((file, index) =>
+        file.name === failure.filename ? [index] : []
+      );
+      const index = failure.file_index ??
+        (fallbackIndices.length === 1 ? fallbackIndices[0] : -1);
+      if (
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= files.length ||
+        files[index].name !== failure.filename ||
+        failuresByIndex.has(index)
+      ) {
+        throw new Error("Batch upload returned errors that do not match the submitted files");
+      }
+      failuresByIndex.set(index, failure);
+    }
+    if (receipt.accepted + failuresByIndex.size !== files.length) {
       throw new Error("Batch upload returned errors that do not match the submitted files");
     }
+    const failures = [...failuresByIndex].sort(([left], [right]) => left - right).map(([index, failure]) => {
+      const retrySafe = failure.retry_safe === true && !failure.document_id;
+      return {
+        file: files[index],
+        error: retrySafe
+          ? failure.error
+          : handlers.unknownOutcomeMessage ?? "Upload outcome is uncertain; check the document list before retrying",
+        ...(failure.document_id ? { documentId: failure.document_id } : {}),
+        ...(retrySafe ? {} : { retrySafe: false as const }),
+      };
+    });
     return { accepted: receipt.accepted, failures };
   }
 
@@ -79,7 +103,11 @@ export async function uploadDatasetFiles<TFile extends { name: string }>(
     try {
       await handlers.uploadOne(file);
     } catch (error) {
-      failures.push({ file, error: handlers.describeError(error) });
+      failures.push({
+        file,
+        error: handlers.describeError(error),
+        ...(handlers.isRetrySafe?.(error) ? {} : { retrySafe: false as const }),
+      });
     }
   }
   return { accepted: files.length - failures.length, failures };

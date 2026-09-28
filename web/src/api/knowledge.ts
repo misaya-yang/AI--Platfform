@@ -434,8 +434,11 @@ export interface BatchUploadResult {
   rejected: number;
   documents: Document[];
   errors: Array<{
+    file_index?: number;
     filename: string;
     error: string;
+    document_id?: string;
+    retry_safe?: boolean;
   }>;
 }
 

@@ -20,6 +20,7 @@ run_verify() {
 
 run_tests() {
   ensure_e2e_env
+  # global.setup defaults to existing-account mode. Never opt into provisioning here.
   cd "$ROOT_DIR"
   if [ "${1:-}" = "--" ]; then
     shift

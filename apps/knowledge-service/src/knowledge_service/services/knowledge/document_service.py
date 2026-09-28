@@ -287,6 +287,13 @@ def _with_display_status(document: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(document, dict):
         return document
     document["display_status"] = derive_document_display_status(document)
+    # Worker failures may contain provider responses, storage paths or credentials.
+    # The raw value stays in the internal record/logs; public document reads
+    # expose a stable instruction and the existing document_id for diagnosis.
+    if document.get("error"):
+        document["error"] = (
+            "Document processing failed. Check the source file and retry manually."
+        )
     return document
 
 

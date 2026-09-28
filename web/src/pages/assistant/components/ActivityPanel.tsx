@@ -106,6 +106,11 @@ export function ActivityPanel({
   const subtitle = [statusWord, reasoningLabel, stepsText, durationLabel]
     .filter(Boolean)
     .join(" · ");
+  const effectiveSettings = [
+    message?.processSummary?.modelId,
+    typeof message?.processSummary?.temperature === "number"
+      ? `temperature:${message.processSummary.temperature}` : "",
+  ].filter(Boolean).join(" · ");
 
   return (
     <div
@@ -172,6 +177,11 @@ export function ActivityPanel({
             >
               {subtitle}
             </div>
+            {effectiveSettings && (
+              <div style={{ fontSize: 11, color: T.textMute, fontFamily: ui.mono, marginTop: 2, overflowWrap: "anywhere" }}>
+                {effectiveSettings}
+              </div>
+            )}
           </div>
           <button
             type="button"

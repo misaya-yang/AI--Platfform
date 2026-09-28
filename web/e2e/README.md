@@ -51,12 +51,16 @@ pnpm -C web e2e:headed          # same, with a visible browser
 
 Against a stack you already started with `make quickstart`:
 
-For acceptance with the existing dedicated account and no account creation or
-credential changes, set `E2E_EXISTING_ACCOUNT_ONLY=1`. This also skips the
-model-tester account provisioning/reset step.
+Local E2E defaults to the existing dedicated account. Missing credentials,
+failed login, or a forced password change stop setup; it never provisions or
+resets accounts as a fallback. `E2E_EXISTING_ACCOUNT_ONLY=1` is an optional
+additional guard. Only a fresh isolated environment with no persisted account
+may initialize accounts by explicitly setting `E2E_PROVISION_ACCOUNTS=1`;
+setup checks that model-tester accounts do not already exist before writing.
 
 ```bash
-cd web && E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
+cd web && E2E_EXISTING_ACCOUNT_ONLY=1 \
+  E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
   pnpm exec playwright test -c playwright.live.config.ts --workers=1
 ```
 
@@ -64,7 +68,7 @@ The platform-convergence release flow is separately opt-in because it spends
 provider quota and mutates only the authenticated E2E user's session state:
 
 ```bash
-cd web && RUN_PLATFORM_CONVERGENCE_LIVE=1 \
+cd web && E2E_EXISTING_ACCOUNT_ONLY=1 RUN_PLATFORM_CONVERGENCE_LIVE=1 \
   E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
   pnpm exec playwright test -c playwright.live.config.ts \
     e2e/platform-convergence-live.spec.ts --workers=1

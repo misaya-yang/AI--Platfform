@@ -90,6 +90,7 @@ interface ArtifactsPanelProps {
   isOpen: boolean;
   onClose: () => void;
   artifacts: Artifact[];
+  loadError?: boolean;
   executionStatus: ExecutionStatusType;
   executionOutput: string;
   currentCode?: string;
@@ -334,6 +335,7 @@ function ImageCard({
     ? item.filename
     : (item as Artifact).filename || (item as Artifact).title;
   const fileSize = isOutputFile ? item.size_bytes : (item as Artifact).sizeBytes;
+  const ready = isOutputFile ? (fileSize ?? 0) > 0 : (item as Artifact).ready !== false && fileSize !== 0;
 
   const [resolvedSrc, setResolvedSrc] = React.useState<string | undefined>(() =>
     rawSrc && !needsAuthenticatedFetch(rawSrc) ? rawSrc : undefined,
@@ -341,7 +343,7 @@ function ImageCard({
   const [loadError, setLoadError] = React.useState(false);
 
   React.useEffect(() => {
-    if (!rawSrc) {
+    if (!ready || !rawSrc) {
       setResolvedSrc(undefined);
       return;
     }
@@ -369,7 +371,7 @@ function ImageCard({
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [rawSrc]);
+  }, [rawSrc, ready]);
 
   const handleOpenInNewTab = () => {
     const target = resolvedSrc || rawSrc;
@@ -399,7 +401,11 @@ function ImageCard({
       )}
     >
       <div className="relative aspect-video bg-[hsl(var(--assistant-chip-bg))] flex items-center justify-center">
-        {resolvedSrc && !loadError ? (
+        {!ready ? (
+          <div className="text-center text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
+            {t("assistant.artifactEmpty", "Empty or unfinished file")}
+          </div>
+        ) : resolvedSrc && !loadError ? (
           <img
             src={resolvedSrc}
             alt={filename || "Generated Image"}
@@ -448,6 +454,7 @@ function ImageCard({
             "border-0 bg-transparent",
           )}
           aria-label={t("artifact.download", "Download")}
+          disabled={!ready}
         >
           <Download className="h-3 w-3" />
         </button>
@@ -464,6 +471,7 @@ export function ArtifactsPanel({
   isOpen,
   onClose,
   artifacts,
+  loadError = false,
   executionStatus,
   executionOutput,
   currentCode,
@@ -678,6 +686,12 @@ export function ArtifactsPanel({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
+
+      {loadError && (
+        <p role="alert" className="px-4 py-2 text-xs text-[hsl(var(--destructive))] border-b border-[hsl(var(--assistant-border-soft))]">
+          {t("assistant.artifactListUnavailable", "Files could not be checked right now. Reopen this conversation when the connection returns; no task will restart automatically.")}
+        </p>
+      )}
 
       {/* Tabs row */}
       <div

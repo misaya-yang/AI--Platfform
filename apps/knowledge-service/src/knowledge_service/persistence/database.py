@@ -3430,6 +3430,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         expected_ingestion_identity: str,
         connection: Any,
         finish_publication: bool = True,
+        candidate_content: str | None = None,
+        expected_content: str | None = None,
     ) -> tuple[int, int]:
         """Atomically replace/activate PostgreSQL rows and release the fence."""
 
@@ -3453,6 +3455,24 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 staged_segment_ids,
                 connection=connection,
             )
+            if candidate_content is not None:
+                current = await connection.fetchrow(
+                    """
+                    SELECT content FROM documents
+                    WHERE document_id = $1 AND dataset_id = $2 AND status = 'indexing'
+                    FOR UPDATE
+                    """,
+                    document_id,
+                    dataset_id,
+                )
+                if current is None or str(current["content"] or "") != expected_content:
+                    raise RuntimeError("document source changed during index publication")
+                await connection.execute(
+                    "UPDATE documents SET content = $3 WHERE document_id = $1 AND dataset_id = $2",
+                    document_id,
+                    dataset_id,
+                    candidate_content,
+                )
             await connection.execute(
                 """
                 UPDATE documents

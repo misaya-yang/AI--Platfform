@@ -239,7 +239,6 @@ export function DocumentRow({
         <div className="order-2 flex w-auto flex-wrap items-center justify-start gap-1 sm:order-none sm:w-28 sm:justify-center">
           <StatusBadge
             status={doc.status}
-            error={doc.error}
             progress={doc.progress}
             metadata={doc.metadata}
           />

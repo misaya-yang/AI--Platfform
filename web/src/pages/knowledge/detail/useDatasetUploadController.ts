@@ -9,7 +9,7 @@ import {
   type ProcessingMode,
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
-import { getSourceUploadError } from "@/pages/knowledge/create/datasetCreateModel";
+import { getSourceUploadError, isDefiniteUploadRejection } from "@/pages/knowledge/create/datasetCreateModel";
 import {
   buildDatasetUploadConfigPatch,
   uploadDatasetFiles,
@@ -109,6 +109,9 @@ export function useDatasetUploadController({
   // shipped this way; changing it is a product decision, tracked for C3.
   const [rerankEnabled, setRerankEnabled] = useState(true);
   const [rerankModel, setRerankModel] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.model);
+  const [uploadFailures, setUploadFailures] = useState<
+    Array<{ name: string; position: number; sizeBytes: number; error: string; documentId?: string; retrySafe: boolean }>
+  >([]);
   const uploadProcessingMode: ProcessingMode = "text_only";
 
   // Adopt the dataset's current embedding as the dialog selection once it is
@@ -222,7 +225,9 @@ export function useDatasetUploadController({
     }
 
     const filesToUpload = [...pendingFiles];
+    setUploadFailures([]);
     onUploadingChange(true);
+    let uploadStarted = false;
 
     try {
       const chunkingConfig = buildChunkingConfig();
@@ -248,14 +253,19 @@ export function useDatasetUploadController({
       await updateDatasetConfig(datasetId, configPatch);
 
       const describeError = (error: unknown) =>
-        getSourceUploadError(error, {
-          fallback: t("knowledge.detail.uploadFailed"),
-          requestTooLarge: t("knowledge.create.uploadTooLarge"),
-        });
+        isDefiniteUploadRejection(error)
+          ? getSourceUploadError(error, {
+              fallback: t("knowledge.detail.uploadFailed"),
+              requestTooLarge: t("knowledge.create.uploadTooLarge"),
+            })
+          : t("knowledge.detail.uploadOutcomeUnknown");
+      uploadStarted = true;
       const outcome = await uploadDatasetFiles(filesToUpload, {
         uploadBatch: (files) => batchUploadDocuments(datasetId, files),
         uploadOne: (file) => uploadDocument(datasetId, file, uploadProcessingMode),
         describeError,
+        isRetrySafe: isDefiniteUploadRejection,
+        unknownOutcomeMessage: t("knowledge.detail.uploadOutcomeUnknown"),
       });
 
       await Promise.all([
@@ -265,13 +275,27 @@ export function useDatasetUploadController({
       ]);
 
       if (outcome.failures.length > 0) {
-        onPendingFilesChange(outcome.failures.map(({ file }) => file));
+        setUploadFailures(outcome.failures.map(({ file, error, documentId, retrySafe }) => ({
+          name: file.name,
+          position: filesToUpload.indexOf(file) + 1,
+          sizeBytes: file.size,
+          error,
+          documentId,
+          retrySafe: retrySafe !== false,
+        })));
+        // An enqueue rejection may already have created a document record.
+        // Re-uploading that source would create a second document.
+        onPendingFilesChange(
+          outcome.failures.filter(({ retrySafe }) => retrySafe !== false).map(({ file }) => file)
+        );
         toast.warning(
           t("knowledge.detail.uploadDone", {
             success: outcome.accepted,
             failed: outcome.failures.length,
           }),
-          outcome.failures.map(({ file, error }) => `${file.name}: ${error}`).join("; ")
+          outcome.failures.map(({ file, error, documentId, retrySafe }) =>
+            `#${filesToUpload.indexOf(file) + 1} ${file.name}: ${error}${documentId ? ` — ${t("knowledge.detail.uploadRecordCreated")}` : retrySafe === false ? ` — ${t("knowledge.detail.uploadInspectBeforeRetry")}` : ""}`
+          ).join("; ")
         );
         return;
       }
@@ -284,12 +308,30 @@ export function useDatasetUploadController({
       );
     } catch (error) {
       console.error("Upload failed:", error);
+      if (uploadStarted) {
+        const retrySafe = isDefiniteUploadRejection(error);
+        setUploadFailures(filesToUpload.map((file, index) => ({
+          name: file.name,
+          position: index + 1,
+          sizeBytes: file.size,
+          error: retrySafe
+            ? getSourceUploadError(error, {
+                fallback: t("knowledge.detail.uploadFailed"),
+                requestTooLarge: t("knowledge.create.uploadTooLarge"),
+              })
+            : t("knowledge.detail.uploadOutcomeUnknown"),
+          retrySafe,
+        })));
+        if (!retrySafe) onPendingFilesChange([]);
+      }
       toast.error(
         t("knowledge.detail.uploadFailed"),
-        getSourceUploadError(error, {
-          fallback: t("knowledge.detail.uploadFailed"),
-          requestTooLarge: t("knowledge.create.uploadTooLarge"),
-        })
+        uploadStarted && !isDefiniteUploadRejection(error)
+          ? t("knowledge.detail.uploadOutcomeUnknown")
+          : getSourceUploadError(error, {
+              fallback: t("knowledge.detail.uploadFailed"),
+              requestTooLarge: t("knowledge.create.uploadTooLarge"),
+            })
       );
     } finally {
       onUploadingChange(false);
@@ -297,6 +339,8 @@ export function useDatasetUploadController({
   }
 
   return {
+    uploadFailures,
+    clearUploadFailures: () => setUploadFailures([]),
     uploadChunkMode,
     setUploadChunkMode,
     uploadChunkSize,

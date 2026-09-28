@@ -6,14 +6,24 @@
  * 2. Select Data - Upload files / URL
  * 3. Index Settings - Chunking, retrieval config
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { message } from "antd";
 import { ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-react";
 
-import { createDataset, createDocumentFromUrl, uploadDocument } from "@/api/knowledge";
+import { createDataset, createDocumentFromUrl, getDataset, uploadDocument } from "@/api/knowledge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { DatasetCreateBasicStep } from "@/pages/knowledge/create/DatasetCreateBasicStep";
 import { DatasetCreateIndexStep } from "@/pages/knowledge/create/DatasetCreateIndexStep";
 import { DatasetCreateSourcesStep } from "@/pages/knowledge/create/DatasetCreateSourcesStep";
@@ -26,23 +36,67 @@ import {
   SUPPORTED_FILE_EXTENSIONS,
   URL_PATTERN,
   getSourceUploadError,
+  isDefiniteUploadRejection,
   type KBType,
   type PendingFile,
   type PendingUrl,
   type UseCase,
   type VisibilityType,
 } from "@/pages/knowledge/create/datasetCreateModel";
-import type { ChunkingMode } from "@/types/knowledge";
+import type { ChunkingMode, Dataset } from "@/types/knowledge";
 import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
+import { useAuthStore } from "@/store/useAuthStore";
+
+function createdDatasetDraftKey(userId: string | undefined): string | null {
+  return userId ? `kb-create-dataset:${userId}` : null;
+}
+
+function readCreatedDatasetDraft(key: string | null): string | null {
+  if (!key) return null;
+  try {
+    const value = sessionStorage.getItem(key);
+    return value && value.length <= 255 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCreatedDatasetDraft(key: string | null, value: string | null): boolean {
+  if (!key) return false;
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function errorStatus(error: unknown): number | undefined {
+  return error && typeof error === "object"
+    ? (error as { response?: { status?: number } }).response?.status
+    : undefined;
+}
 
 export default function DatasetCreatePage() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const userId = useAuthStore((state) => state.user?.user_id);
+  const createdDraftKey = createdDatasetDraftKey(userId);
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false);
+  const [requestDatasetId, setRequestDatasetId] = useState<string | null>(
+    () => readCreatedDatasetDraft(createdDraftKey)
+  );
   const [createdDatasetId, setCreatedDatasetId] = useState<string | null>(null);
+  const [recoveredDataset, setRecoveredDataset] = useState<Dataset | null>(null);
+  const [checkingDraft, setCheckingDraft] = useState(Boolean(requestDatasetId));
+  const [draftLookupFailure, setDraftLookupFailure] = useState<"access" | "unavailable" | null>(null);
+  const [discardDraftOpen, setDiscardDraftOpen] = useState(false);
+  const submitInFlight = useRef(false);
   const [nameError, setNameError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
@@ -65,6 +119,33 @@ export default function DatasetCreatePage() {
   const [rerankModel, setRerankModel] = useState("default");
   const [scoreThreshold, setScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
   const [maxRecall, setMaxRecall] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
+
+  useEffect(() => {
+    const id = readCreatedDatasetDraft(createdDraftKey);
+    setRequestDatasetId(id);
+    setCreatedDatasetId(null);
+    setRecoveredDataset(null);
+    setDraftLookupFailure(null);
+    setCheckingDraft(Boolean(id));
+    if (!id) return;
+    let cancelled = false;
+    getDataset(id).then((dataset) => {
+      if (cancelled) return;
+      if (!["owner", "editor"].includes(dataset.my_permission || "")) {
+        setDraftLookupFailure("access");
+        return;
+      }
+      setRecoveredDataset(dataset);
+      setCreatedDatasetId(id);
+    }).catch((lookupError: unknown) => {
+      if (!cancelled && errorStatus(lookupError) !== 404) {
+        setDraftLookupFailure(errorStatus(lookupError) === 403 ? "access" : "unavailable");
+      }
+    }).finally(() => {
+      if (!cancelled) setCheckingDraft(false);
+    });
+    return () => { cancelled = true; };
+  }, [createdDraftKey]);
 
   const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
     setChunkingMode(mode);
@@ -153,8 +234,11 @@ export default function DatasetCreatePage() {
   }, []);
 
   const handleSubmit = async () => {
+    if (submitInFlight.current || checkingDraft || draftLookupFailure || recoveredDataset) return;
+    submitInFlight.current = true;
     setIsSubmitting(true);
     setError(null);
+    setOutcomeUnknown(false);
 
     try {
       const [provider, model] = embeddingModel.split(":");
@@ -165,7 +249,40 @@ export default function DatasetCreatePage() {
 
       let datasetId = createdDatasetId;
       if (!datasetId) {
+        let stableId = requestDatasetId;
+        if (!stableId) {
+          stableId = `kb_${crypto.randomUUID().replaceAll("-", "")}`;
+          if (!writeCreatedDatasetDraft(createdDraftKey, stableId)) {
+            setError(t("knowledge.create.draftStorageUnavailable"));
+            return;
+          }
+          setRequestDatasetId(stableId);
+        } else {
+          try {
+            const existing = await getDataset(stableId);
+            if (
+              !["owner", "editor"].includes(existing.my_permission || "") ||
+              existing.name !== name.trim()
+            ) {
+              setDraftLookupFailure("access");
+              setError(t("knowledge.create.draftIdentityChanged"));
+              return;
+            }
+            setRecoveredDataset(existing);
+            setCreatedDatasetId(stableId);
+            setError(t("knowledge.create.existingDraftFound"));
+            return;
+          } catch (lookupError) {
+            if (errorStatus(lookupError) !== 404) {
+              const failure = errorStatus(lookupError) === 403 ? "access" : "unavailable";
+              setDraftLookupFailure(failure);
+              setError(t(failure === "access" ? "knowledge.create.draftAccessChanged" : "knowledge.create.draftLookupUnavailable"));
+              return;
+            }
+          }
+        }
         const dataset = await createDataset({
+          dataset_id: stableId,
           name: name.trim(),
           description: description.trim(),
           visibility,
@@ -197,12 +314,17 @@ export default function DatasetCreatePage() {
             },
           },
         });
+        if (dataset.dataset_id !== stableId) {
+          throw new Error("dataset create response did not match its request identity");
+        }
         datasetId = dataset.dataset_id;
         setCreatedDatasetId(datasetId);
       }
 
-      let failedUploads = 0;
-      for (const pendingFile of pendingFiles.filter((file) => file.status !== "done")) {
+      let uncertainUploads = pendingFiles.filter((file) => file.status === "error" && file.retrySafe === false).length
+        + pendingUrls.filter((url) => url.status === "error" && url.retrySafe === false).length;
+      let failedUploads = uncertainUploads;
+      for (const pendingFile of pendingFiles.filter((file) => file.status !== "done" && file.retrySafe !== false)) {
         setPendingFiles((previous) =>
           previous.map((file) =>
             file.id === pendingFile.id ? { ...file, status: "uploading" } : file
@@ -217,16 +339,21 @@ export default function DatasetCreatePage() {
           );
         } catch (uploadError) {
           failedUploads += 1;
+          const retrySafe = isDefiniteUploadRejection(uploadError);
+          if (!retrySafe) uncertainUploads += 1;
           setPendingFiles((previous) =>
             previous.map((file) =>
               file.id === pendingFile.id
                 ? {
                     ...file,
                     status: "error",
-                    error: getSourceUploadError(uploadError, {
-                      fallback: t("knowledge.create.uploadFailed"),
-                      requestTooLarge: t("knowledge.create.uploadTooLarge"),
-                    }),
+                    retrySafe,
+                    error: retrySafe
+                      ? getSourceUploadError(uploadError, {
+                          fallback: t("knowledge.create.uploadFailed"),
+                          requestTooLarge: t("knowledge.create.uploadTooLarge"),
+                        })
+                      : t("knowledge.detail.uploadOutcomeUnknown"),
                   }
                 : file
             )
@@ -234,7 +361,7 @@ export default function DatasetCreatePage() {
         }
       }
 
-      for (const pendingUrl of pendingUrls.filter((url) => url.status !== "done")) {
+      for (const pendingUrl of pendingUrls.filter((url) => url.status !== "done" && url.retrySafe !== false)) {
         setPendingUrls((previous) =>
           previous.map((url) =>
             url.id === pendingUrl.id ? { ...url, status: "uploading" } : url
@@ -252,16 +379,21 @@ export default function DatasetCreatePage() {
           );
         } catch (fetchError) {
           failedUploads += 1;
+          const retrySafe = isDefiniteUploadRejection(fetchError);
+          if (!retrySafe) uncertainUploads += 1;
           setPendingUrls((previous) =>
             previous.map((url) =>
               url.id === pendingUrl.id
                 ? {
                     ...url,
                     status: "error",
-                    error: getSourceUploadError(fetchError, {
-                      fallback: t("knowledge.create.fetchFailed"),
-                      requestTooLarge: t("knowledge.create.uploadTooLarge"),
-                    }),
+                    retrySafe,
+                    error: retrySafe
+                      ? getSourceUploadError(fetchError, {
+                          fallback: t("knowledge.create.fetchFailed"),
+                          requestTooLarge: t("knowledge.create.uploadTooLarge"),
+                        })
+                      : t("knowledge.detail.uploadOutcomeUnknown"),
                   }
                 : url
             )
@@ -271,24 +403,27 @@ export default function DatasetCreatePage() {
 
       if (failedUploads > 0) {
         setStep(2);
+        setOutcomeUnknown(uncertainUploads > 0);
         setError(
-          t(
-            "knowledge.create.partialUploadFailed",
-            "{{count}} source(s) could not be added. The knowledge base was created; retry to upload only the failed sources.",
-            { count: failedUploads }
-          )
+          uncertainUploads > 0
+            ? t("knowledge.create.partialUploadUnknown", { count: uncertainUploads })
+            : t("knowledge.create.partialUploadFailed", { count: failedUploads })
         );
         return;
       }
 
+      writeCreatedDatasetDraft(createdDraftKey, null);
       navigate(`/knowledge/${datasetId}`);
     } catch (submitError) {
       console.error("Failed to create dataset:", submitError);
-      setError(
-        submitError instanceof Error ? submitError.message : t("knowledge.create.createError")
-      );
+      const unknown = Boolean(requestDatasetId || readCreatedDatasetDraft(createdDraftKey));
+      setOutcomeUnknown(unknown);
+      setError(unknown
+        ? t("knowledge.create.createOutcomeUnknown")
+        : t("knowledge.create.createError"));
     } finally {
       setIsSubmitting(false);
+      submitInFlight.current = false;
     }
   };
 
@@ -394,9 +529,47 @@ export default function DatasetCreatePage() {
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-6 sm:px-6 sm:py-8">
+        {checkingDraft && (
+          <p role="status" className="mb-4 text-sm text-muted-foreground">
+            {t("knowledge.create.checkingExistingDraft")}
+          </p>
+        )}
+        {recoveredDataset && (
+          <div role="alert" className="mb-4 rounded-md border border-primary/30 bg-primary/5 p-4 text-sm">
+            <p className="font-medium">
+              {t("knowledge.create.existingDraftFoundNamed", { name: recoveredDataset.name })}
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              {t("knowledge.create.existingDraftNextStep")}
+            </p>
+            <Button className="mt-3" onClick={() => navigate(`/knowledge/${recoveredDataset.dataset_id}`)}>
+              {t("knowledge.create.openExistingDraft")}
+            </Button>
+            <Button variant="outline" className="ml-2 mt-3" onClick={() => setDiscardDraftOpen(true)}>
+              {t("knowledge.create.startAnotherDataset")}
+            </Button>
+          </div>
+        )}
+        {draftLookupFailure && (
+          <div role="alert" className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm">
+            <p>{t(draftLookupFailure === "access" ? "knowledge.create.draftAccessChanged" : "knowledge.create.draftLookupUnavailable")}</p>
+            <Button variant="outline" className="mt-3" onClick={() => window.location.reload()}>
+              {t("knowledge.create.checkAgain")}
+            </Button>
+            <Button variant="outline" className="ml-2 mt-3" onClick={() => setDiscardDraftOpen(true)}>
+              {t("knowledge.create.startAnotherDataset")}
+            </Button>
+          </div>
+        )}
+        {requestDatasetId && !createdDatasetId && !checkingDraft && !draftLookupFailure && !isSubmitting && (
+          <Button variant="outline" className="mb-4" onClick={() => setDiscardDraftOpen(true)}>
+            {t("knowledge.create.startAnotherDataset")}
+          </Button>
+        )}
         <SourceUploadFailureAlert
           error={error}
           datasetCreated={Boolean(createdDatasetId)}
+          outcomeUnknown={outcomeUnknown}
           files={pendingFiles}
           urls={pendingUrls}
         />
@@ -471,7 +644,7 @@ export default function DatasetCreatePage() {
               {t("knowledge.create.cancel")}
             </Button>
             {step < 3 && createdDatasetId ? (
-              <Button variant="primary" onClick={handleSubmit} disabled={isSubmitting}>
+              <Button variant="primary" onClick={handleSubmit} disabled={isSubmitting || checkingDraft || Boolean(draftLookupFailure) || Boolean(recoveredDataset)}>
                 {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {t("knowledge.create.retryFailedSources")}
               </Button>
@@ -481,7 +654,7 @@ export default function DatasetCreatePage() {
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             ) : (
-              <Button variant="primary" onClick={handleSubmit} disabled={isSubmitting}>
+              <Button variant="primary" onClick={handleSubmit} disabled={isSubmitting || checkingDraft || Boolean(draftLookupFailure) || Boolean(recoveredDataset)}>
                 {isSubmitting ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -495,6 +668,26 @@ export default function DatasetCreatePage() {
           </div>
         </div>
       </div>
+      <AlertDialog open={discardDraftOpen} onOpenChange={setDiscardDraftOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("knowledge.create.discardDraftTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("knowledge.create.discardDraftDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (!writeCreatedDatasetDraft(createdDraftKey, null)) {
+                setError(t("knowledge.create.draftStorageUnavailable"));
+                return;
+              }
+              window.location.reload();
+            }}>
+              {t("knowledge.create.startAnotherDataset")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

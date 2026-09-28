@@ -701,9 +701,76 @@ class AgentThreadStore:
                 }
             )
         await self._attach_user_uploads(messages, tenant_id=tenant_id, user_id=user_id, runtime_thread_id=runtime_thread_id)
+        await self._attach_turn_parameters(messages, tenant_id=tenant_id, user_id=user_id, runtime_thread_id=runtime_thread_id)
         await self._attach_quiz_ids(messages, tenant_id=tenant_id, user_id=user_id)
         total = int(rows[0].get("total") or 0) if rows else 0
         return messages, total
+
+    async def _attach_turn_parameters(
+        self, messages: list[dict[str, Any]], *, tenant_id: str, user_id: str,
+        runtime_thread_id: str,
+    ) -> None:
+        """Show only allowlisted, immutable effective settings for the owner's turns."""
+        pending = {
+            str(message["metadata"]["runtime_run_id"]): message
+            for message in messages
+            if message.get("role") == "assistant"
+            and isinstance(message.get("metadata"), dict)
+            and not message["metadata"].get("source_access_revoked")
+            and message["metadata"].get("runtime_run_id")
+        }
+        if not pending:
+            return
+        rows = await self.database.fetch(
+            """
+            SELECT s.run_id::text AS run_id,
+                   s.snapshot #> '{reasoning}' AS reasoning,
+                   s.snapshot #>> '{model,id}' AS model_id,
+                   s.snapshot #> '{parameters,temperature}' AS temperature
+              FROM assistant_runtime_snapshots AS s
+              JOIN assistant_runs AS r
+                ON r.run_id = s.run_id AND r.harness_thread_id = s.runtime_thread_id
+               AND r.tenant_id = s.tenant_id AND r.user_id = s.user_id AND r.session_id = s.session_id
+             WHERE s.runtime_thread_id = $1 AND s.tenant_id = $2 AND s.user_id = $3
+               AND s.run_id::text = ANY($4::text[])
+            """,
+            uuid.UUID(str(runtime_thread_id)), tenant_id, user_id, list(pending),
+        )
+        for row in rows:
+            message = pending.get(str(row.get("run_id") or ""))
+            if message is None:
+                continue
+            events = message["metadata"].get("runtime_events") or []
+            terminal = any(
+                isinstance(event, dict) and event.get("event_type") in {"run_finished", "run_error", "cancelled", "side_effect_unknown"}
+                for event in events
+            )
+            summary = message["metadata"].setdefault("process_summary", {
+                "collapsed": terminal, "run_id": row["run_id"],
+                "status": "succeeded" if terminal else "running",
+                "steps": [], "tools": [],
+            })
+            reasoning = row.get("reasoning")
+            if isinstance(reasoning, str):
+                reasoning = json.loads(reasoning)
+            if isinstance(reasoning, dict):
+                summary["reasoning"] = {
+                    "requested_option": reasoning.get("requested_option"),
+                    "effective_option": reasoning.get("effective_option"),
+                    "canonical_effort": reasoning.get("canonical_effort"),
+                    "adapter_id": reasoning.get("adapter_id"),
+                    "fallback_reason": reasoning.get("fallback_reason"),
+                }
+            if isinstance(row.get("model_id"), str):
+                summary["model_id"] = row["model_id"]
+            temperature = row.get("temperature")
+            if isinstance(temperature, str):
+                try:
+                    temperature = float(temperature)
+                except ValueError:
+                    temperature = None
+            if isinstance(temperature, (int, float)) and not isinstance(temperature, bool) and 0 <= temperature <= 2:
+                summary["temperature"] = float(temperature)
 
     async def _attach_user_uploads(
         self, messages: list[dict[str, Any]], *, tenant_id: str, user_id: str,
@@ -838,6 +905,9 @@ class AgentThreadStore:
         reasoning = snapshot.get("reasoning") if isinstance(snapshot, dict) else {}
         if not isinstance(reasoning, dict):
             reasoning = {}
+        model = snapshot.get("model") if isinstance(snapshot, dict) else {}
+        parameters = snapshot.get("parameters") if isinstance(snapshot, dict) else {}
+        temperature = parameters.get("temperature") if isinstance(parameters, dict) else None
         return {
             "requested_reasoning_option": reasoning.get("requested_option"),
             "effective_reasoning_option": reasoning.get("effective_option"),
@@ -846,6 +916,8 @@ class AgentThreadStore:
             "reasoning_fallback_reason": reasoning.get("fallback_reason"),
             "kernel": "agent",
             "kernel_revision": row.get("kernel_revision"),
+            "model_id": model.get("id") if isinstance(model, dict) else None,
+            "temperature": float(temperature) if isinstance(temperature, (int, float)) and not isinstance(temperature, bool) and 0 <= temperature <= 2 else None,
         }
 
     async def append_event(

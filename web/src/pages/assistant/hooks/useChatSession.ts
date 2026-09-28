@@ -239,7 +239,8 @@ async function restoreLatestRun(
     return { messages };
   }
 
-  const processSummary: ProcessSummaryState = {
+  const persistedSummary = messages[latestAssistantIndex]?.processSummary;
+  const processSummary: ProcessSummaryState = persistedSummary?.runId === runId ? { ...persistedSummary } : {
     collapsed: true,
     runId,
     status: "running",
@@ -572,6 +573,10 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
           ? "runtime_restart_interrupted" : undefined,
         steps: Array.isArray(summary.steps) ? summary.steps as ProcessStepItem[] : [],
         tools: Array.isArray(summary.tools) ? summary.tools as ToolTimelineItem[] : [],
+        reasoning: summary.reasoning && typeof summary.reasoning === "object"
+          ? summary.reasoning as ProcessSummaryState["reasoning"] : undefined,
+        modelId: typeof summary.model_id === "string" ? summary.model_id : undefined,
+        temperature: typeof summary.temperature === "number" ? summary.temperature : undefined,
       };
       baseMessage.status = restoredMessageStatus(status);
       baseMessage.diagnosticId = typeof summary.diagnostic_id === "string"
@@ -811,6 +816,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   
   // Artifacts & Agent State (Managed here as they are tied to session)
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [artifactLoadError, setArtifactLoadError] = useState(false);
   const [showArtifacts, setShowArtifacts] = useState(false);
   const [workingMemory, setWorkingMemory] = useState<WorkingMemory | null>(null);
   const [showTaskPanel, setShowTaskPanel] = useState(false);
@@ -1011,7 +1017,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             const detailsPromise = getSession(savedSessionId);
             const historyPromise = getAssistantSessionHistory(savedSessionId, 200)
               .then((response) => response.messages);
-            const artifactsPromise = getSessionArtifacts(savedSessionId).catch(() => []);
+            const artifactsPromise = getSessionArtifacts(savedSessionId).then((items) => {
+              if (restoreEpoch === restoreEpochRef.current) setArtifactLoadError(false);
+              return items;
+            }).catch(() => {
+              if (restoreEpoch === restoreEpochRef.current) setArtifactLoadError(true);
+              return [];
+            });
             try {
               const [sessionDetails, history] = await Promise.all([
                 detailsPromise,
@@ -1130,6 +1142,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     setHistoryRestoreState("idle");
     setHistoryRestoreError(null);
     setArtifacts([]);
+    setArtifactLoadError(false);
     setShowArtifacts(false);
     setWorkingMemory(null);
     setShowTaskPanel(false);
@@ -1181,7 +1194,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       const detailsPromise = getSession(sessionId);
       const historyPromise = getAssistantSessionHistory(sessionId, 200)
         .then((response) => response.messages);
-      const artifactsPromise = getSessionArtifacts(sessionId).catch(() => []);
+      const artifactsPromise = getSessionArtifacts(sessionId).then((items) => {
+        if (restoreEpoch === restoreEpochRef.current) setArtifactLoadError(false);
+        return items;
+      }).catch(() => {
+        if (restoreEpoch === restoreEpochRef.current) setArtifactLoadError(true);
+        return [];
+      });
       const [sessionDetails, history] = await Promise.all([
         detailsPromise,
         historyPromise,
@@ -2420,6 +2439,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 capability_revision?: number;
                 fallback_reason?: string | null;
               } | null;
+              model_id?: string;
+              temperature?: number;
             };
             const acceptedSessionId = acceptPendingRunSession({
               requestedSessionId: sessionId,
@@ -2465,6 +2486,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   runStartedData?.timestamp ?? now,
                 ),
                 reasoning: runStartedData?.reasoning ?? undefined,
+                modelId: runStartedData?.model_id,
+                temperature: runStartedData?.temperature,
                 runtimeThreadId: runStartedData?.thread_id,
               },
             }));
@@ -3290,6 +3313,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 filename?: string;
                 mime_type?: string;
                 size_bytes?: number;
+                ready?: boolean;
                 source?: string;
                 download_url?: string;
                 download_path?: string;
@@ -3328,6 +3352,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                     filename: artifactData.filename,
                     mimeType: artifactData.mime_type,
                     sizeBytes: artifactData.size_bytes,
+                    ready: artifactData.ready ?? (artifactData.size_bytes === undefined || artifactData.size_bytes > 0),
                     source: artifactData.source as any,
                     createdAt: new Date(),
                   },
@@ -3340,6 +3365,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 setShowArtifacts(true);
               }
 
+              // Inline success cards only represent downloadable artifacts.
+              if (artifactData.ready === false || artifactData.size_bytes === 0) break;
               // Also add to current message's generatedArtifacts for inline display
               const generatedArtifact: GeneratedArtifact = {
                 id: artifactData.artifact_id,
@@ -3641,10 +3668,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         const sourceRevoked = error.response?.data?.detail?.code === "ASSISTANT_SOURCE_ACCESS_REVOKED";
         const needsNewThread = error.response?.data?.detail?.code ===
           "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED";
+        const attachmentUnavailable = error.response?.data?.detail?.code === "ATTACHMENT_UNAVAILABLE";
         const startFailureMessage = sourceRevoked
           ? t("assistant.sourceNeedsNewConversation", "Earlier knowledge sources are unavailable. Start a new conversation to continue.")
           : needsNewThread
           ? t("assistant.modelNeedsNewConversation", "This model uses a different tool configuration. Start a new conversation to continue.")
+          : attachmentUnavailable
+          ? t("assistant.selectedAttachmentUnavailable", "A selected attachment is unavailable. Remove it and upload the file again, then send manually. No run was started.")
           : undefined;
         if (startFailureMessage) {
           setModelRecreateNeeded(needsNewThread);
@@ -4018,6 +4048,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     handleToolApproval,
     // Artifacts & Agent
     artifacts,
+    artifactLoadError,
     setArtifacts,
     showArtifacts,
     setShowArtifacts,

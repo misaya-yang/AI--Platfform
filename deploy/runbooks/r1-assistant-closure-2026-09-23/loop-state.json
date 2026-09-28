@@ -2,27 +2,22 @@
   "schema_version": "prd-phase-harness/loop-state/v4",
   "domain_id": "r1-assistant-daily-use",
   "lifecycle": "active",
-  "status": "blocked",
+  "status": "in_progress",
   "goal": "完成 AI--Platfform 完整 R1：AS-01～AS-10、TL-01～TL-04、AR-01～AR-04，并以 J01～J08/J29 的实际证据收口。",
   "owner": "root single-writer integration session",
   "base_sha": "2ed0345f52a4128ecbecf08e1cbcfe366895f504",
-  "branch": "main",
+  "branch": "codex/r1-final-boundaries",
   "active_phase": "R1-4",
-  "active_feature": "Remaining required R1 evidence after verified RP03 increment",
-  "active_package": null,
-  "next_action": "Full R1 remains incomplete: shared-CDN DNS prerequisite and named required UI acceptance. RP03 safe increment locally integrated; do not replay unknown writes or infer push permission.",
-  "last_result": "RP03 implementation0033b8c6 and normalized logs2521d0a4 fast-forwarded into local main; final source hashes equal Git blobs; Python83/Node8, real sharingE2E2, controlled activityE2E2 and controlled expiry localesE2E1 passed; IAB and independent review PASS. Full R1 incomplete.",
+  "active_feature": "Closed-list remaining failure and permission acceptance",
+  "active_package": "R1-RP04",
+  "next_action": "RP04 verified and authorized for local main integration. Full-R1 positive image artifact still waits on external CDN DNS prerequisite; do not repeat paid generation or mutate shared network without the original confirmation.",
+  "last_result": "RP04 Python93, controlled E2E5, real PDF E2E1, real background/session-switch E2E1, default-account safety Node4 plus E2E1, ordinary citation/revocation, two-actor memory and natural approval TTL recorded; independent review PASS. Docker identity/health verified. Full R1 incomplete; five prior model_tester resets disclosed and default setup fixed.",
   "updated_at": "2026-09-27",
   "blockers": [
     {
       "id": "R1-image-cdn-dns",
       "status": "external_prerequisite",
       "reason": "DashScope OSS CDN resolves into Fake-IP 198.18/15; safe_fetch refuses; no shared network change or unknown replay."
-    },
-    {
-      "id": "R1-unverified-journeys",
-      "status": "unverified",
-      "reason": "Required unverified UI journeys are explicitly listed in RP03 report; vision/activity1000/normal sharing are now verified. No complete R1 declaration."
     }
   ],
   "cycle": [
@@ -89,9 +84,9 @@
       "depends_on": [
         "R1-3"
       ],
-      "status": "pending",
-      "evidence": [],
-      "review": "not_started"
+      "status": "in_progress",
+      "evidence": ["reports/product/r1-final-boundaries-2026-09-27.md"],
+      "review": "independent_code_review_passed_remaining_live_boundaries_recorded"
     }
   ],
   "features": [],
@@ -100,9 +95,9 @@
     "reports/product/assistant-model-selection-2026-09-23.md"
   ],
   "execution_authorization": {
-    "scope": "Latest user: quick bounded closure ensuring functionality then local main integration.",
+    "scope": "Latest user authorizes the verified safety increment commit and local main merge; full R1 status stays incomplete and remote push/branch deletion are not authorized in this batch.",
     "parallel_agents": "At most three bounded read-only investigators/reviewers; primary sole writer; live serialized.",
-    "round_status": "completed_safe_increment",
+    "round_status": "verified_with_external_image_blocker",
     "commit_authorized": true,
     "local_merge_authorized": true,
     "push_authorized": false,
@@ -168,5 +163,15 @@
     "merged_code_head": "2521d0a4f4e2faadb3f1aaa559bfff7a6bd2800b",
     "push_performed": false,
     "branch_deleted": false
-  }
+  },
+  "final_boundaries": {
+    "package": "R1-RP04",
+    "state": "verified_local_main_increment_external_image_blocker",
+    "report": "reports/product/r1-final-boundaries-2026-09-27.md",
+    "receipt": "deploy/runbooks/r1-assistant-closure-2026-09-23/receipts/R1-RP04.yml",
+    "review": "PASS"
+  },
+  "pending_acceptance": [
+    "image generation positive artifact after external CDN DNS prerequisite is restored"
+  ]
 }

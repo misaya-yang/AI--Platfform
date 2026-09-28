@@ -371,6 +371,51 @@ async def test_session_artifact_list_excludes_input_and_image_variants_and_marks
 
 
 @pytest.mark.asyncio
+async def test_zero_byte_artifact_is_unready_on_create_and_read_and_cannot_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.get.return_value = Session(
+        session_id="session-1", user_id=user.user_id, tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+    )
+    artifact = SimpleNamespace(
+        artifact_id="artifact-empty", session_id="session-1", tenant_id=user.tenant_id,
+        user_id=user.user_id, type="image", format="png", title="Empty",
+        filename="empty.png", size_bytes=0, mime_type="image/png", source="ai",
+        message_id=None, metadata={}, created_at=None,
+    )
+
+    class Storage:
+        async def create_artifact(self, **kwargs):
+            assert kwargs["content"] == b""
+            return artifact
+
+        async def get_artifact(self, _artifact_id):
+            return artifact
+
+        async def get_presigned_download_url(self, _artifact):
+            return "file:///private/empty.png"
+
+        async def download_artifact(self, _artifact_id):
+            return b""
+
+    monkeypatch.setattr(artifact_routes, "get_artifact_storage", lambda: Storage())
+    request = _build_request(session_manager)
+    created = await artifact_routes.create_artifact(
+        ArtifactCreateRequest(session_id="session-1", type="image", format="png",
+                              title="Empty", filename="empty.png", content_base64=""),
+        request, user,
+    )
+    read = await artifact_routes.get_artifact("artifact-empty", request, user)
+    assert created.ready is False and read.ready is False
+    with pytest.raises(HTTPException) as caught:
+        await artifact_routes.download_artifact("artifact-empty", request, user)
+    assert caught.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_list_session_artifacts_sanitizes_unexpected_storage_errors(
     monkeypatch: pytest.MonkeyPatch,
 ):

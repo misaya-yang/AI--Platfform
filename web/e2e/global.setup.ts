@@ -154,7 +154,7 @@ async function login(apiURL: string, email: string, password: string) {
 
   const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    throw new Error(`E2E login failed (${response.status}): ${JSON.stringify(payload)}`);
+    throw new Error(`E2E login failed (${response.status}). Check the existing test account credentials.`);
   }
   return payload;
 }
@@ -202,27 +202,6 @@ async function createE2EAdminUser(
   }
 }
 
-async function updateE2EUser(
-  apiURL: string,
-  adminToken: string,
-  userId: string,
-  body: Record<string, unknown>
-) {
-  const response = await fetch(`${apiURL}/api/v1/users/${userId}`, {
-    method: "PUT",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${adminToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to update E2E user ${userId} (${response.status}): ${text}`);
-  }
-}
-
 async function resetE2EUserPassword(
   apiURL: string,
   adminToken: string,
@@ -239,7 +218,21 @@ async function resetE2EUserPassword(
   }
 }
 
-async function createOrResetModelTesterUsers(
+async function assertFreshModelTesterAccounts(apiURL: string, adminToken: string) {
+  for (let index = 1; index <= 5; index += 1) {
+    const response = await fetch(`${apiURL}/api/v1/users/model_tester_${index}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    if (response.status === 200) {
+      throw new Error("Account provisioning requires a fresh isolated environment; model-tester accounts already exist.");
+    }
+    if (response.status !== 404) {
+      throw new Error(`Could not verify fresh model-tester accounts (${response.status}).`);
+    }
+  }
+}
+
+async function createModelTesterUsers(
   apiURL: string,
   adminToken: string,
   authEmailDomain: string,
@@ -263,16 +256,9 @@ async function createOrResetModelTesterUsers(
       }),
     });
 
-    if (!createResponse.ok && createResponse.status !== 400) {
-      const text = await createResponse.text();
-      throw new Error(`Failed to provision ${email} (${createResponse.status}): ${text}`);
+    if (!createResponse.ok) {
+      throw new Error(`Failed to provision a new model-tester account (${createResponse.status}).`);
     }
-
-    await updateE2EUser(apiURL, adminToken, userId, {
-      display_name: displayName,
-      roles: ["model_tester"],
-      status: "active",
-    });
     await resetE2EUserPassword(apiURL, adminToken, userId);
 
     let loginPayload = await login(apiURL, email, defaultPassword);
@@ -341,6 +327,69 @@ async function validateToken(apiURL: string, token: string) {
   return response.json();
 }
 
+type E2ECredentials = { email: string; password: string };
+
+/** Omission is safe: only an explicit fresh-environment flag may provision accounts. */
+export function shouldProvisionE2EAccounts(env: Record<string, string | undefined> = process.env): boolean {
+  return env.E2E_EXISTING_ACCOUNT_ONLY !== "1" && env.E2E_PROVISION_ACCOUNTS === "1";
+}
+
+/** Auth setup is separate from browser storage so the no-write default can be tested. */
+export async function prepareE2EAccount(
+  apiURL: string,
+  options: {
+    provisionAccounts: boolean;
+    providedEmail?: string;
+    providedPassword?: string;
+    persistedCredentials: E2ECredentials | null;
+  },
+) {
+  const { provisionAccounts, providedEmail, providedPassword, persistedCredentials } = options;
+  if ((providedEmail && !providedPassword) || (!providedEmail && providedPassword)) {
+    throw new Error("E2E_USER_EMAIL and E2E_USER_PASSWORD must be provided together.");
+  }
+  if (provisionAccounts && (providedEmail || persistedCredentials)) {
+    throw new Error("Account provisioning requires a fresh isolated environment without existing E2E credentials.");
+  }
+  if (!provisionAccounts && !persistedCredentials && !(providedEmail && providedPassword)) {
+    throw new Error("Existing-account E2E requires configured credentials; account creation is disabled by default.");
+  }
+
+  const defaultPassword = provisionAccounts ? await detectDefaultPassword() : "";
+  const authEmailDomain = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
+  const email = providedEmail || persistedCredentials?.email || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
+  let password = providedPassword || persistedCredentials?.password || defaultPassword;
+  let loginPayload: Record<string, unknown>;
+  let provisioningToken: string | null = null;
+
+  if (!provisionAccounts) {
+    loginPayload = await login(apiURL, email, password);
+  } else {
+    const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || `admin@${authEmailDomain}`;
+    const bootstrapPasswords = await detectBootstrapPasswords(defaultPassword);
+    const bootstrapLogin = await loginWithCandidates(apiURL, bootstrapEmail, bootstrapPasswords);
+    provisioningToken = String(bootstrapLogin.payload.access_token || "");
+    await assertFreshModelTesterAccounts(apiURL, provisioningToken);
+    await createE2EAdminUser(apiURL, provisioningToken, email);
+    loginPayload = await login(apiURL, email, defaultPassword);
+    password = defaultPassword;
+  }
+
+  if (loginPayload.force_password_change === true) {
+    if (!provisionAccounts) throw new Error("Existing-account E2E cannot change credentials. Complete account setup outside this test run.");
+    const nextPassword = buildNextPassword();
+    await changePassword(apiURL, String(loginPayload.access_token), password, nextPassword);
+    password = nextPassword;
+    loginPayload = await login(apiURL, email, password);
+  }
+
+  const token = String(loginPayload.access_token || "");
+  if (!token) throw new Error("Login succeeded but access_token is missing.");
+  const currentUser = await validateToken(apiURL, token);
+  if (provisionAccounts) await createModelTesterUsers(apiURL, provisioningToken || token, authEmailDomain, defaultPassword);
+  return { email, password, token, currentUser, loginPayload };
+}
+
 export default async function globalSetup(config: FullConfig) {
   const baseURL = String(config.projects[0].use.baseURL);
   const storageStatePath = String(config.projects[0].use.storageState);
@@ -353,63 +402,13 @@ export default async function globalSetup(config: FullConfig) {
   await fs.mkdir(ARTIFACT_DIR, { recursive: true });
   await verifyApi(apiURL);
 
-  const existingAccountOnly = process.env.E2E_EXISTING_ACCOUNT_ONLY === "1";
-  const defaultPassword = existingAccountOnly ? "" : await detectDefaultPassword();
+  const provisionAccounts = shouldProvisionE2EAccounts();
   const providedEmail = process.env.E2E_USER_EMAIL;
   const providedPassword = process.env.E2E_USER_PASSWORD;
-  if ((providedEmail && !providedPassword) || (!providedEmail && providedPassword)) {
-    throw new Error("E2E_USER_EMAIL and E2E_USER_PASSWORD must be provided together.");
-  }
-  const persistedCredentials =
-    providedEmail && providedPassword ? null : await readPersistedE2ECredentials();
-  if (existingAccountOnly && !persistedCredentials && !(providedEmail && providedPassword)) {
-    throw new Error("Existing-account E2E requires the configured dedicated account.");
-  }
-  const authEmailDomain = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
-  const email =
-    providedEmail || persistedCredentials?.email || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
-  let password = providedPassword || persistedCredentials?.password || defaultPassword;
-  let loginPayload: Record<string, unknown>;
-  let provisioningToken: string | null = null;
-
-  if ((providedEmail && providedPassword) || persistedCredentials) {
-    loginPayload = await login(apiURL, email, password);
-  } else {
-    const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || `admin@${authEmailDomain}`;
-    const bootstrapPasswords = await detectBootstrapPasswords(defaultPassword);
-    const bootstrapLogin = await loginWithCandidates(apiURL, bootstrapEmail, bootstrapPasswords);
-    provisioningToken = String(bootstrapLogin.payload.access_token || "");
-
-    await createE2EAdminUser(
-      apiURL,
-      provisioningToken,
-      email
-    );
-
-    loginPayload = await login(apiURL, email, defaultPassword);
-    password = defaultPassword;
-  }
-
-  if (loginPayload.force_password_change === true) {
-    if (existingAccountOnly) throw new Error("Existing-account E2E cannot change credentials.");
-    const nextPassword = buildNextPassword();
-    await changePassword(apiURL, String(loginPayload.access_token), password, nextPassword);
-    password = nextPassword;
-    loginPayload = await login(apiURL, email, password);
-  }
-
-  const token = String(loginPayload.access_token || "");
-  if (!token) {
-    throw new Error("Login succeeded but access_token is missing.");
-  }
-
-  const currentUser = await validateToken(apiURL, token);
-  if (!existingAccountOnly) await createOrResetModelTesterUsers(
-    apiURL,
-    provisioningToken || token,
-    authEmailDomain,
-    defaultPassword
-  );
+  const persistedCredentials = providedEmail && providedPassword ? null : await readPersistedE2ECredentials();
+  const { email, password, token, currentUser, loginPayload } = await prepareE2EAccount(apiURL, {
+    provisionAccounts, providedEmail, providedPassword, persistedCredentials,
+  });
   const authPayload = {
     state: {
       token,
@@ -421,7 +420,7 @@ export default async function globalSetup(config: FullConfig) {
     version: 0,
   };
 
-  if (!existingAccountOnly) await fs.writeFile(USER_FILE, JSON.stringify({ email, password }, null, 2));
+  if (provisionAccounts) await fs.writeFile(USER_FILE, JSON.stringify({ email, password }, null, 2));
 
   const browser = await chromium.launch();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });

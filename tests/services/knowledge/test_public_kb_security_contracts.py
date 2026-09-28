@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import uuid
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -683,6 +684,147 @@ async def test_batch_upload_aggregate_cap_has_bounded_partial_success(
     assert worker.enqueued == ["doc-1"]
     assert "aggregate limit" in response["errors"][0]["error"]
     assert all(not os.path.exists(path) for path in created_temp_paths)
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_same_name_failure_identifies_file_position() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+        async def create_document_from_upload(
+            self, *_args: Any, filename: str, **_kwargs: Any
+        ) -> dict[str, str]:
+            return {"document_id": str(uuid.uuid4()), "title": filename}
+
+    class Worker:
+        async def enqueue(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+    response = await routes.batch_upload_documents(
+        "dataset-a",
+        files=[
+            UploadFile(filename="same.txt", file=io.BytesIO(b"")),
+            UploadFile(filename="same.txt", file=io.BytesIO(b"first")),
+            UploadFile(filename="other.txt", file=io.BytesIO(b"second")),
+        ],
+        svc=Service(),  # type: ignore[arg-type]
+        worker=Worker(),  # type: ignore[arg-type]
+        user=USER,
+        settings=Settings(),
+    )
+
+    assert response["accepted"] == 2
+    assert response["errors"] == [
+        {
+            "file_index": 0,
+            "filename": "same.txt",
+            "error": "Empty files are not accepted",
+            "retry_safe": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_enqueue_rejection_identifies_created_record() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+        async def create_document_from_upload(
+            self, *_args: Any, filename: str, **_kwargs: Any
+        ) -> dict[str, str]:
+            return {"document_id": "created-doc", "title": filename}
+
+    class Worker:
+        async def enqueue(self, *_args: Any, **_kwargs: Any) -> bool:
+            return False
+
+    response = await routes.batch_upload_documents(
+        "dataset-a",
+        files=[UploadFile(filename="source.txt", file=io.BytesIO(b"source"))],
+        svc=Service(),  # type: ignore[arg-type]
+        worker=Worker(),  # type: ignore[arg-type]
+        user=USER,
+        settings=Settings(),
+    )
+
+    assert response["accepted"] == 0
+    assert response["errors"][0]["file_index"] == 0
+    assert response["errors"][0]["document_id"] == "created-doc"
+    assert response["errors"][0]["retry_safe"] is False
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_unexpected_error_does_not_expose_internal_detail() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+        async def create_document_from_upload(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("private-connection-detail")
+
+    response = await routes.batch_upload_documents(
+        "dataset-a",
+        files=[UploadFile(filename="source.txt", file=io.BytesIO(b"source"))],
+        svc=Service(),  # type: ignore[arg-type]
+        worker=object(),  # type: ignore[arg-type]
+        user=USER,
+        settings=Settings(),
+    )
+
+    error = response["errors"][0]
+    assert "private-connection-detail" not in error["error"]
+    assert error["retry_safe"] is False
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_post_creation_validation_is_not_directly_retryable() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+        async def create_document_from_upload(self, *_args: Any, **_kwargs: Any) -> None:
+            # The upload service may already have inserted its uploading row.
+            raise ValidationFailedError("private-post-insert-detail")
+
+    response = await routes.batch_upload_documents(
+        "dataset-a",
+        files=[UploadFile(filename="source.txt", file=io.BytesIO(b"source"))],
+        svc=Service(),  # type: ignore[arg-type]
+        worker=object(),  # type: ignore[arg-type]
+        user=USER,
+        settings=Settings(),
+    )
+
+    error = response["errors"][0]
+    assert error["file_index"] == 0
+    assert error["retry_safe"] is False
+    assert "private-post-insert-detail" not in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_single_upload_post_creation_validation_is_unknown_not_retryable() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+        async def create_document_from_upload(self, *_args: Any, **_kwargs: Any) -> None:
+            raise ValidationFailedError("private-post-insert-detail")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await routes.upload_document(
+            "dataset-a",
+            file=UploadFile(filename="source.txt", file=io.BytesIO(b"source")),
+            processing_mode="text_only",
+            svc=Service(),  # type: ignore[arg-type]
+            worker=object(),  # type: ignore[arg-type]
+            user=USER,
+            settings=Settings(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "private-post-insert-detail" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio

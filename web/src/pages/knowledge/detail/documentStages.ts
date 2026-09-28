@@ -16,6 +16,27 @@ import type { Document } from "@/types/knowledge";
 
 export type DocumentStage = "parsing" | "splitting" | "indexing";
 
+/** Last stage recorded for the current document attempt; never infer one. */
+export function lastStartedDocumentStage(
+  doc: Pick<Document, "parsing_started_at" | "splitting_started_at" | "indexing_started_at"> | null | undefined,
+): DocumentStage | null {
+  if (!doc) return null;
+  const stamps: Array<[DocumentStage, number | null]> = [
+    ["parsing", toEpochMs(doc.parsing_started_at)],
+    ["splitting", toEpochMs(doc.splitting_started_at)],
+    ["indexing", toEpochMs(doc.indexing_started_at)],
+  ];
+  // A retry can stamp parsing after an earlier attempt reached indexing.
+  // The latest recorded time is the only stage we can report honestly.
+  let latest: [DocumentStage, number] | null = null;
+  for (const [stage, startedAt] of stamps) {
+    if (startedAt !== null && (!latest || startedAt > latest[1])) {
+      latest = [stage, startedAt];
+    }
+  }
+  return latest?.[0] ?? null;
+}
+
 export interface StageTiming {
   stage: DocumentStage;
   /** ISO timestamp when the stage started. */

@@ -10,6 +10,7 @@ import {
 interface SourceUploadFailureAlertProps {
   error: string | null;
   datasetCreated: boolean;
+  outcomeUnknown: boolean;
   files: PendingFile[];
   urls: PendingUrl[];
 }
@@ -17,6 +18,7 @@ interface SourceUploadFailureAlertProps {
 export function SourceUploadFailureAlert({
   error,
   datasetCreated,
+  outcomeUnknown,
   files,
   urls,
 }: SourceUploadFailureAlertProps) {
@@ -24,9 +26,9 @@ export function SourceUploadFailureAlert({
   if (!error) return null;
 
   const failedSources = listFailedSources(files, urls, t("knowledge.create.uploadFailed"));
-  const title = datasetCreated
-    ? t("knowledge.create.partialUploadTitle")
-    : t("knowledge.create.createFailed");
+  const title = outcomeUnknown
+    ? t(datasetCreated ? "knowledge.create.partialUploadUnknownTitle" : "knowledge.create.createOutcomeUnknownTitle")
+    : t(datasetCreated ? "knowledge.create.partialUploadTitle" : "knowledge.create.createFailed");
 
   return (
     <div

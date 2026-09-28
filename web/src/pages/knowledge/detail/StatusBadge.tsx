@@ -12,7 +12,6 @@ import {
 
 type StatusBadgeProps = {
   status: string;
-  error?: string;
   progress?: number;
   metadata?: {
     processing_mode?: string;
@@ -22,7 +21,7 @@ type StatusBadgeProps = {
   };
 };
 
-export function StatusBadge({ status, error, progress, metadata }: StatusBadgeProps) {
+export function StatusBadge({ status, progress, metadata }: StatusBadgeProps) {
   const { t } = useTranslation();
   const s = (status || "").toLowerCase();
   
@@ -125,13 +124,13 @@ export function StatusBadge({ status, error, progress, metadata }: StatusBadgePr
     </Badge>
   );
 
-  if ((s === "failed" || s === "error") && error) {
+  if (s === "failed" || s === "error") {
     return (
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>{badge}</TooltipTrigger>
           <TooltipContent>
-            <p className="max-w-xs wrap-break-word text-xs">{error}</p>
+            <p className="max-w-xs wrap-break-word text-xs">{t("knowledge.detail.processingFailedSummary")}</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

@@ -107,6 +107,8 @@ export function DatasetUploadDialog({
     setRerankEnabled,
     rerankModel,
     setRerankModel,
+    uploadFailures,
+    clearUploadFailures,
     handleConfirmUpload,
   } = useDatasetUploadController({
     datasetId,
@@ -120,7 +122,10 @@ export function DatasetUploadDialog({
   function handleDialogOpenChange(nextOpen: boolean) {
     if (!nextOpen && uploading) return;
     onOpenChange(nextOpen);
-    if (!nextOpen) onPendingFilesChange([]);
+    if (!nextOpen) {
+      onPendingFilesChange([]);
+      clearUploadFailures();
+    }
   }
 
   return (
@@ -928,6 +933,23 @@ export function DatasetUploadDialog({
           </div>
         </div>
 
+        {uploadFailures.length > 0 && (
+          <div role="alert" className="mt-3 max-h-40 shrink-0 overflow-y-auto rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+            <p className="font-medium">{t("knowledge.detail.uploadPartialFailures")}</p>
+            <ul className="mt-2 space-y-1">
+              {uploadFailures.map((failure, index) => (
+                <li key={`${failure.name}-${index}`}>
+                  <span className="font-medium">#{failure.position} {failure.name} ({(failure.sizeBytes / 1024).toFixed(1)} KB):</span> {failure.error}.{" "}
+                  {failure.documentId
+                    ? <>{t("knowledge.detail.uploadRecordCreated")} {t("knowledge.detail.uploadKnownDocumentId", { id: failure.documentId })}</>
+                    : failure.retrySafe
+                      ? t("knowledge.detail.uploadRetrySelected")
+                      : t("knowledge.detail.uploadInspectBeforeRetry")}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <DialogFooter className="mt-4 pt-4 border-t shrink-0">
           <Button
             variant="outline"
@@ -936,6 +958,7 @@ export function DatasetUploadDialog({
               if (uploading) return;
               onOpenChange(false);
               onPendingFilesChange([]);
+              clearUploadFailures();
             }}
           >
             {t("knowledge.detail.uploadCancel")}

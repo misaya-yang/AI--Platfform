@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
   buildStageTimings,
   formatStageDuration,
+  lastStartedDocumentStage,
   runningStageDurationMs,
 } from "./documentStages.ts";
 
@@ -20,6 +21,18 @@ test("buildStageTimings returns empty for missing document or timestamps", () =>
     buildStageTimings({ parsing_started_at: "not-a-date" }),
     []
   );
+});
+
+test("failed documents report only their last recorded stage", () => {
+  assert.equal(lastStartedDocumentStage({ parsing_started_at: "2026-08-28T10:00:00Z" }), "parsing");
+  assert.equal(lastStartedDocumentStage({ parsing_started_at: "2026-08-28T10:00:00Z", splitting_started_at: "2026-08-28T10:00:12Z" }), "splitting");
+  assert.equal(lastStartedDocumentStage({ indexing_started_at: "2026-08-28T10:00:46Z" }), "indexing");
+  assert.equal(lastStartedDocumentStage({
+    indexing_started_at: "2026-08-28T10:00:46Z",
+    parsing_started_at: "2026-08-28T10:05:00Z",
+  }), "parsing");
+  assert.equal(lastStartedDocumentStage({ parsing_started_at: "invalid" }), null);
+  assert.equal(lastStartedDocumentStage(null), null);
 });
 
 test("buildStageTimings covers the full pipeline with ended stages", () => {

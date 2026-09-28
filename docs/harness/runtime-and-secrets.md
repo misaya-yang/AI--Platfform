@@ -134,3 +134,7 @@ Runtime/Worker builder cache or candidate images; never use broad prune commands
 
 Before running live assistant tests, confirm `GATEWAY_BASE_URL` health and the required test
 credentials. Report skipped versus failed tests distinctly — a skipped live test is not a pass.
+Playwright `web/e2e/global.setup.ts` now defaults to the existing dedicated account and fails
+closed when credentials or login are unavailable; omitted flags never provision or reset users.
+Only a fresh isolated environment may explicitly set `E2E_PROVISION_ACCOUNTS=1` to initialize
+accounts. `E2E_EXISTING_ACCOUNT_ONLY=1` remains an additional no-write guard.

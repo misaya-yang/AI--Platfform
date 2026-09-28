@@ -578,7 +578,15 @@ def _format_document_progress_event(dataset_id: str, event: Mapping[str, Any]) -
             payload = {}
     if not isinstance(payload, Mapping):
         payload = {}
-    serialized = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
+    public_payload = dict(payload)
+    # The durable trigger records the worker's raw exception for operators.
+    # Never replay that internal detail over the user-facing SSE stream.
+    if "error" in public_payload:
+        public_payload["error"] = (
+            "Document processing failed. Check the document status and ID."
+            if public_payload["error"] else None
+        )
+    serialized = json.dumps(public_payload, ensure_ascii=False, separators=(",", ":"))
     return (
         f"id: {dataset_id}:{sequence}\n"
         f"event: {event_type}\n"
@@ -1070,6 +1078,7 @@ async def upload_document(
     CHUNK_SIZE = 64 * 1024  # 64KB
 
     temp_workspace = None
+    document_creation_started = False
     try:
         dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
         _require_dataset_index_writable(dataset)
@@ -1187,6 +1196,7 @@ async def upload_document(
                     # the current bounded part and release it before enqueueing.
                     part_bytes = await asyncio.to_thread(part_path.read_bytes)
                     try:
+                        document_creation_started = True
                         doc = await svc.create_document_from_upload(
                             user,
                             dataset_id,
@@ -1229,6 +1239,7 @@ async def upload_document(
         # The storage contract accepts bytes. This read remains bounded by the
         # 48 MiB compressed-upload fence and runs off the event loop.
         content = await asyncio.to_thread(temp_path.read_bytes)
+        document_creation_started = True
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
@@ -1248,6 +1259,11 @@ async def upload_document(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
+        if document_creation_started:
+            raise HTTPException(
+                status_code=409,
+                detail="Upload outcome is uncertain; check the document list before retrying",
+            ) from exc
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if temp_workspace is not None:
@@ -1321,15 +1337,18 @@ async def batch_upload_documents(
         errors = []
         accepted_bytes = 0
 
-        for file in files:
+        for file_index, file in enumerate(files):
             filename = file.filename or "unknown"
             ext = Path(filename).suffix.lower()
+            document_creation_started = False
 
             # Validate extension
             if ext not in ALLOWED_EXTENSIONS:
                 errors.append(
                     {
+                        "file_index": file_index,
                         "filename": filename,
+                        "retry_safe": True,
                         "error": (
                             f"Unsupported file type: {ext}. "
                             f"Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
@@ -1376,6 +1395,7 @@ async def batch_upload_documents(
                     content = await in_file.read()
 
                 # Create document record
+                document_creation_started = True
                 doc = await svc.create_document_from_upload(
                     user,
                     dataset_id,
@@ -1387,10 +1407,37 @@ async def batch_upload_documents(
 
                 # Add batch metadata
                 doc["batch_id"] = batch_id
-                documents.append(doc)
+                documents.append((file_index, doc))
 
-            except Exception as e:
-                errors.append({"filename": filename, "error": str(e)})
+            except ValidationFailedError as exc:
+                retry_safe = not document_creation_started
+                errors.append(
+                    {
+                        "file_index": file_index,
+                        "filename": filename,
+                        "error": (
+                            str(exc)
+                            if retry_safe
+                            else "Upload state is uncertain; check the document list before retrying"
+                        ),
+                        "retry_safe": retry_safe,
+                    }
+                )
+            except Exception as exc:
+                logger.error(
+                    "Batch %s file %d failed unexpectedly (%s)",
+                    batch_id,
+                    file_index,
+                    type(exc).__name__,
+                )
+                errors.append(
+                    {
+                        "file_index": file_index,
+                        "filename": filename,
+                        "error": "Upload state is uncertain; check the document list before retrying",
+                        "retry_safe": False,
+                    }
+                )
             finally:
                 # Clean up temp file
                 if temp_path and os.path.exists(temp_path):
@@ -1400,15 +1447,17 @@ async def batch_upload_documents(
         # Enqueue all documents for parallel processing
         # Worker will process them based on document_worker_concurrency setting
         queued_documents = []
-        for doc in documents:
+        for file_index, doc in documents:
             if await _try_enqueue_document(worker, dataset_id, doc["document_id"]):
                 queued_documents.append(doc)
             else:
                 errors.append(
                     {
+                        "file_index": file_index,
                         "document_id": doc["document_id"],
                         "filename": doc.get("title"),
                         "error": "Document was not accepted by the durable ingestion queue",
+                        "retry_safe": False,
                     }
                 )
 
