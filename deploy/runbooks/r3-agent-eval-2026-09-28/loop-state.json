@@ -7,7 +7,7 @@
   "owner": "root integration session",
   "base_sha": "8b3a877a",
   "branch": "codex/r3-agent-eval-20260928",
-  "integrated_main_sha": "78000059",
+  "integrated_main_sha": "2ef84ffc",
   "active_phase": "R3-safe-increment-closeout",
   "active_feature": "Complete fixed Studio Agent Version runtime/Eval binding and preserve remaining J16～J18 acceptance gaps",
   "active_package": "R3-after-CANDIDATE_80",
