@@ -2,6 +2,8 @@
 
 本记录继承 `main@d51201c9` 的已合入安全增量；本批在 `codex/r2-closure-20260928` 开发，最终 Git 状态以 `deploy/runbooks/r2-knowledge-lifecycle-2026-09-27/loop-state.json` 为准。R2 未完成。保留既有 13 份未跟踪 R1 JSON。
 
+本批安全增量提交为 `b8362ff0`，已本地 fast-forward 合入 `main`，未推送；当前 R2 验收状态仍为进行中。
+
 ## 需求边界
 
 PRD `03-knowledge.md` §5 明确：扫描/OCR或某格式若确不支持，验收正确拒绝与说明，不强行新增解析器。当前 `scanned`/`multimodal` 公开上传本就拒绝；需测提示及无副作用，不把未发布 Vision 当完成 R2 的前提。R2 重点是已开放层级/普通文本的成功、失败保旧、版本恢复和中断续接。最新逐项映射在 `reports/product/r2-knowledge-progress-2026-09-27.md` 开头表格；该报告后文保留历史回执。
