@@ -5,7 +5,8 @@
 与对应 JSON 回执。历史进度与失败仍保留。
 
 本轮基线 `561f5f5a`，分支 `codex/r3-agent-eval-closeout-20260929`。用户授权验收后
-提交并普通推送，本轮不合入 main、不强推、不展开 R4/R5。主代理是唯一 writer。
+提交并普通推送；随后用户明确授权合入 main，功能提交 `19361e6c` 已 fast-forward
+集成。不强推、不展开 R4/R5、不重复扩大测试。主代理是唯一 writer。
 
 最后增量 276 项回归、Eval、架构/OpenAPI 与本地健康检查通过；Studio 40/40 为最后
 Trace 身份补账增量前的聚合，增量本身经 SQL、reconciler、运营页→原 Trace 验证。
