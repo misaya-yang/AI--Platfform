@@ -34,6 +34,7 @@ from ai_gateway_core.eval.agent_version_candidate import (
     build_model_authorization_evidence,
     structured_agent_release_diff,
 )
+from ai_gateway_core.eval.dataset_manifest import build_eval_dataset_manifest
 from ai_gateway_core.skills.artifact_repository import (
     SkillArtifactUnavailableError,
     manifest_from_artifact,
@@ -1917,51 +1918,13 @@ class DatabaseAgentRepository(BaseRepository):
             tenant_id,
             uuid.UUID(dataset_id),
         )
-        manifest_examples: list[dict[str, Any]] = []
-        for raw in examples:
-            row = dict(raw)
-            metadata = self._json_mapping(row.get("metadata"))
-            manifest_examples.append(
-                {
-                    "case_id": str(metadata.get("case_id") or row["example_id"]),
-                    "example_id": str(row["example_id"]),
-                    "split": str(row.get("split") or "regression"),
-                    "input": self._json_mapping(row.get("input")),
-                    "expected_output": self._json_mapping(row.get("expected_output")),
-                    "expected_trajectory": metadata.get("expected_trajectory") or {},
-                    "assertions": metadata.get("assertions") or [],
-                    "metadata": {
-                        key: value
-                        for key, value in metadata.items()
-                        if key not in {"expected_trajectory", "assertions"}
-                    },
-                    "source_trace_id": (
-                        str(row["source_trace_id"]) if row.get("source_trace_id") else None
-                    ),
-                    "source_span_id": (
-                        str(row["source_span_id"]) if row.get("source_span_id") else None
-                    ),
-                }
-            )
-        manifest_examples.sort(key=lambda item: (item["case_id"], item["example_id"]))
-        manifest = {
-            "dataset": {
-                "dataset_id": str(dataset["dataset_id"]),
-                "tenant_id": str(dataset["tenant_id"]),
-                "name": str(dataset.get("name") or ""),
-                "description": str(dataset.get("description") or ""),
-                "version": str(dataset.get("version") or "v1"),
-                "schema": self._json_mapping(dataset.get("schema")),
-                "metadata": self._json_mapping(dataset.get("metadata")),
-            },
-            "examples": manifest_examples,
-        }
+        manifest = build_eval_dataset_manifest(dataset, examples)
         return {
             "dataset_id": str(dataset["dataset_id"]),
             "tenant_id": str(dataset["tenant_id"]),
             "version": str(dataset.get("version") or "v1"),
             "manifest_hash": _canonical_hash(manifest),
-            "example_count": len(manifest_examples),
+            "example_count": len(manifest["examples"]),
         }
 
     async def resolve_eval_dataset_snapshot(

@@ -454,18 +454,18 @@ def test_generic_gateway_rejects_agent_runtime_headers_and_body_fields() -> None
     assert body_error.value.status_code == 422
 
 
-def test_forgery_guard_allows_signed_embed_token_but_not_other_agent_headers() -> None:
-    # X-Agent-Embed-Token is the legitimate, HMAC-signed, origin-bound bearer
-    # for the public Embed channel; the guard must let it through (it is still
-    # cryptographically verified downstream) while every other reserved
-    # x-agent-* header stays forbidden.
+def test_forgery_guard_allows_embed_grant_headers_but_not_forged_agent_headers() -> None:
+    # Both headers are verified together with the nonce cookie downstream.
     embed_request = Request(
         {
             "type": "http",
             "method": "POST",
             "path": "/api/v1/public/agents/pub-1/chat/stream",
             "query_string": b"",
-            "headers": [(b"x-agent-embed-token", b"e1.signed-token")],
+            "headers": [
+                (b"x-agent-embed-token", b"e1.signed-token"),
+                (b"x-agent-embed-origin", b"https://console.example.test"),
+            ],
         }
     )
     reject_client_agent_forgery(embed_request)  # must not raise
@@ -478,6 +478,7 @@ def test_forgery_guard_allows_signed_embed_token_but_not_other_agent_headers() -
             "query_string": b"",
             "headers": [
                 (b"x-agent-embed-token", b"e1.signed-token"),
+                (b"x-agent-embed-origin", b"https://console.example.test"),
                 (b"x-agent-id", b"forged"),
             ],
         }

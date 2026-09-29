@@ -16,6 +16,8 @@ import {
   datasetIdFromDetail,
   formatDate,
   formatDuration,
+  formatTraceCost,
+  formatTraceTokens,
   locatorText,
   ragQueryFromDetail,
   retrievalContextsFromDetail,
@@ -417,11 +419,11 @@ export function AssistantTraceDetail({ detail, loading, error }: AssistantTraceD
         </div>
         <div className="eval-metric-card">
           <span>{t("eval.detail.metrics.tokens")}</span>
-          <strong>{trace.total_tokens.toLocaleString()}</strong>
+          <strong>{formatTraceTokens(trace)}</strong>
         </div>
         <div className="eval-metric-card">
           <span>{t("eval.detail.metrics.cost")}</span>
-          <strong>{trace.total_cost_cents > 0 ? `$${(trace.total_cost_cents / 100).toFixed(2)}` : "$0.00"}</strong>
+          <strong>{formatTraceCost(trace)}</strong>
         </div>
       </div>
 

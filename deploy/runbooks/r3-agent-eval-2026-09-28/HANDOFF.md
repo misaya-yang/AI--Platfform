@@ -1,9 +1,17 @@
-# R3 收口交接
+# R3 收尾交接
 
-状态权威：`loop-state.json`；逐项证据：`reports/product/r3-agent-eval-progress-2026-09-28.md`。
+2026-09-29：J14～J18 本地真实功能验收完成。状态权威为 `loop-state.json`；
+完整证据见 [收尾报告](../../../reports/product/r3-agent-eval-closeout-2026-09-29.md)
+与对应 JSON 回执。历史进度与失败仍保留。
 
-当前分支 `codex/r3-agent-eval-20260928` 从 `main@8b3a877a` 开始，已多次安全增量本地合入。主代理负责集成检查、Docker、浏览器与本轮最终提交。2026-09-28 用户追加授权合入 `main` 并普通推送；不删分支。
+本轮基线 `561f5f5a`，分支 `codex/r3-agent-eval-closeout-20260929`。用户授权验收后
+提交并普通推送，本轮不合入 main、不强推、不展开 R4/R5。主代理是唯一 writer。
 
-已完成：A/B/C 修复独立 review 的权限、重试和预览恢复问题；隔离迁移、定向回归、Agent Studio 40/40、Eval/KB/OpenAPI/架构门禁通过；本地 Docker epoch 7、源码哈希与健康确认，专用账号的真实草稿/预览与内部发布/回滚 E2E 2 通过。详见报告中的证据层和未验项。
+最后增量 276 项回归、Eval、架构/OpenAPI 与本地健康检查通过；Studio 40/40 为最后
+Trace 身份补账增量前的聚合，增量本身经 SQL、reconciler、运营页→原 Trace 验证。
+Gate 重叠测试不相加。R2 双租户/连接器义务不由 R3 标通过。
 
-本次只暂存 R3 相关差异提交、fast-forward `main` 并普通推送。保留 `reports/r1-boundaries/` 中的既有未跟踪文件。最终增量修复 V1/V2 固定指令首轮绑定、Eval 发布门禁和冷重启 Trace 补账；见进度报告最后一节。J14～J18 的剩余真实 A/B、双角色、故障注入和 Codex IAB 登录后矩阵仍须继续；未完成前不宣称完整 R3 已交付。
+测试内部 Agent 已归档以验证停用；KB、原 run、失败、审批和 Quiz 证据保留。
+其他合成入口受期限/授权约束，测试 API Token 已撤销或过期。运行中 Eval 为 0。
+开始时已有的 13 份 `reports/r1-boundaries/*.json` 不暂存、不删除。
+本轮没有迁移、卷清理、凭据输出、新账号或未授权共享部署。

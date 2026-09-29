@@ -555,6 +555,10 @@ async def start_turn(
                 "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_PROFILE_INVALID", status_code=503
             )
         snapshot["limits"]["auto_compact_token_limit"] = max(1, raw_compact_limit)
+    snapshot["eval_fingerprint"] = {
+        "system_prompt_hash": sha256(canonical_runtime_json(snapshot["instructions"]).encode()).hexdigest(),
+        "tool_schema_hash": sha256(canonical_runtime_json(plane._dynamic_tools(readonly)).encode()).hexdigest(),
+    }
     snapshot_json = canonical_runtime_json(snapshot)
     snapshot_hash = sha256(snapshot_json.encode()).hexdigest()
     max_input_tokens = min(

@@ -59,13 +59,16 @@ class FakeProviderService:
         fail_get: set[str] | None = None,
         fail_create: set[str] | None = None,
         fail_list: bool = False,
+        runtime_keys: dict[str, str] | None = None,
     ) -> None:
         self.existing = existing or {}
         self.db_providers = db_providers or []
         self.fail_get = fail_get or set()
         self.fail_create = fail_create or set()
         self.fail_list = fail_list
+        self.runtime_keys = runtime_keys or {}
         self.get_calls: list[tuple[str, str]] = []
+        self.runtime_calls: list[tuple[str, str]] = []
         self.create_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
         self.list_calls: list[tuple[str, bool]] = []
@@ -85,6 +88,10 @@ class FakeProviderService:
     async def update_provider(self, **kwargs: Any) -> dict[str, Any]:
         self.update_calls.append(kwargs)
         return kwargs
+
+    async def get_runtime_provider_config(self, tenant_id: str, provider_id: str) -> dict[str, Any]:
+        self.runtime_calls.append((tenant_id, provider_id))
+        return {**self.existing.get(provider_id, {}), "api_key": self.runtime_keys.get(provider_id)}
 
     async def list_providers(
         self,
@@ -158,6 +165,29 @@ async def test_existing_rows_update_only_when_environment_key_is_present(
     assert result.configured_providers == ("openai",)
     assert result.runtime_configured_providers == frozenset({"openai"})
     assert "openai-secret" not in repr(log.method_calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [None, "credential", "endpoint", "api_type"])
+async def test_restart_preserves_revision_only_for_unchanged_runtime_configuration(monkeypatch, changed):
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-startup-credential")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example")
+    row = {"provider_id": "openai", "has_api_key": True, "api_type": "openai",
+           "base_url": "https://openai.example", "updated_at": "original-revision"}
+    if changed == "endpoint":
+        row["base_url"] = "https://previous.example"
+    if changed == "api_type":
+        row["api_type"] = "anthropic"
+    service = FakeProviderService(
+        existing={"openai": row},
+        runtime_keys={"openai": "previous-synthetic-credential" if changed == "credential" else "synthetic-startup-credential"},
+    )
+    log = MagicMock()
+    for _ in range(2):
+        await seed_startup_providers(provider_service=service, legacy_dashscope_api_key="", log=log)
+    assert len(service.update_calls) == (0 if changed is None else 2)
+    assert row["updated_at"] == "original-revision"
+    assert "synthetic-startup-credential" not in repr(log.method_calls)
 
 
 @pytest.mark.asyncio

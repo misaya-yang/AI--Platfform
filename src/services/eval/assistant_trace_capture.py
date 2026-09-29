@@ -23,6 +23,35 @@ from .trace_capture import (
 _terminal_replay_tasks: set[asyncio.Task[None]] = set()
 
 
+async def enrich_runtime_trace_usage(repository: Any, trace: dict[str, Any]) -> None:
+    """Attach measured receipts in the background ingest, outside the SSE path."""
+    run = await repository.fetchrow(
+        """SELECT harness_thread_id FROM assistant_runs
+           WHERE run_id = $1::uuid AND tenant_id = $2 AND user_id = $3
+             AND session_id = $4 AND engine = 'agent_runtime'
+             AND status IN ('completed', 'succeeded', 'failed', 'cancelled')""",
+        trace["run_id"], trace["tenant_id"], trace["user_id"], trace["session_id"],
+    )
+    if not run or not run["harness_thread_id"]:
+        return
+    receipt = await repository.get_assistant_runtime_trace_model_usage(
+        run_id=trace["run_id"], tenant_id=trace["tenant_id"], user_id=trace["user_id"],
+        session_id=trace["session_id"], runtime_thread_id=str(run["harness_thread_id"]),
+    )
+    dispatched = int(receipt.get("dispatched_calls") or 0)
+    measured = int(receipt.get("measured_calls") or 0)
+    usage = {"dispatched_calls": dispatched, "measured_calls": measured,
+             "tokens_complete": dispatched > 0 and measured == dispatched}
+    trace["metadata"]["runtime_model_usage"] = usage
+    if usage["tokens_complete"]:
+        incoming, outgoing = int(receipt["input_tokens"]), int(receipt["output_tokens"])
+        trace["metrics"].update(input_tokens=incoming, output_tokens=outgoing,
+                                total_tokens=incoming + outgoing)
+    if dispatched > 0 and int(receipt.get("cost_measured_calls") or 0) == dispatched:
+        usage["cost_microusd"] = int(receipt["cost_microusd"])
+        trace["metrics"]["total_cost_cents"] = usage["cost_microusd"] / 10_000
+
+
 def _runtime_event(frame: bytes | str) -> tuple[str, dict[str, Any]]:
     text = frame.decode("utf-8", errors="ignore") if isinstance(frame, bytes) else frame
     event_type = next(
@@ -181,6 +210,16 @@ def runtime_model_evidence(
         "sampling": {"temperature": (evidence.get("parameters") or {}).get("temperature"),
                      "max_tokens": (evidence.get("limits") or {}).get("max_output_tokens")},
     }
+    frozen_fingerprint = evidence.get("eval_fingerprint") or {}
+    for key in ("system_prompt_hash", "tool_schema_hash"):
+        value = frozen_fingerprint.get(key)
+        if isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value):
+            fingerprint[key] = value
+    version_keys = ("agent_id", "agent_version_id", "agent_spec_hash", "agent_runtime_snapshot_hash")
+    if all(evidence.get(key) for key in version_keys):
+        fingerprint.update({key: str(evidence[key]) for key in version_keys})
+        fingerprint["agent_spec_hash"] = fingerprint["agent_spec_hash"].removeprefix("sha256:")
+        fingerprint["candidate_type"] = "agent_version"
     calls = [call for call in evidence.get("calls") or [] if call.get("dispatched_at")]
     usage: dict[str, Any] = {}
     # Missing measurements stay unknown; reserved budgets are not observed usage.
@@ -204,6 +243,21 @@ def runtime_model_evidence(
                            "output_tokens": call.get("output_tokens"),
                            "cost_microusd": call.get("cost_microusd"), "model_ref": model_ref},
             "error_type": call.get("error_code"),
+        })
+    for execution in evidence.get("tool_executions") or []:
+        if not execution.get("capability_id"):
+            continue
+        attributes = {key: str(execution[key]) for key in (
+            "execution_id", "effect", "approval_status", "quiz_id",
+        ) if execution.get(key) is not None}
+        spans.append({
+            "span_id": span_id_for(run_id, f"capability:{execution['execution_id']}"),
+            "span_kind": "tool_execution", "name": execution["capability_id"],
+            "sequence_no": len(spans) + 1,
+            "status": "succeeded" if execution["status"] == "succeeded" else "failed",
+            "started_at": execution["dispatched_at"].isoformat() if execution.get("dispatched_at") else None,
+            "ended_at": execution["terminal_at"].isoformat() if execution.get("terminal_at") else None,
+            "attributes": attributes, "error_type": execution.get("error_code"),
         })
     return fingerprint, usage, spans
 

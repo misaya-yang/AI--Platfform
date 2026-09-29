@@ -217,6 +217,7 @@ export function AgentPreviewPanel({
   const pinnedRevision = session?.draft_revision;
   const staleDraft = Boolean(session && pinnedRevision && pinnedRevision !== draftRevision);
   const effectiveNative = (session as AgentRuntimeSession & { effective_capabilities?: Array<{ name: string; risk: string; requires_confirmation: boolean }> } | null)?.effective_capabilities;
+  const hasNativeBindings = Boolean(effectiveSpec?.capabilities.some((binding) => binding.type === "native" || binding.type === "model_native"));
   const sessionActionsBlocked = previewSessionActionsBlocked({
     restoring, starting, sending, runUnsettled, decidingApproval, cancelling, refreshingRun,
   });
@@ -684,7 +685,7 @@ export function AgentPreviewPanel({
         <span>{t("agents.preview.summaryCapabilities", { count: effectiveSpec.capabilities.length })}</span>
         <span>{t("agents.preview.summaryKnowledge", { count: effectiveSpec.knowledge.length })}</span>
         <span>{t("agents.preview.summaryMemory", { mode: memoryModeLabel })}</span>
-        {effectiveNative && <span>{t("agents.preview.effectiveNative", { count: effectiveNative.length, defaultValue: "{{count}} platform tools authorized for this session" })}</span>}
+        {effectiveNative && (effectiveNative.length > 0 || !hasNativeBindings) && <span>{t("agents.preview.effectiveNative", { count: effectiveNative.length, defaultValue: "{{count}} platform tools authorized for this session" })}</span>}
       </div> : <div className="agent-effective-summary">{t("agents.preview.oldSummaryUnavailable", "Earlier draft configuration is not available in this page. Inspect the run trace for its recorded version and model.")}</div>}
 
       <div className="agent-preview-transcript" aria-live="polite">
@@ -698,10 +699,10 @@ export function AgentPreviewPanel({
         )}
         {(starting || restoring) && <div className="agent-preview-spinner"><Spin /><span>{restoring ? t("agents.preview.restoring", "Restoring this Preview's authorized history…") : t("agents.preview.resolving")}</span></div>}
         {session && <div className="agent-session-label"><RotateCcw size={14} /> {t("agents.preview.sessionLabel", { target: targetLabel })}</div>}
-        {messages.map((message) => (
+        {messages.map((message, index) => (
           <article key={message.id} className={`agent-preview-message agent-preview-message-${message.role}`}>
             <span className="agent-message-avatar" aria-hidden>{message.role === "user" ? <User size={15} /> : <Bot size={15} />}</span>
-            <div><strong>{message.role === "user" ? t("agents.preview.you") : agentName}</strong><p>{message.content || <span className="agent-stream-cursor">{t("agents.preview.generating")}</span>}</p></div>
+            <div><strong>{message.role === "user" ? t("agents.preview.you") : agentName}</strong><p>{message.content || (index === messages.length - 1 && (sending || runUnsettled) && !cancelRequested ? <span className="agent-stream-cursor">{t(approval ? "agents.preview.approvalTitle" : "agents.preview.generating")}</span> : t("agents.preview.emptyResponse"))}</p></div>
           </article>
         ))}
         {activities.map((activity) => (
@@ -727,6 +728,7 @@ export function AgentPreviewPanel({
         {approval && <div className="agent-preview-approval" role="group" aria-label={t("agents.preview.approvalTitle", "Tool approval required")}>
           <strong>{t("agents.preview.approvalTitle", "Tool approval required")}</strong>
           <p>{approval.preview?.tool_name || t("agents.preview.toolDefault")}</p>
+          {approval.preview?.reason && <p role="status">{approval.preview.reason}</p>}
           {approval.preview?.effect && <p>{approval.preview.effect}</p>}
           {approval.preview?.target && <p>{approval.preview.target}</p>}
           {approval.preview?.parameters?.map((parameter) => <p key={parameter.name}>{parameter.name}: {parameter.value}</p>)}

@@ -17,7 +17,7 @@ import { AssistantTraceDetail } from "./AssistantTraceDetail";
 import { AssistantTraceList, type AssistantTraceFilters } from "./AssistantTraceList";
 import { ThreadView } from "./ThreadView";
 import { TraceScorePanel } from "./TraceScorePanel";
-import { formatDuration, isErrorStatus, traceThreadId } from "./tracePresentation";
+import { formatDuration, formatTraceTokens, isErrorStatus, traceThreadId } from "./tracePresentation";
 
 type TraceWorkspaceView = "explorer" | "thread" | "run";
 
@@ -140,7 +140,7 @@ export function TraceExplorerShell({
         { key: "status", label: t("eval.list.columns.status"), value: selectedTrace.status },
         { key: "thread", label: t("eval.workbench.context.selectedThread"), value: selectedThreadId || "-" },
         { key: "latency", label: t("eval.list.columns.latency"), value: formatDuration(selectedTrace.total_latency_ms) },
-        { key: "tokens", label: t("eval.list.columns.tokens"), value: selectedTrace.total_tokens.toLocaleString() },
+        { key: "tokens", label: t("eval.list.columns.tokens"), value: formatTraceTokens(selectedTrace) },
         { key: "scores", label: t("eval.list.columns.scores"), value: selectedTrace.scores_count.toLocaleString() },
       ]
     : [];

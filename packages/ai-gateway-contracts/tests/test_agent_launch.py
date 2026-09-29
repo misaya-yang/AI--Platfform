@@ -138,6 +138,33 @@ def test_legacy_snapshot_adapter_preserves_control_projection() -> None:
     assert restored.to_control_snapshot() == snapshot
 
 
+def test_publication_expiry_is_gateway_metadata_outside_the_runtime_wire():
+    payload = _payload(entrypoint="published_agent")
+    payload["identity"].update(channel="hosted", auth_mode="public")
+    payload["agent_spec"]["channel"] = "hosted"
+    payload["fingerprints"]["spec"] = runtime_sha256(payload["agent_spec"])
+    original = ResolvedAgentLaunchV1.parse(payload)
+    snapshot = original.to_control_snapshot()
+    snapshot["channel_policy"]["expires_at"] = "2027-01-01T00:00:00+00:00"
+    restored = ResolvedAgentLaunchV1.from_legacy_snapshot(
+        snapshot, user_id="user-a", session_id="session-a", entrypoint="published_agent",
+        model_profile=original.model_profile,
+        readonly_capabilities=original.runtime_inputs["readonly_capabilities"],
+        turn_policy=original.turn_policy,
+    )
+    assert restored.to_control_snapshot()["channel_policy"] == payload["channel_policy"]
+    assert snapshot["channel_policy"]["expires_at"] == "2027-01-01T00:00:00+00:00"
+    snapshot["channel_policy"]["unexpected_permission"] = True
+    with pytest.raises(ResolvedAgentLaunchError, match="RESOLVED_AGENT_LAUNCH_CHANNEL_INVALID"):
+        ResolvedAgentLaunchV1.from_legacy_snapshot(
+            snapshot, user_id="user-a", session_id="session-a", entrypoint="published_agent",
+            model_profile=original.model_profile, readonly_capabilities={}, turn_policy=original.turn_policy,
+        )
+    payload["channel_policy"]["expires_at"] = "2027-01-01T00:00:00+00:00"
+    with pytest.raises(ResolvedAgentLaunchError, match="RESOLVED_AGENT_LAUNCH_CHANNEL_INVALID"):
+        ResolvedAgentLaunchV1.parse(payload)
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [

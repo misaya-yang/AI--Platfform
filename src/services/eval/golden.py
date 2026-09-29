@@ -396,7 +396,11 @@ def _evaluate_assertions(assertions: list[Any], replay: dict[str, Any]) -> list[
             continue
         assertion_type = str(assertion.get("type") or "")
         value = assertion.get("value")
-        if assertion_type == "output_contains":
+        if assertion_type == "output_equals":
+            expected = str(value or "").strip()
+            if not expected or output.strip() != expected:
+                failures.append("output_equals differs from the required complete response")
+        elif assertion_type == "output_contains":
             needle = str(value or "").strip()
             if not needle or needle.lower() not in output.lower():
                 failures.append(f"output_contains missing {needle!r}")

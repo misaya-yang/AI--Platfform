@@ -33,7 +33,8 @@ def test_model_facade_ast_surface_is_stable() -> None:
             "lease_signer: RuntimeModelLeaseSigner, "
             "http_client: httpx.AsyncClient | None=None, "
             "clock: Callable[[], float]=time.perf_counter, "
-            "admission_controller: Any | None=None, capacity_resolver: Any | None=None",
+            "admission_controller: Any | None=None, capacity_resolver: Any | None=None, "
+            "source_access_checker: Any | None=None",
             "None",
         ),
         "close": ("AsyncFunctionDef", "self", "None"),

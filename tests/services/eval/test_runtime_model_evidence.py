@@ -44,6 +44,20 @@ def test_actual_ledger_supplies_model_span_usage_and_frozen_identity():
     assert _project(ref, evidence) == (fingerprint, usage, spans)
 
 
+def test_native_execution_receipt_proves_tool_effect_without_exposing_arguments():
+    ref, evidence = _evidence()
+    execution = {"execution_id": str(uuid4()), "capability_id": "generate_quiz",
+                 "status": "succeeded", "effect": "write", "approval_status": "approved",
+                 "quiz_id": str(uuid4()), "arguments": {"private": "must-not-project"}}
+    evidence["tool_executions"] = [execution]
+    spans = _project(ref, evidence)[2]
+    assert spans[-1]["span_kind"] == "tool_execution"
+    assert spans[-1]["name"] == "generate_quiz" and spans[-1]["status"] == "succeeded"
+    assert spans[-1]["attributes"]["quiz_id"] == execution["quiz_id"]
+    assert "arguments" not in spans[-1]["attributes"]
+    assert "must-not-project" not in repr(spans)
+
+
 @pytest.mark.parametrize("field,value", [("tenant_id", "foreign"), ("session_id", "another-case"),
                                          ("provider_id", "foreign"), ("model_id", "another-model"),
                                          ("capability_revision", 4), ("pricing_snapshot", {"version": "changed"})])
@@ -66,6 +80,18 @@ def test_unobserved_calls_and_usage_are_not_invented():
     evidence["calls"] = [reserved]
     _, usage, spans = _project(ref, evidence)
     assert usage == {} and spans == []
+
+
+def test_runtime_prompt_and_tools_use_persisted_fingerprints_only():
+    ref, evidence = _evidence()
+    assert "system_prompt_hash" not in _project(ref, evidence)[0]
+    evidence["eval_fingerprint"] = {"system_prompt_hash": "a" * 64, "tool_schema_hash": "b" * 64}
+    fingerprint = _project(ref, evidence)[0]
+    assert fingerprint["system_prompt_hash"] == "a" * 64
+    assert fingerprint["tool_schema_hash"] == "b" * 64
+    evidence["eval_fingerprint"] = {"system_prompt_hash": "unverified", "tool_schema_hash": ""}
+    fingerprint = _project(ref, evidence)[0]
+    assert "system_prompt_hash" not in fingerprint and "tool_schema_hash" not in fingerprint
 
 
 def test_trace_score_serializes_database_evaluator_uuid():
@@ -98,6 +124,48 @@ async def test_repository_scopes_snapshot_and_calls_to_same_tenant_case_and_run(
         tenant_id="foreign", run_case_id="case-a", run_id=evidence["run_id"],
     ) is None
     repository.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatched_version", [False, True])
+async def test_reconciled_terminal_candidate_uses_original_evidence_without_dispatch(
+    monkeypatch, mismatched_version,
+):
+    ref, evidence = _evidence()
+    pin = {"agent_id": str(uuid4()), "agent_version_id": str(uuid4()),
+           "agent_spec_hash": "a" * 64, "agent_runtime_snapshot_hash": "sha256:" + "b" * 64}
+    evidence.update(pin)
+    if mismatched_version:
+        evidence["agent_version_id"] = str(uuid4())
+    detail = {"trace": {"trace_id": evidence["run_id"], "status": "succeeded",
+                        "model_id": ref["model_id"], "output_preview": "EVAL-MARKER",
+                        "metadata": {"runtime_trajectory": {"exit_reason": "succeeded"}}},
+              "spans": []}
+    repository = SimpleNamespace(
+        get_trace_detail=AsyncMock(return_value=detail),
+        get_candidate_runtime_evidence=AsyncMock(return_value=evidence),
+    )
+    candidate = SimpleNamespace(run=AsyncMock())
+    monkeypatch.setattr(eval_outbox_worker, "_eval_candidate_client", candidate)
+    runner = eval_outbox_worker._build_candidate_runner(repository)
+    kwargs = {"tenant_id": "tenant-a", "run_case": {
+        "run_case_id": "case-a", "candidate_trace_id": evidence["run_id"],
+        "case_id": "recovered", "input": {"message": "original"},
+        "expected_output": {"contains": "EVAL-MARKER"},
+    }, "execution_config": {"candidate_type": "agent_version", "model_ref": ref, **pin}}
+    if mismatched_version:
+        with pytest.raises(RuntimeError, match="VERSION_PIN_MISMATCH"):
+            await runner(**kwargs)
+    else:
+        result = await runner(**kwargs)
+        assert result["fingerprint"]["model_ref_verified"] is True
+        assert result["fingerprint"]["agent_version_id"] == pin["agent_version_id"]
+        assert result["usage"] == {"input_tokens": 13, "output_tokens": 7, "total_tokens": 20}
+        assert result["detail"]["spans"][0]["span_kind"] == "model_invocation"
+    candidate.run.assert_not_awaited()
+    repository.get_candidate_runtime_evidence.assert_awaited_once_with(
+        tenant_id="tenant-a", run_case_id="case-a", run_id=evidence["run_id"],
+    )
 
 
 @pytest.mark.asyncio

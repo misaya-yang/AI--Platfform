@@ -68,6 +68,10 @@ def schedule_gateway_trace_ingest(
     async def _ingest() -> None:
         try:
             repository = AgentTraceRepository(database)
+            if trace.get("source_adapter") == "gateway.agent_runtime":
+                from .assistant_trace_capture import enrich_runtime_trace_usage
+
+                await enrich_runtime_trace_usage(repository, trace)
             await repository.ingest_trace(
                 tenant_id=tenant_id,
                 created_by=created_by,

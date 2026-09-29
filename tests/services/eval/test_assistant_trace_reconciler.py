@@ -155,6 +155,7 @@ class _WriteConnection:
         self.events = 0
         self.jobs = 0
         self.allowed = True
+        self.existing_scope_matches = True
         self.queries: list[str] = []
 
     def transaction(self):
@@ -170,7 +171,7 @@ class _WriteConnection:
             self.traces += 1
             return {"trace_id": args[0]}
         if "SELECT trace_id FROM agent_traces" in query:
-            return {"trace_id": args[0]}
+            return {"trace_id": args[0]} if self.existing_scope_matches else None
         if "INSERT INTO agent_trace_outbox" in query:
             if self.jobs:
                 return None
@@ -181,9 +182,15 @@ class _WriteConnection:
     async def execute(self, query: str, *_args):
         self.queries.append(query)
         if "INSERT INTO agent_trace_spans" in query:
+            if self.spans and "ON CONFLICT (span_id) DO NOTHING" in query:
+                return "INSERT 0 0"
             self.spans += 1
         elif "INSERT INTO agent_trace_events" in query:
+            if self.events and "ON CONFLICT (trace_id, sequence_no) DO NOTHING" in query:
+                return "INSERT 0 0"
             self.events += 1
+        elif "UPDATE agent_traces t" in query:
+            return "UPDATE 1"
         else:
             raise AssertionError(query)
         return "INSERT 0 1"
@@ -204,7 +211,13 @@ class _Holder:
         self._pool = _Pool(connection)
 
 
-async def test_reconciled_trace_is_inserted_once_with_one_outbox_job() -> None:
+@pytest.mark.parametrize(
+    ("existing_children", "scope_matches"),
+    [(None, True), ((0, 0), True), ((1, 0), True), ((1, 1), True), ((0, 0), False)],
+)
+async def test_reconciled_trace_is_inserted_once_with_one_outbox_job(
+    existing_children, scope_matches: bool,
+) -> None:
     run = _run(status="failed")
     terminal = _terminal(run)
     trace = build_assistant_runtime_trace(
@@ -217,6 +230,10 @@ async def test_reconciled_trace_is_inserted_once_with_one_outbox_job() -> None:
     )
     trace["retention_expires_at"] = (run["ended_at"] + timedelta(days=90)).isoformat()
     connection = _WriteConnection()
+    connection.existing_scope_matches = scope_matches
+    if existing_children is not None:
+        connection.traces = 1
+        connection.spans, connection.events = existing_children
     repository = AgentTraceRepository(_Holder(connection))
 
     first = await repository.insert_reconciled_assistant_runtime_trace(
@@ -226,7 +243,10 @@ async def test_reconciled_trace_is_inserted_once_with_one_outbox_job() -> None:
         run=run, terminal=terminal, trace=trace,
     )
 
-    assert (first, second) == (True, False)
+    assert (first, second) == (existing_children is None, False)
+    if not scope_matches:
+        assert (connection.traces, connection.spans, connection.events, connection.jobs) == (1, 0, 0, 0)
+        return
     assert (connection.traces, connection.spans, connection.events, connection.jobs) == (1, 1, 1, 1)
     assert "FOR UPDATE OF r" in connection.queries[0]
     assert "event_id" in next(query for query in connection.queries if "INSERT INTO agent_trace_events" in query)

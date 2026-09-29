@@ -225,6 +225,28 @@ def _build_candidate_runner(repository: AgentTraceRepository):
         fingerprint = (dict(result.fingerprint) if result is not None
                        else _persisted_candidate_fingerprint(detail))
         expected_ref = execution_config.get("model_ref")
+        recovered_usage = None
+        if result is None and isinstance(expected_ref, dict) and expected_ref:
+            # A cold-start reconciler can have persisted the terminal Trace first.
+            # Recover observations from that original run, never dispatch again.
+            evidence = await repository.get_candidate_runtime_evidence(
+                tenant_id=tenant_id, run_case_id=run_case_id, run_id=trace_id,
+            )
+            recovered_fingerprint, recovered_usage, model_spans = runtime_model_evidence(
+                evidence=evidence, tenant_id=tenant_id, run_case_id=run_case_id,
+                run_id=trace_id, expected_model_ref=expected_ref,
+            )
+            fingerprint.update(recovered_fingerprint)
+            if execution_config.get("candidate_type") == "agent_version" and any(
+                fingerprint.get(key) != execution_config.get(key)
+                for key in ("agent_id", "agent_version_id", "agent_spec_hash", "agent_runtime_snapshot_hash")
+            ):
+                raise RuntimeError("AGENT_EVAL_VERSION_PIN_MISMATCH")
+            existing_spans = detail.get("spans") or []
+            span_ids = {str(span.get("span_id")) for span in existing_spans}
+            detail = {**detail, "spans": [*existing_spans, *(
+                span for span in model_spans if str(span["span_id"]) not in span_ids
+            )]}
         if isinstance(expected_ref, dict) and expected_ref:
             actual_ref = fingerprint.get("model_ref") or {}
             if fingerprint.get("model_ref_verified") is not True or any(
@@ -247,6 +269,8 @@ def _build_candidate_runner(repository: AgentTraceRepository):
                 if isinstance(trace.get(key), int | float)
             }
         )
+        if recovered_usage is not None:
+            usage = recovered_usage
         output = (
             result.output
             if result is not None and result.output

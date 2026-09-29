@@ -94,6 +94,7 @@ class _Connection:
         self.case_insert_args: list[tuple[Any, ...]] | None = None
         self.existing_retry: dict[str, Any] | None = None
         self.run_insert_count = 0
+        self.runtime_tool_receipt = False
 
     async def __aenter__(self) -> _Connection:
         return self
@@ -137,6 +138,24 @@ class _Connection:
     async def executemany(self, query: str, args: list[tuple[Any, ...]]) -> None:
         assert "INSERT INTO eval_experiment_run_cases" in query
         self.case_insert_args = args
+
+    async def fetchval(self, query: str, *args: Any) -> bool:
+        assert "assistant_capability_executions" in query and "assistant_runtime_items" in query
+        assert args[0] == "tenant-a"
+        return self.runtime_tool_receipt
+
+
+@pytest.mark.asyncio
+async def test_retry_rechecks_original_tool_ledger_when_old_trace_omits_tools() -> None:
+    conn = _Connection()
+    conn.runtime_tool_receipt = True
+    repo = AgentTraceRepository(SimpleNamespace(_pool=SimpleNamespace(acquire=lambda: conn), enabled=True))
+    with pytest.raises(ValueError, match="eval_retry_side_effect_unconfirmed"):
+        await repo.retry_failed_experiment_cases(
+            tenant_id="tenant-a", run_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+            case_ids=["failed"], created_by="operator", idempotency_key="request-123",
+        )
+    assert conn.run_insert_count == 0
 
 
 @pytest.mark.asyncio

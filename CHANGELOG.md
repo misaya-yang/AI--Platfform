@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### R3 evaluation contracts
+
+- Complete local J14–J18 acceptance with immutable Agent A/B runs, approval
+  and cancellation, audience revocation and rollback, Trace review, controlled
+  provider/judge failures, original-turn restart recovery, and selected retries.
+- Use one complete dataset manifest for execution, rescore and linked release;
+  preserve unknown measurements and native tool receipts. Trace imports remain
+  pending and idempotent without overwriting manual review.
+- Keep unchanged provider revisions stable across Gateway restarts, accept
+  valid channel-bound V2 controls, and bind Trace attribution from the original
+  session/snapshot. Historical recovery only fills missing records.
+- Repair public and Embed launches: canonical expiry identity, the established
+  Runtime permission projection, explicit empty tool catalogs, and signed Embed
+  token/origin headers. Current access and origin checks remain enforced.
+- Add the optional `output_equals` assertion for exact complete-response contracts
+  after trimming surrounding whitespace. Quoting an expected refusal phrase in an
+  unrelated answer no longer satisfies a case that explicitly chooses this assertion.
+  Existing substring assertions and frozen run scores retain their semantics.
+
 ### Phase-one tenant boundaries
 
 - Expose the authenticated tenant through `/api/v1/auth/me`; Eval verifies it before creating a

@@ -212,7 +212,7 @@ async def _version_snapshot(
 
 
 async def _pinned_version_session(
-    request: Request, user: UserContext, session_id: str
+    request: Request, user: UserContext, session_id: str, *, allow_channel_pin: bool = False,
 ) -> Any | None:
     manager = getattr(request.app.state, "session_manager", None)
     if manager is None:
@@ -227,6 +227,16 @@ async def _pinned_version_session(
     draft_revision = getattr(session, "agent_draft_revision", None)
     if not any((agent_id, agent_version_id, channel, publication_id, draft_revision)):
         return None
+    if allow_channel_pin and agent_id and (
+        (channel == "preview" and agent_version_id is None and publication_id is None
+         and isinstance(draft_revision, int) and not isinstance(draft_revision, bool)
+         and draft_revision > 0)
+        or (channel in {"hosted", "embed", "api"} and agent_version_id
+            and publication_id and draft_revision is None)
+    ):
+        # Channel entrypoints already bound these sessions. V2 may observe or
+        # control their original turn, but may not start an unbound builtin turn.
+        return session
     if (
         not agent_id
         or not agent_version_id
@@ -241,12 +251,38 @@ async def _pinned_version_session(
 async def _pinned_snapshot(
     request: Request, user: UserContext, session: Any
 ) -> dict[str, Any]:
-    snapshot = await _version_snapshot(
-        request,
-        user,
-        agent_id=str(session.agent_id),
-        agent_version_id=str(session.agent_version_id),
-    )
+    if getattr(session, "agent_draft_revision", None) is not None:
+        # Saving r2 cannot invalidate a parked r1 action. Recheck current Agent
+        # access; the Runtime retains the original immutable turn/action hash.
+        try:
+            agent = await _repository(request).get_agent(
+                tenant_id=user.tenant_id, agent_id=str(session.agent_id),
+                user_id=user.user_id, is_tenant_admin=_is_tenant_admin(user),
+            )
+        except (AgentRepositoryError, AgentNotFoundError) as exc:
+            _map_repository_error(request, exc)
+            raise AssertionError("unreachable") from exc
+        if agent.get("status") in {"archived", "deleted"}:
+            raise HTTPException(status_code=409, detail={"code": "AGENT_RUNTIME_AGENT_UNAVAILABLE"})
+        return {}
+    if getattr(session, "publication_id", None) is not None:
+        try:
+            resolution = await _repository(request).resolve_publication_runtime(
+                tenant_id=user.tenant_id, publication_id=str(session.publication_id),
+                user_id=user.user_id, is_tenant_admin=_is_tenant_admin(user),
+                pinned_version_id=str(session.agent_version_id),
+            )
+        except (AgentRepositoryError, AgentNotFoundError) as exc:
+            _map_repository_error(request, exc)
+            raise AssertionError("unreachable") from exc
+        snapshot = await _build_snapshot(request, resolution, user, channel=str(session.channel))
+    else:
+        snapshot = await _version_snapshot(
+            request,
+            user,
+            agent_id=str(session.agent_id),
+            agent_version_id=str(session.agent_version_id),
+        )
     if (
         str(session.agent_spec_hash) != str(snapshot["fingerprints"]["spec"])
         or str(session.runtime_fingerprint) != runtime_sha256(snapshot)
@@ -589,7 +625,7 @@ async def _get_thread(request: Request, user: UserContext, thread_id: str) -> Ru
 async def get_thread(thread_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
-    pin = await _pinned_version_session(request, user, thread.session_id)
+    pin = await _pinned_version_session(request, user, thread.session_id, allow_channel_pin=True)
     sources = await conversation_sources(request, user, thread.session_id)
     visible = await visible_dataset_names(request, user) if sources.dataset_ids else {}
     visible_documents = await visible_document_keys(request, user, sources.document_ids)
@@ -601,7 +637,7 @@ async def get_thread(thread_id: str, request: Request, user: UserContext = Depen
         or not (sources.versions_by_run or {}).get(run_id, frozenset()) <= visible_versions
     ]
     payload = {**_thread_payload(thread), "restricted_source_run_ids": restricted}
-    if pin is not None:
+    if pin is not None and pin.agent_version_id and not getattr(pin, "publication_id", None):
         payload["agent_version_target"] = _pinned_target_payload(pin)
     return {"thread": payload}
 
@@ -777,7 +813,7 @@ async def interrupt_turn(
 async def recover_turn(thread_id: str, turn_id: str, request: Request, user: UserContext = Depends(get_user_context)) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
-    pin = await _pinned_version_session(request, user, thread.session_id)
+    pin = await _pinned_version_session(request, user, thread.session_id, allow_channel_pin=True)
     if pin is not None:
         await _pinned_snapshot(request, user, pin)
     await require_conversation_source_access(request, user, thread.session_id, for_execution=True)
@@ -808,7 +844,7 @@ async def get_thread_approval(
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
     source_revoked = False
-    pin = await _pinned_version_session(request, user, thread.session_id)
+    pin = await _pinned_version_session(request, user, thread.session_id, allow_channel_pin=True)
     if pin is not None:
         try:
             await _pinned_snapshot(request, user, pin)
@@ -874,7 +910,7 @@ async def decide_thread_approval(
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         if body.approved:
-            pin = await _pinned_version_session(request, user, thread.session_id)
+            pin = await _pinned_version_session(request, user, thread.session_id, allow_channel_pin=True)
             if pin is not None:
                 await _pinned_snapshot(request, user, pin)
             await require_conversation_source_access(request, user, thread.session_id, for_execution=True)

@@ -391,6 +391,22 @@ def snapshot_capability_allowlist(
                 "channel": channel,
             }
         allowlist.append(entry)
+    # Knowledge bindings are authorized separately from generic tool bindings.
+    # Project their read capability into both the Thread and Turn catalogs.
+    knowledge = snapshot.get("knowledge") or {}
+    retrieval = knowledge.get("retrieval") or {}
+    if (
+        knowledge.get("datasets")
+        and retrieval.get("mode", "auto") in {"auto", "tool"}
+        and not any(entry["id"] == "search_knowledge_base" for entry in allowlist)
+    ):
+        allowlist.append({
+            "type": "platform",
+            "id": "search_knowledge_base",
+            "name": "search_knowledge_base",
+            "version": None,
+            "schema_hash": None,
+        })
     return allowlist
 
 

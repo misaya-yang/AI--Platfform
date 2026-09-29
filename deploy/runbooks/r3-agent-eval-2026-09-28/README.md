@@ -2,6 +2,11 @@
 
 范围：PRD `04-agent-studio-evaluation.md` 的 AG-01～AG-09、EV-01～EV-08；验收 J14～J18。复用 R1 助手审批/恢复、R2 权威 Eval 样本库与来源权限。`loop-state.json` 是进度状态权威。
 
+2026-09-29 收尾在 `codex/r3-agent-eval-closeout-20260929` 串行执行，基线
+`561f5f5a`。用户要求 J14～J18 全部验收后提交并普通推送；本轮不合入 main。
+最新结果见 [完整收尾记录](../../../reports/product/r3-agent-eval-closeout-2026-09-29.md)。
+下述并行开发和 main 合入授权是 2026-09-28 的历史记录。
+
 ## 并行代码流与归属
 
 用户已明确授权本轮 A/B/C 并行开发；三流只写各自路径，主代理负责公共接口、集成、Docker/数据库/浏览器与跨流 review，不另造 Agent 执行引擎。

@@ -4,6 +4,7 @@ import math
 from typing import Any
 
 SUPPORTED_ASSERTIONS = {
+    "output_equals",
     "output_contains",
     "output_not_contains",
     "required_span_kind",
@@ -83,6 +84,7 @@ REQUIRED_STATEFUL_NESTED_FIELDS = {
 }
 
 STRING_ASSERTIONS = {
+    "output_equals",
     "output_contains",
     "output_not_contains",
     "required_span_kind",

@@ -33,6 +33,23 @@ export function metadataObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+export function formatTraceTokens(trace: Pick<AgentTraceSummary, "total_tokens" | "metadata">): string {
+  const usage = metadataObject(trace.metadata.runtime_model_usage);
+  if (usage.tokens_complete === false || (trace.total_tokens === 0 && usage.tokens_complete !== true)) return "—";
+  return trace.total_tokens.toLocaleString();
+}
+
+export function formatTraceCost(trace: Pick<AgentTraceSummary, "total_cost_cents" | "metadata">): string {
+  const usage = metadataObject(trace.metadata.runtime_model_usage);
+  const measured = usage.cost_microusd;
+  const amount = typeof measured === "number" && Number.isFinite(measured) && measured >= 0
+    ? measured / 1_000_000
+    : trace.total_cost_cents > 0 && usage.dispatched_calls === undefined ? trace.total_cost_cents / 100 : null;
+  if (amount === null) return "—";
+  if (amount > 0 && amount < 0.01) return "<$0.01";
+  return `$${amount.toFixed(2)}`;
+}
+
 export function traceLocator(trace?: AgentTraceSummary | null): Record<string, unknown> {
   return metadataObject(trace?.metadata?.transcript_locator);
 }

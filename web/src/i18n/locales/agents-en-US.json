@@ -560,7 +560,7 @@
     "citationOther": "{{count}} citations returned.",
     "knowledgeDetail": "Retrieved under the saved Dataset policy.",
     "runtimeError": "Preview runtime failed.",
-    "emptyResponse": "The runtime completed without a text response.",
+    "emptyResponse": "This turn has no text response.",
     "failed": "Preview failed",
     "messagePlaceholder": "Message this agent",
     "sendLabel": "Send Preview message",

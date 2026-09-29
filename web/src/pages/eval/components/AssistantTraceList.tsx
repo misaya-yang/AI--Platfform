@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AgentTraceSummary, TraceStatus } from "@/api/eval";
 
-import { formatDate, formatDuration, traceThreadId, traceTurn } from "./tracePresentation";
+import { formatDate, formatDuration, formatTraceTokens, traceThreadId, traceTurn } from "./tracePresentation";
 
 const { RangePicker } = DatePicker;
 
@@ -163,7 +163,7 @@ export function AssistantTraceList({
       dataIndex: "total_tokens",
       key: "tokens",
       width: 110,
-      render: (tokens: number) => <span className="eval-trace-metric">{tokens.toLocaleString()}</span>,
+      render: (_, item) => <span className="eval-trace-metric">{formatTraceTokens(item)}</span>,
     },
     {
       title: t("eval.list.columns.scores"),

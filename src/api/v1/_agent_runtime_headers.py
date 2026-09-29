@@ -6,7 +6,7 @@ from typing import Final
 
 from fastapi import HTTPException, Request
 
-_ALLOWED_AGENT_HEADERS: Final = frozenset({"x-agent-embed-token"})
+_ALLOWED_AGENT_HEADERS: Final = frozenset({"x-agent-embed-token", "x-agent-embed-origin"})
 _RESERVED_AGENT_FIELDS: Final = frozenset(
     {
         "agent_id",

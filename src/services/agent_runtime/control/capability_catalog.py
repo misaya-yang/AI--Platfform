@@ -44,6 +44,17 @@ async def fetch_capability_catalog(
 ) -> None:
     """Fetch stable read-only schemas before the first Thread is created."""
 
+    if capability_allowlist == [] and not readonly.get("attachment_tools"):
+        # A signed, explicitly empty Agent binding has no catalog dependency.
+        # In particular an anonymous model-only publication must not inherit
+        # discovery bridges or request an authenticated user's tool catalog.
+        readonly.update(tools=[], mcp=[], deferred=[], capability_allowlist=[], attachment_tools=[])
+        readonly["_thread_capabilities"] = {
+            **{key: value for key, value in readonly.items() if key != "_thread_capabilities"},
+            "responses_tool_names": None,
+        }
+        return
+
     try:
         query = CapabilityCatalogQuery.create(
             tenant_id=tenant_id,

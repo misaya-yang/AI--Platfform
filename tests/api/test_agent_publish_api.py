@@ -32,6 +32,19 @@ from src.api.v1 import agents as agents_module
 from src.api.v1.agents import publication_router, router
 from src.core.auth.user_resolver import UserContext
 
+
+def test_equivalent_public_expiry_serializations_have_one_snapshot_identity():
+    from src.api.v1._agent_runtime_routes.resolution import _channel_policy
+
+    policies = [
+        _channel_policy({"publication": {"policy": {"expires_at": expiry}}}, channel="hosted")
+        for expiry in ("2027-01-01T00:00:00Z", "2027-01-01T00:00:00+00:00", "2027-01-01T05:00:00+05:00")
+    ]
+    assert len({runtime_sha256(policy) for policy in policies}) == 1
+    assert policies[0]["expires_at"] == "2027-01-01T00:00:00+00:00"
+    changed = _channel_policy({"publication": {"policy": {"expires_at": "2027-01-02T00:00:00Z"}}}, channel="hosted")
+    assert runtime_sha256(changed) != runtime_sha256(policies[0])
+
 AGENT_ID = "11111111-1111-4111-8111-111111111111"
 DRAFT_ID = "22222222-2222-4222-8222-222222222222"
 EVALUATION_ID = "33333333-3333-4333-8333-333333333333"

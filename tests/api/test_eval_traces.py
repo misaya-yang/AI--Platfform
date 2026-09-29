@@ -695,6 +695,8 @@ class ExampleFromTraceRepository(AgentTraceRepository):
         }
 
     async def fetchrow(self, _query: str, *args: Any) -> dict[str, Any] | None:
+        if _query.lstrip().startswith("SELECT * FROM eval_examples"):
+            return None
         self.insert_args = args
         return {
             "example_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",

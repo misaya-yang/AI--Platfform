@@ -198,6 +198,28 @@ def test_published_empty_capabilities_remain_closed() -> None:
     )
 
 
+@pytest.mark.parametrize("channel", ["preview", "api", "hosted_private"])
+@pytest.mark.parametrize("mode", ["auto", "tool", "off"])
+async def test_agent_knowledge_binding_exposes_only_its_read_tool(channel, mode) -> None:
+    snapshot = {
+        "agent_spec": {"channel": channel},
+        "capabilities": [],
+        "knowledge": {"datasets": ["kb-authorized"], "retrieval": {"mode": mode}},
+    }
+    allowlist = AgentRuntimeControlPlane._snapshot_capability_allowlist(snapshot)
+    descriptor = {
+        "id": "search_knowledge_base", "name": "search_knowledge_base",
+        "version": None, "schema_hash": "sha256:" + "a" * 64,
+    }
+    unrelated = {**descriptor, "id": "write_file", "name": "write_file"}
+    allowed = AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
+        [descriptor, unrelated], allowlist,
+    )
+    assert allowed == ([descriptor] if mode != "off" else [])
+    snapshot["knowledge"]["datasets"] = []
+    assert AgentRuntimeControlPlane._snapshot_capability_allowlist(snapshot) == []
+
+
 def test_responses_tool_controls_are_preserved_in_runtime_readonly_snapshot() -> None:
     payload = AgentRuntimeControlPlane._readonly_capability_payload(
         {
@@ -765,6 +787,11 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert database.issued_snapshot["model"]["wire_protocol"] == "responses_v1"
     assert database.issued_snapshot["parameters"] == {"temperature": 0.2}
     assert database.issued_snapshot["input"] == {"message": "你好"}
+    frozen = database.issued_snapshot["eval_fingerprint"]
+    assert frozen["system_prompt_hash"] == runtime_sha256(database.issued_snapshot["instructions"]).removeprefix("sha256:")
+    assert frozen["tool_schema_hash"] == runtime_sha256(
+        AgentRuntimeControlPlane._dynamic_tools(database.issued_snapshot["readonly_capabilities"])
+    ).removeprefix("sha256:")
     assert database.issued_snapshot["memory"]["policy"] == {
         "authoritative_profile": "basic",
         "agent_memory_mode": "user",

@@ -1,4 +1,6 @@
-# R3 Agent 与 Eval 安全增量执行记录（CANDIDATE_80）
+# R3 Agent 与 Eval 执行记录（历史 CANDIDATE_80 → 本地 R3 完成）
+
+> **2026-09-29 最新结论：J14～J18 本地真实功能验收已完成。** 当前收尾分支为 `codex/r3-agent-eval-closeout-20260929`，用户授权验收后提交并普通推送；下文“未完成”等状态是各次历史记录。最终矩阵、276 项回归与验证边界见 [完整收尾报告](r3-agent-eval-closeout-2026-09-29.md)，状态权威为 runbook 的 `loop-state.json`。
 
 基线 `main@8b3a877a`，工作分支 `codex/r3-agent-eval-20260928`。用户在收口阶段授权提交并本地合入 `main`，未授权推送。范围、并行文件归属和状态以 `deploy/runbooks/r3-agent-eval-2026-09-28/` 为准。此记录区分代码/自动化已通过与 J14～J18 尚未完成的真实验收；**不声明完整 R3 已完成**。
 
@@ -98,3 +100,55 @@
 | 独立 review | reviewer 提出的取消事件和旧版首轮指令两个确定缺口已修并复核；最终静态复核未发现剩余确定合入阻塞。扫描终态 run 缺少匹配时间排序的索引，是未压测的规模风险，未伪称已验证性能。 |
 
 仍未把 J16～J18 的五类行为全部跑出可发布质量证据；真实裁判/provider 故障、双角色/公开受众矩阵与内置浏览器登录后流程未在本轮完整验收。故该提交是可合入安全增量，**完整 R3 保持进行中**。
+
+## 2026-09-29 直接收尾
+
+接手时 `main` 与本地 `origin/main` 均为 `561f5f5a`，只有 13 份既有 R1 未跟踪证据，全部保留。本轮固定为已有升级的运行缺陷与核心实机验收，不启动 R4/R5；新增修复尚未提交或推送。
+
+### 五个实际缺陷与修正
+
+1. **Knowledge 冷启动失败**：数据库已到 epoch 10，共享兼容上限仍为 7。仅把上限补到 10；真实 manifest 启动测试仍拒绝旧版与未来版本，没有修改数据库。
+2. **部分 Trace 恢复缺明细**：主记录先写入、span/event 未写完时，恢复只补 outbox，后续永久跳过。现在先锁定并验证 scope，再按唯一键补齐缺失子记录，最后写 outbox；不覆盖已有证据、不重放运行。
+3. **KB-only Agent 无法检索**：KB bindings 与普通 capabilities 分开存储，空 allowlist 把检索工具过滤掉。现在对已授权 KB 的 auto/tool 模式补入 `search_knowledge_base`；off、空 KB、无关工具仍关闭，Thread/Turn 共用投影。
+4. **真实评测缺指纹**：旧 Eval 依赖实际未收到的 context_budget 事件取得指令和工具 hash。现在持久 Turn snapshot 记录最终 base/developer instructions 与 dynamicTools 的 canonical SHA-256，Eval 仅读取两个 hash；旧缺值继续缺失，门禁不放松。
+5. **已有终态 Trace 阻断 Eval 恢复**：普通 reconciler 先写终态 Trace 后，Eval 未读取模型账本，因缺 model_ref_verified 拒绝。现在恢复分支只读原 run 的账本、与 snapshot 匹配的 Session/Agent Version pin，补足评分观察并校验模型/版本；不启动候选、不重放调用。真实 PostgreSQL 只读连接上的恢复复验通过，模型/工具调用为 0。
+
+候选为 `561f5f5a` 加本轮六个生产文件；排序后文件哈希清单的 SHA-256：`c25c7a8a41356db81c5eab562b6487bbaaab3153ee7ce7db6eccf59998116078`。明细在 `tmp/r3-closure-candidate.json`，Gateway、Knowledge API/worker 的 10 组相关文件比较一致。前端未修改，容器入口与本地 dist 哈希一致。
+
+### 实际验收
+
+| 层 | 结果 |
+| --- | --- |
+| 定向测试 | 7 个受影响 Python 文件 **117 passed**；`tmp/r3-closure-focused.log` |
+| 门禁 | `make verify-assistant-runtime-dev` **5/5 组通过**；`make verify-eval-dev`、改动文件 Ruff、`make harness-check`、`make architecture-boundary-gate` 均退出 0。Web 门禁提示本机 Node 24 与建议 Node 22 不同，检查通过 |
+| Trace 真实 PostgreSQL | `uv run --all-packages --extra test python tmp/r3_closure_trace_sql.py` 在连接私有临时表模拟主记录已写、明细未写；恢复两次后 Trace/span/event/outbox 各 **1**。实际运行表零写入，模型/工具零调用 |
+| Eval 恢复真实账本 | `uv run --all-packages --extra test python tmp/r3_closure_eval_resume.py` 使用只读连接和本轮真实 A 结果，模拟终态 Trace 缺少 Eval metadata；恢复原 Version/model/usage 并补评分观察成功，candidate.run 未调用。是受控恢复分支实测，不夸大为所有进程崩溃场景 |
+| 独立 review | `/root/closure_review` 复现 Trace 缺口，修正后独立运行 **14 项 Trace 测试通过**；最后的 Eval 恢复修正又独立运行 **14 项模型证据测试通过**。KB 与 fingerprint 最终 diff 静态复核未见新增硬问题。reviewer 未操作共享运行资源 |
+| Docker | 恢复原有容器并用 `make hot-update` 同步；未删除容器/卷、未执行迁移。`make validate` 和最终 `make status` 通过；日志 `tmp/r3-closure-status.log` |
+| 真实浏览器 | 现存账号、`playwright.live.config.ts`：`agent-studio-live.spec.ts` **2 passed，1 disabled-feature 用例跳过**；`agent-publish-live.spec.ts` **1 passed**。覆盖草稿、模型回复、r1 运行中保存 r2、刷新、新预览、内部发布及保留旧会话的回滚 |
+| Codex 内置浏览器 | 用户正常登录后：草稿 r2 新建隔离会话，实际执行知识检索，得到 **KITE-R2-52、520 CNY/day** 及文档来源；刷新后同 session 回答仍在。error/warn 日志为空、无错误遮罩。截图 `tmp/r3-closure-iab-20260929.png`，session=`f3c10d15-95cf-44ca-bd95-6e5c1ade6746` |
+
+### 固定 A/B：正向结果与失败均保留
+
+两例分别验证已知事实与无答案，不冒充完整五类行为矩阵。数据集 manifest=`c590544804a28d56835f086991538346978bbfd284f80996e0b866ebaafabc02`，Agent=`936ca430-9df4-4412-8e0b-fb0cf188c6e0`。
+
+- 修正前 A=`2722445f-5446-40c3-bca0-5e618c96002b`、B=`26615d37-ef50-4ee5-8101-435bab7bd22a` 均 1/2；事实题无工具而回答未知，比较缺指纹，原失败保留。
+- 修正后 A=`b7aa597f-169d-4d61-a8c7-16759587800b`，固定 Version=`7ca349cd-f47d-4832-b39e-6b9cf4ff8fa9`：**执行和评分 2/2**，fingerprint_complete=true，来源 version=4/hash=`932430033b82aaf3e303722bf0deac86f9f09f664187649cfcbe5faa724611d7`。gate=warning，不称足够发布质量证据。
+- 修正后 B=`61231708-25cf-49a2-925f-ad7c4c318ed7`，固定 Version=`b8f4d0eb-f117-48be-9a0c-734d46db73c4`：2 次模型调用均 unknown/stream_interrupted，case=failed/unscored，run=failed、gate=unavailable，比较拒绝。根因尚未确定为平台或上游，不盲目重放、不修改断言。
+
+### 剩余边界
+
+五类修复及上述核心路径已验证，**完整 R3 仍未通过**。仍保留固定 A/B 正向质量比较、完整五类行为/裁判故障/双角色受众矩阵；R2 真实双租户及已配置连接器验收；R1 图片 CDN 原前提。IAB 登录阻塞已解除，不能继续作为挂起理由。没有把受控恢复分支测试称为完整 Eval 崩溃矩阵验收；后续应针对具体未验项收口，不自动扩为全平台开发。
+
+## 2026-09-29 完整 J14～J18 收尾（进行中）
+
+用户明确选择“继续补齐 J14～J18 全部验收，达到完整 R3 后再提交推送”。本轮工作分支 `codex/r3-agent-eval-closeout-20260929`，基线 `561f5f5a`；完整验收之前不提交或推送。保留既有 13 份 R1 未跟踪证据。
+
+- 重跑原七文件定向回归：117 passed；原六生产文件与上一候选哈希一致。Ruff、Harness、架构边界、Runtime 5/5 分组与 Eval dev 门禁退出 0；Doctor 只有 Docker 3 GiB 内存建议。
+- 新独立固定 B 运行 `6fb21182-dec6-4df6-9d2b-f915269119de`，相同 Version/manifest，执行两例成功；旧 `61231708-25cf-49a2-925f-ad7c4c318ed7` 的未知失败保留。原中断不能由现有证据归因于平台或上游。
+- 逐例回读发现 B 无答案回复只是引用预期短语，旧 contains 规则将其判通过；不能据此宣称语义通过。新增可选完整响应断言 `output_equals`，新修订重验，旧评分不改。精确断言及相关评分回归 118 passed。
+- 已分类协议故障原来只留下泛化 stream_interrupted，新增两例回归先失败后通过，保留精确错误码且继续把已分发结果标 unknown、不重试、不补造 usage。模型与内部 API 定向 67 passed；修正了既有 facade 签名测试缺少 source_access_checker 的预期。
+- 既有普通成员正常登录核实为 `agent-studio-isolation-dcac20a12618`，与专用管理员同属 default；未新建/重置账号。建立独立 KB `kb_r3_final_1790704217`、文档 `c260feeb-063c-48cd-8401-95ed8a4e8c62`、Agent `441d6434-127f-4651-884e-4afd050e4307`，只含合成事实，并授予该成员本夹具权限。
+- 当前聊天 IAB 首次调用超时，重取后可用；用户正常登录后已确认 dashboard 与 Agent 目录。新会话的状态单独验收，不能沿用先前截图。
+
+完整矩阵仍在执行，`loop-state.json` 是状态权威；本段不声明完整 R3 通过。

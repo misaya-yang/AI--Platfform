@@ -242,6 +242,9 @@ async def stream(
             async with contextlib.aclosing(chunks):
                 async for chunk in chunks:
                     yield chunk
+        except AgentModelPlaneError as exc:
+            await self._fail_call(call.call_id, exc.code, dispatched=True)
+            raise
         finally:
             api_key = ""
             await self._mark_unknown_if_dispatched(call.call_id)
@@ -427,6 +430,9 @@ async def stream(
         self._log_model_plane_timing("chat_completions", call, timing)
         for chunk in terminal_chunks:
             yield chunk
+    except AgentModelPlaneError as exc:
+        await self._fail_call(call.call_id, exc.code, dispatched=True)
+        raise
     finally:
         # Drop the local reference promptly; never retain tenant credentials
         # in caches, snapshots, exceptions, or telemetry.

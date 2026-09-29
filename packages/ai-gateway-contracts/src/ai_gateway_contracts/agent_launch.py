@@ -437,6 +437,15 @@ class ResolvedAgentLaunchV1:
         turn_policy: Mapping[str, Any],
     ) -> ResolvedAgentLaunchV1:
         legacy = copy.deepcopy(dict(snapshot))
+        channel_policy = legacy.get("channel_policy")
+        if isinstance(channel_policy, dict):
+            if set(channel_policy) - (_CHANNEL_POLICY_KEYS | {"expires_at"}):
+                raise ResolvedAgentLaunchError("RESOLVED_AGENT_LAUNCH_CHANNEL_INVALID")
+            # Expiry belongs to the Gateway publication access check and
+            # release fingerprint. The established Runtime wire has three
+            # permission fields and must not receive publication metadata.
+            channel_policy = {key: value for key, value in channel_policy.items()
+                              if key in _CHANNEL_POLICY_KEYS}
         identity = {
             "tenant_id": legacy.get("tenant_id"),
             "user_id": user_id,
@@ -465,7 +474,7 @@ class ResolvedAgentLaunchV1:
                 "mode": normalized_turn_policy.get("memory_mode"),
                 "profile": normalized_turn_policy.get("memory_profile"),
             },
-            "channel_policy": legacy.get("channel_policy"),
+            "channel_policy": channel_policy,
             "runtime_inputs": {
                 "readonly_capabilities": copy.deepcopy(dict(readonly_capabilities))
             },

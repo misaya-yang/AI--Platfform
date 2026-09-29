@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_gateway_core.billing import build_pricing_snapshot
+from ai_gateway_core.eval.dataset_manifest import build_eval_dataset_manifest
 
 from .base import BaseRepository
+from .runtime_trace_dimensions import bind_runtime_trace_dimensions
 
 EXAMPLE_METADATA_PATCH_KEYS = (
     "expected_trajectory",
@@ -1059,6 +1061,12 @@ class AgentTraceRepository(BaseRepository):
             trace.get("source_adapter") or "api",
             _coerce_timestamptz(trace.get("retention_expires_at")),
         )
+        if trace.get("source_adapter") == "gateway.agent_runtime":
+            await bind_runtime_trace_dimensions(
+                self, trace_id=trace_id, tenant_id=tenant_id,
+                user_id=trace.get("user_id") or created_by,
+                session_id=trace.get("session_id"),
+            )
         for span in trace.get("spans") or []:
             await self._upsert_ingested_span(trace_id, span)
         for event in trace.get("events") or []:
@@ -1220,76 +1228,12 @@ class AgentTraceRepository(BaseRepository):
         user_id: str | None = None,
         trace_family: str = "assistant",
     ) -> dict[str, Any] | None:
-        detail = await self.get_trace_detail(
-            tenant_id=tenant_id,
-            trace_id=payload["source_trace_id"],
-            user_id=user_id,
-            trace_family=trace_family,
+        from .trace_example_import import import_trace_example
+
+        return await import_trace_example(
+            self, tenant_id=tenant_id, dataset_id=dataset_id, created_by=created_by,
+            payload=payload, user_id=user_id, trace_family=trace_family,
         )
-        if not detail:
-            return None
-        trace = detail["trace"]
-        input_preview = str(trace.get("input_preview") or "")
-        input_payload = {
-            "message": input_preview,
-            "input_preview": input_preview,
-            "thread_id": trace.get("thread_id") or trace.get("session_id"),
-            "run_id": trace.get("run_id"),
-            "request_id": trace.get("request_id"),
-            "metadata": trace.get("metadata") or {},
-        }
-        expected_output = payload.get("expected_output") or {
-            "output_preview": trace.get("output_preview") or "",
-        }
-        metadata = dict(payload.get("metadata") or {})
-        trace_metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
-        runtime_trajectory = (
-            trace_metadata.get("runtime_trajectory")
-            if isinstance(trace_metadata.get("runtime_trajectory"), dict)
-            else {}
-        )
-        spans = detail.get("spans") if isinstance(detail.get("spans"), list) else []
-        span_kinds = sorted(
-            {
-                str(span.get("span_kind") or "")
-                for span in spans
-                if isinstance(span, dict) and span.get("span_kind")
-            }
-        )
-        metadata.setdefault(
-            "expected_trajectory",
-            {
-                "required_span_kinds": span_kinds,
-                "runtime": {
-                    "expected_exit_reason": runtime_trajectory.get("exit_reason")
-                    or trace.get("status"),
-                },
-            },
-        )
-        metadata.setdefault("assertions", [{"type": "no_sensitive_output"}])
-        metadata["behavior_confirmed"] = False
-        row = await self.fetchrow(
-            """
-            INSERT INTO eval_examples (
-                dataset_id, tenant_id, split, input, expected_output, metadata,
-                source_trace_id, source_span_id, created_by
-            ) VALUES (
-                $1::uuid, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb,
-                $7::uuid, $8::uuid, $9
-            )
-            RETURNING *
-            """,
-            dataset_id,
-            tenant_id,
-            payload.get("split") or "regression",
-            self._json_dumps(input_payload),
-            self._json_dumps(expected_output),
-            self._json_dumps(metadata),
-            payload["source_trace_id"],
-            payload.get("source_span_id"),
-            created_by,
-        )
-        return self._decode_eval_row(row) if row else None
 
     async def create_example(
         self,
@@ -1844,6 +1788,9 @@ class AgentTraceRepository(BaseRepository):
                 AND s.user_id = r.user_id AND s.session_id = r.session_id
                 AND (r.runtime_snapshot_id IS NULL OR s.snapshot_id = r.runtime_snapshot_id)
                LEFT JOIN agent_traces t ON t.trace_id = r.run_id
+               LEFT JOIN assistant.sessions a
+                 ON a.session_id = r.session_id AND a.tenant_id = r.tenant_id
+                AND a.user_id = r.user_id
                WHERE r.engine = 'agent_runtime'
                  AND r.status IN ('completed', 'succeeded', 'failed', 'cancelled')
                  AND COALESCE(r.finished_at, r.updated_at) >= $1::timestamptz
@@ -1854,12 +1801,17 @@ class AgentTraceRepository(BaseRepository):
                      t.tenant_id = r.tenant_id AND t.user_id = r.user_id
                      AND t.session_id = r.session_id
                      AND t.workflow_kind = 'agent_runtime_turn'
-                     AND NOT EXISTS (
+                     AND (NOT EXISTS (
                          SELECT 1 FROM agent_trace_outbox o
                          WHERE o.tenant_id = r.tenant_id
                            AND o.job_type = 'trace.ingested'
                            AND o.payload->>'trace_id' = r.run_id::text
-                     )
+                     ) OR (
+                         t.agent_id IS NULL AND a.agent_id IS NOT NULL
+                         AND a.agent_id::text = s.snapshot->'agent_spec'->>'agentId'
+                         AND a.agent_version_id::text IS NOT DISTINCT FROM
+                             s.snapshot->'agent_spec'->>'agentVersionId'
+                     ))
                  ))
                ORDER BY COALESCE(r.finished_at, r.updated_at), r.run_id
                LIMIT $4""",
@@ -2024,35 +1976,7 @@ class AgentTraceRepository(BaseRepository):
                 self._json_dumps(metrics), self._json_dumps(trace["privacy"]),
                 _coerce_timestamptz(trace["retention_expires_at"]),
             )
-            if inserted:
-                span = trace["spans"][0]
-                await conn.execute(
-                    """INSERT INTO agent_trace_spans (
-                         span_id, trace_id, span_kind, name, status, sequence_no,
-                         started_at, ended_at, duration_ms, input_preview,
-                         output_preview, attributes, error_type
-                       ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6,
-                         $7::timestamptz, $8::timestamptz, $9, $10, $11,
-                         $12::jsonb, $13)""",
-                    span["span_id"], run_id, span["span_kind"], span["name"],
-                    span["status"], span["sequence_no"],
-                    _coerce_timestamptz(span["started_at"]),
-                    _coerce_timestamptz(span["ended_at"]), span["duration_ms"],
-                    span["input_preview"], span["output_preview"],
-                    self._json_dumps(span["attributes"]), span["error_type"],
-                )
-                event = trace["events"][0]
-                await conn.execute(
-                    """INSERT INTO agent_trace_events (
-                         event_id, trace_id, event_type, sequence_no, occurred_at,
-                         payload, payload_size_bytes, redacted
-                       ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::timestamptz,
-                         $6::jsonb, 0, TRUE)""",
-                    event_id, run_id, event["event_type"], event["sequence_no"],
-                    _coerce_timestamptz(terminal["created_at"]),
-                    self._json_dumps(event["payload"]),
-                )
-            else:
+            if not inserted:
                 existing = await conn.fetchrow(
                     """SELECT trace_id FROM agent_traces
                        WHERE trace_id = $1::uuid AND tenant_id = $2 AND user_id = $3
@@ -2066,6 +1990,39 @@ class AgentTraceRepository(BaseRepository):
                 )
                 if not existing:
                     return False
+            # A crash during live ingestion may leave only the parent trace.
+            # Fill missing children before enqueueing, without replacing evidence.
+            await bind_runtime_trace_dimensions(
+                conn, trace_id=run_id, tenant_id=tenant_id,
+                user_id=user_id, session_id=session_id,
+            )
+            span = trace["spans"][0]
+            await conn.execute(
+                """INSERT INTO agent_trace_spans (
+                     span_id, trace_id, span_kind, name, status, sequence_no,
+                     started_at, ended_at, duration_ms, input_preview,
+                     output_preview, attributes, error_type
+                   ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6,
+                     $7::timestamptz, $8::timestamptz, $9, $10, $11,
+                     $12::jsonb, $13) ON CONFLICT (span_id) DO NOTHING""",
+                span["span_id"], run_id, span["span_kind"], span["name"],
+                span["status"], span["sequence_no"],
+                _coerce_timestamptz(span["started_at"]),
+                _coerce_timestamptz(span["ended_at"]), span["duration_ms"],
+                span["input_preview"], span["output_preview"],
+                self._json_dumps(span["attributes"]), span["error_type"],
+            )
+            event = trace["events"][0]
+            await conn.execute(
+                """INSERT INTO agent_trace_events (
+                     event_id, trace_id, event_type, sequence_no, occurred_at,
+                     payload, payload_size_bytes, redacted
+                   ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::timestamptz,
+                     $6::jsonb, 0, TRUE) ON CONFLICT (trace_id, sequence_no) DO NOTHING""",
+                event_id, run_id, event["event_type"], event["sequence_no"],
+                _coerce_timestamptz(terminal["created_at"]),
+                self._json_dumps(event["payload"]),
+            )
             payload = {
                 "trace_id": run_id, "trace_family": "assistant",
                 "status": trace["status"], "source_adapter": "gateway.agent_runtime",
@@ -2163,21 +2120,20 @@ class AgentTraceRepository(BaseRepository):
             dataset = await self.get_dataset(tenant_id=tenant_id, dataset_id=str(dataset_id))
             if dataset is None:
                 raise ValueError("eval_dataset_not_found")
-            manifest = [
-                {
-                    key: example.get(key)
-                    for key in (
-                        "example_id", "split", "input", "expected_output", "metadata",
-                        "source_trace_id", "source_span_id",
-                    )
-                }
-                for example in await self.list_example_manifest(
+            examples = [
+                example for example in await self.list_example_manifest(
                     tenant_id=tenant_id, dataset_id=str(dataset_id),
-                )
-                if is_runnable_dataset_example(example)
+                ) if is_runnable_dataset_example(example)
+            ]
+            frozen_dataset = build_eval_dataset_manifest(dataset, examples)
+            manifest = [
+                {key: example.get(key) for key in (
+                    "example_id", "split", "input", "expected_output", "metadata",
+                    "source_trace_id", "source_span_id",
+                )} for example in examples
             ]
             manifest.sort(key=lambda item: str(item.get("example_id") or ""))
-            dataset_manifest_hash = _canonical_hash(manifest)
+            dataset_manifest_hash = _canonical_hash(frozen_dataset)
             target_snapshot.update({
                 "dataset_version": dataset.get("version"),
                 "dataset_manifest_hash": dataset_manifest_hash,
@@ -2249,7 +2205,7 @@ class AgentTraceRepository(BaseRepository):
                 tenant_id, self._json_dumps(job_payload),
             )
 
-        return {"job_id": job["job_id"], "status": "queued", "run_id": decoded_run.get("run_id")}
+        return {"job_id": str(job["job_id"]), "status": "queued", "run_id": decoded_run.get("run_id")}
 
     async def enqueue_live_experiment_run(
         self,
@@ -2267,32 +2223,19 @@ class AgentTraceRepository(BaseRepository):
         baseline_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Freeze one live candidate run and enqueue it atomically."""
-        manifest: list[dict[str, Any]] = []
+        dataset = await self.get_dataset(tenant_id=tenant_id, dataset_id=dataset_id)
+        if dataset is None:
+            raise ValueError("eval_dataset_not_found")
+        frozen_dataset = build_eval_dataset_manifest(dataset, examples)
+        manifest = frozen_dataset["examples"]
         seen_case_ids: set[str] = set()
-        for example in examples:
-            metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
-            case_id = str(metadata.get("case_id") or example.get("example_id") or "").strip()
+        for case in manifest:
+            case_id = case["case_id"].strip()
             if not case_id or case_id in seen_case_ids:
                 raise ValueError(
                     f"Dataset contains missing or duplicate case_id: {case_id or '<empty>'}"
                 )
             seen_case_ids.add(case_id)
-            manifest.append(
-                {
-                    "case_id": case_id,
-                    "example_id": str(example.get("example_id") or "") or None,
-                    "input": example.get("input") or {},
-                    "expected_output": example.get("expected_output") or {},
-                    "expected_trajectory": metadata.get("expected_trajectory") or {},
-                    "assertions": metadata.get("assertions") or [],
-                    "metadata": {
-                        key: value
-                        for key, value in metadata.items()
-                        if key not in {"expected_trajectory", "assertions"}
-                    },
-                }
-            )
-        manifest.sort(key=lambda item: item["case_id"])
         evaluator_manifest = sorted(
             [
                 {
@@ -2312,7 +2255,7 @@ class AgentTraceRepository(BaseRepository):
             ],
             key=lambda item: str(item.get("evaluator_id") or ""),
         )
-        dataset_manifest_hash = _canonical_hash(manifest)
+        dataset_manifest_hash = _canonical_hash(frozen_dataset)
         evaluator_suite_hash = _canonical_hash(evaluator_manifest)
         public_snapshot = {
             **target_snapshot,
@@ -2510,6 +2453,23 @@ class AgentTraceRepository(BaseRepository):
             frozen_cases = _retry_source_cases(
                 [self._decode_eval_row(dict(row)) for row in rows], case_ids,
             )
+            for case in frozen_cases:
+                original_turn = (case.get("runtime_handle") or {}).get("turn_id") or case.get("candidate_trace_id")
+                if original_turn and await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM assistant_capability_executions
+                           WHERE tenant_id = $1 AND run_id = $2::uuid
+                         ) OR EXISTS (
+                           SELECT 1 FROM assistant_runtime_items
+                           WHERE tenant_id = $1 AND turn_id = $2::text
+                             AND event_type IN ('compat/v1/tool_call_start',
+                                                'compat/v1/tool_call_end', 'compat/v1/tool_result')
+                         )""",
+                    tenant_id, str(original_turn),
+                ):
+                    # Older Trace projections can omit tools. A terminal model
+                    # receipt alone never proves the original turn had no effects.
+                    raise ValueError(f"eval_retry_side_effect_unconfirmed:{case['case_id']}")
             frozen_cases.sort(key=lambda row: row["case_id"])
             manifest = [
                 {
@@ -2706,8 +2666,16 @@ class AgentTraceRepository(BaseRepository):
                       s.snapshot->>'kernel_revision' AS runtime_revision,
                       s.snapshot->'pricing'->'snapshot' AS pricing_snapshot,
                       s.snapshot->'parameters' AS parameters,
-                      s.snapshot->'limits' AS limits
+                      s.snapshot->'limits' AS limits,
+                      s.snapshot->'eval_fingerprint' AS eval_fingerprint,
+                      a.agent_id, a.agent_version_id, a.agent_spec_hash,
+                      a.runtime_fingerprint AS agent_runtime_snapshot_hash
                FROM assistant_runtime_snapshots s
+               LEFT JOIN assistant.sessions a
+                 ON a.session_id = s.session_id AND a.tenant_id = s.tenant_id
+                AND a.user_id = s.user_id
+                AND a.agent_id::text = s.snapshot->'agent_spec'->>'agentId'
+                AND a.agent_version_id::text = s.snapshot->'agent_spec'->>'agentVersionId'
                JOIN assistant_runtime_model_leases l
                  ON l.snapshot_id = s.snapshot_id AND l.run_id = s.run_id
                 AND l.tenant_id = s.tenant_id AND l.session_id = s.session_id
@@ -2718,7 +2686,7 @@ class AgentTraceRepository(BaseRepository):
         if row is None:
             return None
         result = dict(row)
-        for key in ("pricing_snapshot", "parameters", "limits"):
+        for key in ("pricing_snapshot", "parameters", "limits", "eval_fingerprint"):
             result[key] = self._decode_json(result.get(key), default={})
         result["calls"] = await self.fetch(
             """SELECT call_id, status, input_tokens, output_tokens, cost_microusd,
@@ -2726,6 +2694,15 @@ class AgentTraceRepository(BaseRepository):
                FROM assistant_runtime_model_calls
                WHERE tenant_id = $1 AND session_id = $2 AND run_id = $3::uuid
                ORDER BY reserved_at, call_id""",
+            tenant_id, run_case_id, run_id,
+        )
+        result["tool_executions"] = await self.fetch(
+            """SELECT execution_id, capability_id, status, effect, approval_status,
+                      dispatched_at, terminal_at, error_code,
+                      result_summary->>'quiz_id' AS quiz_id
+               FROM assistant_capability_executions
+               WHERE tenant_id = $1 AND session_id = $2 AND run_id = $3::uuid
+               ORDER BY created_at, execution_id""",
             tenant_id, run_case_id, run_id,
         )
         return result

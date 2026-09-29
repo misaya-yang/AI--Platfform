@@ -119,6 +119,10 @@ async def responses(request: Request):
         return response
     except AgentModelPlaneError as exc:
         await source.aclose()
+        logger.warning(
+            "Agent model stream preflight rejected code=%s status=%s",
+            exc.code, exc.status_code,
+        )
         return _error(exc)
     except StopAsyncIteration:
         await source.aclose()

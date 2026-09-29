@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
@@ -304,7 +305,10 @@ def _channel_policy(resolution: dict[str, Any], *, channel: str) -> dict[str, An
         ],
     }
     if isinstance(raw.get("expires_at"), str) and raw["expires_at"]:
-        policy["expires_at"] = raw["expires_at"]
+        expiry = datetime.fromisoformat(raw["expires_at"].replace("Z", "+00:00"))
+        if expiry.tzinfo is None or expiry.utcoffset() is None:
+            raise ValueError("Publication expiry must include a timezone")
+        policy["expires_at"] = expiry.astimezone(timezone.utc).isoformat()
     return policy
 
 

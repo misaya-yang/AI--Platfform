@@ -560,7 +560,7 @@
     "citationOther": "返回 {{count}} 条引用。",
     "knowledgeDetail": "已按照保存的 Dataset 策略检索。",
     "runtimeError": "预览运行时失败。",
-    "emptyResponse": "运行时已完成，但没有文本回复。",
+    "emptyResponse": "该轮运行没有文本回复。",
     "failed": "预览失败",
     "messagePlaceholder": "向此 Agent 发送消息",
     "sendLabel": "发送预览消息",

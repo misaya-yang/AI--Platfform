@@ -153,6 +153,19 @@ async def seed_startup_providers(
                     )
                     log.info(f"Created provider {provider_id} in database")
                 elif api_key:
+                    if (
+                        existing.get("has_api_key")
+                        and existing.get("api_type") == config["api_type"]
+                        and (base_url is None or existing.get("base_url") == base_url)
+                    ):
+                        runtime_config = await provider_service.get_runtime_provider_config(
+                            tenant_id, provider_id,
+                        )
+                        if runtime_config.get("api_key") == api_key:
+                            # Encryption is nondeterministic. Re-encrypting an
+                            # unchanged credential advances updated_at and
+                            # invalidates model leases for still-running turns.
+                            continue
                     await provider_service.update_provider(
                         tenant_id=tenant_id,
                         provider_id=provider_id,

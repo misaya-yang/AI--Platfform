@@ -1,40 +1,100 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
   "domain_id": "r3-agent-eval",
-  "lifecycle": "active",
-  "status": "in_progress",
+  "lifecycle": "completed",
+  "status": "completed_local",
   "goal": "完成 AG-01～09、EV-01～08 与 J14～J18 的 Agent 草稿、预览、评测、发布、使用、回滚、反馈闭环。",
-  "owner": "root integration session",
+  "owner": "primary final J14-J18 acceptance session",
   "base_sha": "8b3a877a",
-  "branch": "codex/r3-agent-eval-20260928",
-  "integrated_main_sha": "f733eb5f",
-  "active_phase": "R3-safe-increment-closeout",
-  "active_feature": "Close reviewed fixed Version and durable Trace increments; preserve remaining J16～J18 acceptance gaps",
-  "active_package": "R3-after-CANDIDATE_80",
-  "next_action": "Complete remaining J14/J15 audience-role and approval-cancel live checks, then J16～J18 with reviewed five-category KB behavior contracts, controlled judge/provider failures and a quality-passing fixed A/B comparison. Recheck authenticated Codex IAB when login is available; keep evidence tiers separate and do not label R3 complete.",
-  "last_result": "2026-09-28 final safe increment: fixed Version instructions bound at first V1/V2 Thread creation, selected-run linked publish gate hardened, durable cold-restart Trace reconciliation added. Reviewer found and verified fixes for V1 first Thread instructions and Rust cancelled terminal receipt; no remaining confirmed merge blocker. Focused Python 127/127, Web checks and Eval gates pass. Owned local Docker source hashes and health match; old failed run retained one Trace, one outbox, one model call after restart. Published UI Playwright 11/11 and real Docker publish/rollback 1/1; Codex IAB remains logged out. See reports/product/r3-agent-eval-progress-2026-09-28.md.",
-  "updated_at": "2026-09-28",
-  "blockers": [
-    "Codex IAB is reachable; its local credential-file navigation was rejected by browser security policy, and manual sign-in has been requested without pausing API work",
-    "Real five-case fixed Agent A/B has not passed: A had two stream-interrupted trials and B failed its expected behavior contract; release gate correctly rejects the evidence",
-    "Only one verified existing E2E account is available for real two-tenant/two-role validation",
-    "No public or tenant-visible local Dataset is configured for the full anonymous audience matrix"
+  "branch": "codex/r3-agent-eval-closeout-20260929",
+  "integrated_main_sha": "561f5f5a",
+  "active_phase": null,
+  "active_feature": null,
+  "active_package": null,
+  "next_action": null,
+  "last_result": "Local J14-J18 functional acceptance complete. Immutable A/B five-case runs, live audience/token/embed/expiry, role revocation/rollback, pending Trace import/review, provider/judge failures, selected idempotent retries and original-turn Gateway restart/cancellation verified. Final delta: 276 tests, Eval gate, four receipt UI tests plus one operations-to-feedback-Trace UI test, 21 Gateway source hashes and frontend identity, healthy stack. Studio aggregate 40/40 ran before the last Trace-attribution delta; that delta was covered separately without repeating the aggregate.",
+  "updated_at": "2026-09-29",
+  "blockers": [],
+  "cycle": [
+    "observe",
+    "act",
+    "verify",
+    "review",
+    "integrate",
+    "decide"
   ],
-  "cycle": ["observe", "act", "verify", "review", "integrate", "decide"],
-  "iteration": 3,
+  "iteration": 4,
   "max_iterations": 20,
   "phases": [
-    {"id": "R3-A", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
-    {"id": "R3-B", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
-    {"id": "R3-C", "file": "README.md", "depends_on": [], "status": "complete", "evidence": ["reports/product/r3-agent-eval-progress-2026-09-28.md"], "review": "passed-static"},
-    {"id": "R3-integration", "file": "README.md", "depends_on": ["R3-A", "R3-B", "R3-C"], "status": "in_progress", "evidence": ["reports/agent-studio/agent-studio-regression-v1-result.json", "reports/product/r3-agent-eval-progress-2026-09-28.md", "reports/product/r3-typed-agent-live-2026-09-28.md"], "review": "passed-static-live-partial"}
+    {
+      "id": "R3-A",
+      "file": "README.md",
+      "depends_on": [],
+      "status": "complete",
+      "evidence": [
+        "reports/product/r3-agent-eval-progress-2026-09-28.md"
+      ],
+      "review": "passed-static"
+    },
+    {
+      "id": "R3-B",
+      "file": "README.md",
+      "depends_on": [],
+      "status": "complete",
+      "evidence": [
+        "reports/product/r3-agent-eval-progress-2026-09-28.md"
+      ],
+      "review": "passed-static"
+    },
+    {
+      "id": "R3-C",
+      "file": "README.md",
+      "depends_on": [],
+      "status": "complete",
+      "evidence": [
+        "reports/product/r3-agent-eval-progress-2026-09-28.md"
+      ],
+      "review": "passed-static"
+    },
+    {
+      "id": "R3-integration",
+      "file": "README.md",
+      "depends_on": [
+        "R3-A",
+        "R3-B",
+        "R3-C"
+      ],
+      "status": "complete",
+      "evidence": [
+        "reports/agent-studio/agent-studio-regression-v1-result.json",
+        "reports/product/r3-agent-eval-progress-2026-09-28.md",
+        "reports/product/r3-typed-agent-live-2026-09-28.md",
+        "reports/product/r3-agent-eval-closeout-2026-09-29.md",
+        "reports/product/r3-agent-eval-closeout-2026-09-29.json"
+      ],
+      "review": "passed-local-functional"
+    }
   ],
-  "pending_acceptance": ["J14", "J15", "J16", "J17", "J18"],
+  "pending_acceptance": [],
   "execution_authorization": {
-    "scope": "R3 AG-01～09 and EV-01～08 only; preserve R1/R2 completed increments",
-    "parallel_agents": "User-authorized three disjoint code streams; root owns integration and shared live runtime",
+    "scope": "User explicitly selected full J14-J18 R3 acceptance on 2026-09-29; commit and ordinary push after acceptance. No R4/R5 development.",
+    "parallel_agents": "No new delegation requested; primary writer owns code and singleton runtime.",
     "commit_authorized": true,
-    "local_merge_authorized": true,
-    "push_authorized": true
-  }
+    "local_merge_authorized": false,
+    "push_authorized": true,
+    "commit_push_condition": "Full R3 J14-J18 acceptance passed"
+  },
+  "closeout_receipt": {
+    "date": "2026-09-29",
+    "candidate_sha256": "b563e954626c78ed891d654379f3537216f28a53f32c7059dd4ea26a0fdf70d8",
+    "report": "reports/product/r3-agent-eval-closeout-2026-09-29.md",
+    "git_state": "included-in-verified-closeout-commit",
+    "full_r3_passed": true,
+    "iab_login_blocker_resolved": true
+  },
+  "out_of_scope_carryover": [
+    "R2 cross-tenant/connector live fixtures",
+    "Separate Node 22 run",
+    "General model quality, business SLA and arbitrary Runtime/worker crash recovery"
+  ]
 }
